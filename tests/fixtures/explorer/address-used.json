@@ -1,0 +1,18 @@
+{
+  "status": 200,
+  "body": {
+    "address": "tbtq1zek5r5xh6e52qny5vj6xd6usdpur6x9qt6yxuzddgnekdnwfxwcvqz7qmm2",
+    "script_type": "witness_v2_p2mr",
+    "first_seen_height": 159259,
+    "first_seen": "2026-07-27T20:37:44.000Z",
+    "last_seen": "2026-08-21T18:12:54.000Z",
+    "tx_count": 1397,
+    "total_received": "13456321266703",
+    "total_sent": "280284346065410",
+    "balance": "-266828024798707",
+    "unspent_count": -224,
+    "isDilithium": true
+  },
+  "_recorded": "2026-08-21",
+  "_source": "https://explorer.bitcoinquantum.com"
+}

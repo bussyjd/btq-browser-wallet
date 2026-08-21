@@ -1,0 +1,27 @@
+{
+  "status": 200,
+  "body": {
+    "hash": "00000000035a0298ff41786f60a01995a7ff290b5d80f067b758a494eb470489",
+    "height": 300741,
+    "canonical": true,
+    "prev_hash": "000000000053587e8dafb717d818fa117814448e2dc837a4551ac33d598b56d9",
+    "merkle_root": "f8db8e2ff45ad79ac6965f5c25e29a591864acaf6df3711ba164d5132e1dde99",
+    "timestamp": "2026-08-21T18:12:54.000Z",
+    "nonce": "3171598877",
+    "bits": "1c036e23",
+    "difficulty": "74.62960903546661",
+    "version": 536870912,
+    "size": 11737,
+    "weight": 18652,
+    "stripped_size": 461,
+    "tx_count": 2,
+    "total_fees": "600000",
+    "subsidy": "500000000",
+    "miner_address": "tbtq1zek5r5xh6e52qny5vj6xd6usdpur6x9qt6yxuzddgnekdnwfxwcvqz7qmm2",
+    "miner_label": null,
+    "median_time": "2026-08-21T18:08:42.000Z",
+    "chainwork": "00000000000000000000000000000000000000000000000000136756e5dff082"
+  },
+  "_recorded": "2026-08-21",
+  "_source": "https://explorer.bitcoinquantum.com"
+}

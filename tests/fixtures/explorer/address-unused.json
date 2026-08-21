@@ -1,0 +1,8 @@
+{
+  "status": 404,
+  "body": {
+    "error": "Address not found"
+  },
+  "_recorded": "2026-08-21",
+  "_source": "https://explorer.bitcoinquantum.com"
+}

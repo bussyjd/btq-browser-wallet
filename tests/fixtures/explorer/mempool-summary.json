@@ -1,0 +1,11 @@
+{
+  "status": 200,
+  "body": {
+    "txCount": 0,
+    "totalVsize": 0,
+    "totalFees": "0",
+    "feeHistogram": []
+  },
+  "_recorded": "2026-08-21",
+  "_source": "https://explorer.bitcoinquantum.com"
+}
