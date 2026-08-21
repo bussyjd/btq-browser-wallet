@@ -1,15 +1,12 @@
 /**
- * Content relay. Forwards inpage messages to the service worker.
- * Never imports vault, keyring, or HD helpers.
+ * Content relay (isolated world). Forwards allowlisted inpage messages to the
+ * service worker. The page-facing provider (src/inpage/btq-provider.js) is
+ * injected by the manifest into the MAIN world, so this file never touches the
+ * page DOM. Never imports vault, keyring, or HD helpers.
  */
 export {};
 
 type RelayReq = { channel: 'btq-wallet'; id: number; kind: 'request'; method: string; params?: unknown };
-
-const script = document.createElement('script');
-script.src = chrome.runtime.getURL('src/inpage/btq-provider.js');
-script.onload = () => script.remove();
-(document.documentElement || document.head).appendChild(script);
 
 window.addEventListener('message', (event: MessageEvent<RelayReq>) => {
   if (event.source !== window) return;
