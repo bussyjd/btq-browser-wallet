@@ -9,6 +9,8 @@ You are building a MetaMask-style **browser extension wallet for Bitcoin Quantum
 (testnet)**. This skill carries the protocol knowledge, the grading rubric, and the
 working conventions. **Read `docs/REFERENCE.md` before writing protocol code** — it has
 every constant with its `btq-core` file:line, already verified against a live node.
+`docs/BTQ_CORE_MAP.md` is the full 95-row BTQ-vs-Bitcoin difference map with coverage
+status per row; `docs/HD_IMPORT.md` explains the import-from-seed design with diagrams.
 
 ## The brief (138 points)
 

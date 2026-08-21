@@ -92,8 +92,9 @@ path exists only in **legacy BDB wallets**, which modern builds cannot create, a
 descriptor wallets generate Dilithium keys outside the descriptor system (so they have no
 descriptor backup). This wallet therefore implements btq-core's scheme faithfully and
 seeds it from a **BIP39 mnemonic**, documenting that mapping as its standard — while also
-accepting a **raw 32-byte HD seed** so a btq-core wallet can be imported. See
-`docs/REFERENCE.md §5`.
+accepting a **raw 32-byte HD seed** so a btq-core wallet can be imported. The full
+design, with the byte-level pipeline drawn out, is in
+[`docs/HD_IMPORT.md`](docs/HD_IMPORT.md); see also `docs/REFERENCE.md §5`.
 
 ## Security model
 
@@ -113,6 +114,8 @@ tests/unit/     crypto, derivation, script, address, golden vectors
 tests/integration/  cross-checks against a live btq-core node (opt-in)
 tests/vectors/  golden.json — the frozen contract with consensus
 scripts/        gen-vectors.ts
-docs/           REFERENCE.md — the protocol, with source anchors
+docs/           REFERENCE.md (protocol, with source anchors) · BTQ_CORE_MAP.md
+                (95 verified BTQ-vs-Bitcoin differences, coverage-tagged) ·
+                HD_IMPORT.md (import-from-seed design, with diagrams)
 .claude/        skill + security-reviewer agent used to build this
 ```
