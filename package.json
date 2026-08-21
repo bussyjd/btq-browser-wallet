@@ -1,0 +1,25 @@
+{
+  "name": "btq-browser-wallet",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Bitcoin Quantum (BTQ) browser wallet — post-quantum ML-DSA-44 / P2MR, testnet",
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "vectors": "tsx scripts/gen-vectors.ts"
+  },
+  "dependencies": {
+    "@noble/hashes": "^1.7.1",
+    "@noble/post-quantum": "^0.3.0",
+    "@scure/base": "^1.2.4",
+    "@scure/bip39": "^1.5.4"
+  },
+  "devDependencies": {
+    "@types/node": "^26.2.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3",
+    "vitest": "^3.0.5"
+  }
+}

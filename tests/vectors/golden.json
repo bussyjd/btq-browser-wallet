@@ -1,0 +1,144 @@
+{
+  "note": "Golden vectors for the BTQ browser wallet. Verified against btq-core; see docs/REFERENCE.md.",
+  "hdSeedHex": "000102030405060708090a0b0c0d0e0f",
+  "masterSeed": "7afd306aff260854a335b3b705289bd973c21ab29a199245304ed850dc5f3e9b",
+  "masterChaincode": "ec933395f479a8029dc450b825fe4004b0e9074871a5084b23a6f3142138c9a8",
+  "masterExtKey": "000000000000000000ec933395f479a8029dc450b825fe4004b0e9074871a5084b23a6f3142138c9a87afd306aff260854a335b3b705289bd973c21ab29a199245304ed850dc5f3e9b",
+  "entries": [
+    {
+      "path": "m/0'/0'/0'",
+      "chain": "external",
+      "index": 0,
+      "keySeed": "740b79e88d222d6d11c395a1bbb7b6032fbae0569e69c9d8a7bc50d190e76ed6",
+      "publicKeySha256": "aa0ff2c22c1bcd68caab1b1864cf22d38d80845b25f737f2b4aeda9613eb5ae5",
+      "leafScriptSha256": "f8eec7ee14582f09dc134f3b253021837283abd9b8b094f5403cc0521c88db17",
+      "tapLeafHash": "dff7337304922a2226c028f3b142681b0190274b2617622199f6582b964a478f",
+      "merkleRoot": "dff7337304922a2226c028f3b142681b0190274b2617622199f6582b964a478f",
+      "scriptPubKey": "5220dff7337304922a2226c028f3b142681b0190274b2617622199f6582b964a478f",
+      "addresses": {
+        "mainnet": "qbtc1zmlmnxucyjg4zyfkq9remzsngrvqeqf6tyctkygve7evzh9j2g78sjyvz3l",
+        "testnet": "tbtq1zmlmnxucyjg4zyfkq9remzsngrvqeqf6tyctkygve7evzh9j2g78sh382t3",
+        "regtest": "qcrt1zmlmnxucyjg4zyfkq9remzsngrvqeqf6tyctkygve7evzh9j2g78sk96awk"
+      }
+    },
+    {
+      "path": "m/0'/0'/1'",
+      "chain": "external",
+      "index": 1,
+      "keySeed": "c79fc7b2cb8a2d413eca37ceaba27a818e6419eaf3774a3677e16c2149168034",
+      "publicKeySha256": "d758be8190be3b5ceabcc03ab7d5786f88f6eb0cd1ebd37d132e61a40212d5b1",
+      "leafScriptSha256": "7cef23b656f4a8de1d256c966159f7abc95a8730e53d2124099fb0d073ac8dba",
+      "tapLeafHash": "684f3d4c984ffb1cda18a36d8f67238991998aa4b8a52fdd77c63385eda34616",
+      "merkleRoot": "684f3d4c984ffb1cda18a36d8f67238991998aa4b8a52fdd77c63385eda34616",
+      "scriptPubKey": "5220684f3d4c984ffb1cda18a36d8f67238991998aa4b8a52fdd77c63385eda34616",
+      "addresses": {
+        "mainnet": "qbtc1zdp8n6nycfla3eksc5dkc7eer3xgenz4yhzjjlhthccectmdrgctqx36lnp",
+        "testnet": "tbtq1zdp8n6nycfla3eksc5dkc7eer3xgenz4yhzjjlhthccectmdrgctqry3hf0",
+        "regtest": "qcrt1zdp8n6nycfla3eksc5dkc7eer3xgenz4yhzjjlhthccectmdrgctqzsvqvg"
+      }
+    },
+    {
+      "path": "m/0'/0'/5'",
+      "chain": "external",
+      "index": 5,
+      "keySeed": "499683af2841c38632638dc8be95f6dfe1766e62b08295cee297072187719046",
+      "publicKeySha256": "de335bc1e3318be2bdf60fb7fdba516f5a32cbb05d508133b533e59ab8ea8931",
+      "leafScriptSha256": "d9fd1cf56f61d4d472d9b0edaefbbed3dabaf4f3177b03dc588916a512a06bde",
+      "tapLeafHash": "e3454900177f2fb673858604f972baa4104a5bfd70d97d5f4c63a7a159e2f446",
+      "merkleRoot": "e3454900177f2fb673858604f972baa4104a5bfd70d97d5f4c63a7a159e2f446",
+      "scriptPubKey": "5220e3454900177f2fb673858604f972baa4104a5bfd70d97d5f4c63a7a159e2f446",
+      "addresses": {
+        "mainnet": "qbtc1zudz5jqqh0uhmvuu9scz0ju465sgy5klawrvh6h6vvwn6zk0z73rqam3csl",
+        "testnet": "tbtq1zudz5jqqh0uhmvuu9scz0ju465sgy5klawrvh6h6vvwn6zk0z73rqcw6s23",
+        "regtest": "qcrt1zudz5jqqh0uhmvuu9scz0ju465sgy5klawrvh6h6vvwn6zk0z73rqe6880k"
+      }
+    },
+    {
+      "path": "m/0'/0'/20'",
+      "chain": "external",
+      "index": 20,
+      "keySeed": "75c8ed843d0d4666fe26ae56cb81ad5b3a6dfa5b9802c7a3a6429bcbefed6552",
+      "publicKeySha256": "e6cf1b630f9a9a9b0b9883a481658cf5ee6a1533e8f6eb324a4939d120ca19ca",
+      "leafScriptSha256": "b04a57e987ea529218928022a9c6bca6e298dfa8bbd8397d0b115443637c9923",
+      "tapLeafHash": "00d5e608b49abc2b1bc9b4059cfaacc60ba42812ba8762e602cae7495610f41b",
+      "merkleRoot": "00d5e608b49abc2b1bc9b4059cfaacc60ba42812ba8762e602cae7495610f41b",
+      "scriptPubKey": "522000d5e608b49abc2b1bc9b4059cfaacc60ba42812ba8762e602cae7495610f41b",
+      "addresses": {
+        "mainnet": "qbtc1zqr27vz95n27zkx7fkszee74vcc96g2qjh2rk9eszetn5j4ss7sdsvqw754",
+        "testnet": "tbtq1zqr27vz95n27zkx7fkszee74vcc96g2qjh2rk9eszetn5j4ss7sdsf49kwm",
+        "regtest": "qcrt1zqr27vz95n27zkx7fkszee74vcc96g2qjh2rk9eszetn5j4ss7sdsgpcptu"
+      }
+    },
+    {
+      "path": "m/0'/1'/0'",
+      "chain": "internal",
+      "index": 0,
+      "keySeed": "6e423f52a79bce0fbda7eb6254a5d4cf08bf6ccd1627321b81e09f990509a12d",
+      "publicKeySha256": "d1d3e87fdb7cfa0caa0e23bbad325f9545ec556a0b6cf388e6860250b9437ff8",
+      "leafScriptSha256": "25a724054b63717fe38e1a3beb7ab493468178a3aed9422f7efe5dad3dfa68ab",
+      "tapLeafHash": "e3f46b063a25de4817d6def52f6d5a04cca9bad7016ad6a26cb3bb2db0eaf475",
+      "merkleRoot": "e3f46b063a25de4817d6def52f6d5a04cca9bad7016ad6a26cb3bb2db0eaf475",
+      "scriptPubKey": "5220e3f46b063a25de4817d6def52f6d5a04cca9bad7016ad6a26cb3bb2db0eaf475",
+      "addresses": {
+        "mainnet": "qbtc1zu06xkp36yh0ys97kmm6j7m26qnx2nwkhq94ddgnvkwajmv82736sg9fhs6",
+        "testnet": "tbtq1zu06xkp36yh0ys97kmm6j7m26qnx2nwkhq94ddgnvkwajmv82736sdszl25",
+        "regtest": "qcrt1zu06xkp36yh0ys97kmm6j7m26qnx2nwkhq94ddgnvkwajmv82736svylg0n"
+      }
+    },
+    {
+      "path": "m/0'/1'/1'",
+      "chain": "internal",
+      "index": 1,
+      "keySeed": "cd0cacc45679d25ea879706dabab59f6ac593cfd693801113a435abd68c5a788",
+      "publicKeySha256": "34e0b4708934506dff485cdaa7cc3fb8bbae171565b4629e00d8ad6160f4af5d",
+      "leafScriptSha256": "22f5d5e57f8e05b8612e13abf1b1dd830f8c93721feb8846b3da037b1a80af70",
+      "tapLeafHash": "02af265004e26f2ffac0986ab3eb2d916ff7ce7ffbfe7c9a164ef7eff052e2c2",
+      "merkleRoot": "02af265004e26f2ffac0986ab3eb2d916ff7ce7ffbfe7c9a164ef7eff052e2c2",
+      "scriptPubKey": "522002af265004e26f2ffac0986ab3eb2d916ff7ce7ffbfe7c9a164ef7eff052e2c2",
+      "addresses": {
+        "mainnet": "qbtc1zq2hjv5qyufhjl7kqnp4t86edj9hl0nnll0l8exskfmm7luzjutpq2wnzd8",
+        "testnet": "tbtq1zq2hjv5qyufhjl7kqnp4t86edj9hl0nnll0l8exskfmm7luzjutpq0mc2hf",
+        "regtest": "qcrt1zq2hjv5qyufhjl7kqnp4t86edj9hl0nnll0l8exskfmm7luzjutpqw09ajw"
+      }
+    },
+    {
+      "path": "m/0'/1'/5'",
+      "chain": "internal",
+      "index": 5,
+      "keySeed": "8654779586e04d2505c8fe27f8f60b2d165bd88dbcd783d009fe347c01708a1d",
+      "publicKeySha256": "2613d81ee30caa58259fbb75f1fbb4745a1c5b247a1f005249d1f1ca8f910c81",
+      "leafScriptSha256": "afb3eee3fe630f26c8d81ada73bb257d84dab33a588fb9be80947c29799e2355",
+      "tapLeafHash": "dbcc6a4d447ed57150a865d372ffb1557a994f9be68b0d0dc850a6699b6769fa",
+      "merkleRoot": "dbcc6a4d447ed57150a865d372ffb1557a994f9be68b0d0dc850a6699b6769fa",
+      "scriptPubKey": "5220dbcc6a4d447ed57150a865d372ffb1557a994f9be68b0d0dc850a6699b6769fa",
+      "addresses": {
+        "mainnet": "qbtc1zm0xx5n2y0m2hz59gvhfh9la324afjnumu69s6rwg2znxnxm8d8aq4keszx",
+        "testnet": "tbtq1zm0xx5n2y0m2hz59gvhfh9la324afjnumu69s6rwg2znxnxm8d8aqsrjccg",
+        "regtest": "qcrt1zm0xx5n2y0m2hz59gvhfh9la324afjnumu69s6rwg2znxnxm8d8aq3h00a0"
+      }
+    },
+    {
+      "path": "m/0'/1'/20'",
+      "chain": "internal",
+      "index": 20,
+      "keySeed": "199cea2a33cb23cc078fa793b1cd66d16601d0eaff3d686173efbd3d0a0ed112",
+      "publicKeySha256": "d5a296e7d8a6a9358077743563804b98cfcf08ca84a308b753962f88e3796c98",
+      "leafScriptSha256": "e18d274b3a5be8ce7f9f3fdf8d5d9ac9dc79155b0bd026ddc5a6f702c62f1731",
+      "tapLeafHash": "5a218f092530e1444b511fcd9242348918c643c04c4b6d65fda0f9227a96fff0",
+      "merkleRoot": "5a218f092530e1444b511fcd9242348918c643c04c4b6d65fda0f9227a96fff0",
+      "scriptPubKey": "52205a218f092530e1444b511fcd9242348918c643c04c4b6d65fda0f9227a96fff0",
+      "addresses": {
+        "mainnet": "qbtc1ztgsc7zf9xrs5gj63rlxeys353yvvvs7qf39k6e0a5rujy75kllcqsuyhcp",
+        "testnet": "tbtq1ztgsc7zf9xrs5gj63rlxeys353yvvvs7qf39k6e0a5rujy75kllcq4f0lz0",
+        "regtest": "qcrt1ztgsc7zf9xrs5gj63rlxeys353yvvvs7qf39k6e0a5rujy75kllcq5ajg8g"
+      }
+    }
+  ],
+  "signature": {
+    "path": "m/0'/0'/0'",
+    "digest": "49ed16e4f13cb01e81abe1fa87d67b21584d42bd2984a3c2680e8100e6b6a540",
+    "length": 2421,
+    "sighashByte": 1,
+    "sha256": "2779d3810b00552fad853ca60e510cb4a966f73a4d981a29c48049385c301c4b"
+  }
+}
