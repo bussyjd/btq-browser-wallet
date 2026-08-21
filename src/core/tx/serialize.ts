@@ -27,9 +27,15 @@ export function concatBytes(...parts: Uint8Array[]): Uint8Array {
 }
 
 export function u32le(n: number): Uint8Array {
-  const b = new Uint8Array(4); new DataView(b.buffer).setUint32(0, n >>> 0, true); return b;
+  if (!Number.isInteger(n) || n < 0 || n > 0xffffffff) {
+    throw new Error('value does not fit in uint32');
+  }
+  const b = new Uint8Array(4); new DataView(b.buffer).setUint32(0, n, true); return b;
 }
 export function u64le(n: bigint): Uint8Array {
+  if (n < 0n || n > 0xffff_ffff_ffff_ffffn) {
+    throw new Error('value does not fit in uint64');
+  }
   const b = new Uint8Array(8); new DataView(b.buffer).setBigUint64(0, n, true); return b;
 }
 export function varint(n: number): Uint8Array {

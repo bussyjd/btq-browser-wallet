@@ -53,8 +53,9 @@ if balances look wrong, check which chain a node is on before blaming the wallet
 ## Commands
 
 ```sh
-npm test                                   # unit + golden vectors (no node needed)
+npm test                                   # unit + security + golden vectors (no node needed)
 npm run typecheck
+npm run build                              # MV3 extension → dist/
 BTQ_REGTEST=1 npx vitest run tests/integration   # cross-check vs regtest node (see README)
 npx tsx scripts/gen-vectors.ts             # regenerate vectors (rule above applies)
 ```

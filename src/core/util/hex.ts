@@ -17,3 +17,8 @@ export function hexToBytes(hex: string): Uint8Array {
 export function reverseBytes(bytes: Uint8Array): Uint8Array {
   return Uint8Array.from(bytes).reverse();
 }
+
+/** Best-effort wipe. JavaScript strings are immutable; only byte buffers can be cleared. */
+export function wipeBytes(bytes: Uint8Array): void {
+  bytes.fill(0);
+}

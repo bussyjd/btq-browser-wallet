@@ -4,10 +4,11 @@ A browser wallet for **Bitcoin Quantum (BTQ)** — post-quantum ML-DSA-44 signat
 P2MR (witness v2) addresses, on **testnet**. Keys are generated, encrypted and used
 entirely inside the extension; balances and history come from the public explorer.
 
-> **Status: Milestone 0 complete.** The cryptographic core is built and *proven against
-> btq-core itself*: addresses this wallet derives are byte-identical to the node's, and a
-> transaction signed here is accepted by the node's real consensus interpreter. UI and
-> extension packaging are next.
+> **Status: create, import, receive, and send are implemented** for testnet. Addresses and
+> signatures were proven against btq-core (Milestone 0). Fees use witness scale **16**
+> (a P2MR input is **4402 WU = 275.125 vB**). The public explorer has no broadcast POST
+> today — Sign still produces a 2421-byte ML-DSA witness; copy the hex to push from a node
+> if the explorer returns 404.
 
 ## Why this order
 
@@ -20,19 +21,55 @@ node, and everything else is built on a verified foundation.
 ## What works today
 
 ```
-src/core/crypto/mldsa.ts    ML-DSA-44 keygen / sign / verify  (2421-byte witness signatures)
-src/core/crypto/hd.ts       btq-core's hardened-only HD derivation over the ML-DSA seed
-src/core/script/p2mr.ts     leaf script, TapLeaf hash, scriptPubKey, commitment check
-src/core/script/address.ts  bech32m witness-v2 encode/decode with strict network binding
-src/core/tx/serialize.ts    transaction serialization (stripped + witness)
-src/core/tx/sighash.ts      BIP341 tapscript sighash, as BTQ reuses it unchanged
+src/core/crypto/          ML-DSA-44, Dilithium HD, BIP39
+src/core/script/          P2MR leaf, bech32m tbtq1z…
+src/core/tx/              serialize, BIP341 sighash, scale-16 fees, coinselect, builder
+src/core/vault/           AES-256-GCM + PBKDF2 vault
+src/core/wallet/          keyring, gap-limit restore, send
+src/background/           MV3 service worker — the only place keys decrypt
+src/content/ + src/inpage/  window.btq site-connect relay (no keys)
+src/ui/                   create / import / unlock / receive / send / activity
 ```
+
+## Load the extension
+
+```sh
+npm install
+npm test            # unit + security + golden vectors (no node required)
+npm run typecheck
+npm run build
+```
+
+1. Open Chrome (or Chromium) at `chrome://extensions`.
+2. Turn on **Developer mode**.
+3. **Load unpacked** and select the `dist/` directory this build just produced.
+4. Pin **BTQ Wallet**. Click the icon.
+
+**Create:** set a password → write the 12 words down (shown once) → confirm three of them.
+**Import:** seed phrase *or* 64-hex-character raw seed (those are different wallets).
+**Receive:** testnet address `tbtq1z…`, QR, copy. A 20-address gap scan hits
+`https://explorer.bitcoinquantum.com`.
+**Send:** Receive tab → Send → paste a `tbtq1z…` address and an amount in tBTQ → Review fee
+→ enter the password → Sign and broadcast. Mainnet `qbtc` and legacy `tdbt` addresses are
+rejected. The approval amounts come from the signed transaction, not from the explorer
+balance field.
+
+**Node / explorer:** click **Testnet** (top right) to set the explorer URL and an optional
+BTQ Core JSON-RPC (`http://127.0.0.1:18332`, user, password). Test connection, then Save.
+Sends then call `testmempoolaccept` + `sendrawtransaction` on that node. The public explorer
+has no broadcast POST; without a node, copy the signed hex.
+
+A page can request `window.btq.request({ method: 'btq_requestAccounts' })`. You approve
+the exact origin in the popup; revoke it under Activity.
+
+The vault is sealed before anything is written to `chrome.storage`. Wrong password yields one
+error and no seed. Locking (or a service-worker restart) wipes keys from memory. See
+[`SECURITY.md`](SECURITY.md).
 
 ## Run the tests
 
 ```sh
-npm install
-npm test            # unit tests + golden vectors (no node required)
+npm test            # unit tests + golden vectors + security tests (no node required)
 npm run typecheck
 ```
 
@@ -109,13 +146,14 @@ the extension packaging.
 ## Layout
 
 ```
-src/core/       pure protocol code — no I/O, no Buffer, fully unit-tested
-tests/unit/     crypto, derivation, script, address, golden vectors
-tests/integration/  cross-checks against a live btq-core node (opt-in)
-tests/vectors/  golden.json — the frozen contract with consensus
-scripts/        gen-vectors.ts
-docs/           REFERENCE.md (protocol, with source anchors) · BTQ_CORE_MAP.md
-                (95 verified BTQ-vs-Bitcoin differences, coverage-tagged) ·
-                HD_IMPORT.md (import-from-seed design, with diagrams)
-.claude/        skill + security-reviewer agent used to build this
+src/core/          pure protocol code — no I/O, no Buffer, fully unit-tested
+src/background/    MV3 service worker (vault I/O, explorer, RPC)
+src/ui/            popup
+tests/unit/        crypto, derivation, script, address, golden vectors
+tests/security/    secret leakage, locked-wallet, bad seed, page RPC
+tests/integration/ cross-checks against a live btq-core node (opt-in)
+tests/vectors/     golden.json — the frozen contract with consensus
+scripts/           gen-vectors.ts
+docs/              REFERENCE.md · BTQ_CORE_MAP.md · HD_IMPORT.md · PLAN.md
+.claude/           skill + security-reviewer agent used to build this
 ```
