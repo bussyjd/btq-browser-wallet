@@ -1,5 +1,6 @@
 import { WalletError } from '../wallet/errors.js';
 import { hexToBytes } from '../util/hex.js';
+import { bytesEqual } from '../util/bytes.js';
 
 /** btq-core src/consensus/amount.h:26 — MAX_MONEY = 21000000 * COIN. */
 export const MAX_MONEY = 21_000_000n * 100_000_000n;
@@ -22,11 +23,52 @@ export function parseSignedSats(v: unknown): bigint {
   throw new WalletError('EXPLORER_SCHEMA', 'Unexpected explorer response.');
 }
 
+/**
+ * The `balance` field of `/api/v1/address/{a}`. Display-only: the live indexer
+ * returns a **negative** balance (and a negative `unspent_count`) for heavily
+ * used addresses — tests/fixtures/explorer/address-used.json records
+ * `"balance": "-266828024798707"` for an address that has 91 real unspents.
+ * Spendable balance is always the sum of `/utxos`, never this number, so a
+ * negative is reported as 0 instead of being treated as a schema error.
+ */
+export function parseDisplayBalanceSats(v: unknown): bigint {
+  const n = parseSignedSats(v);
+  return n < 0n ? 0n : n;
+}
+
 export function parseTxid(v: unknown): string {
   if (typeof v !== 'string' || !/^[0-9a-f]{64}$/i.test(v)) {
     throw new WalletError('EXPLORER_SCHEMA', 'Unexpected explorer response.');
   }
   return v.toLowerCase();
+}
+
+/** A block height from the indexer, or null for a mempool row (`block_height: null`). */
+export function parseBlockHeight(v: unknown): number | null {
+  if (v === null || v === undefined) return null;
+  if (typeof v === 'number' && Number.isInteger(v)) return v > 0 ? v : null;
+  if (typeof v === 'string' && /^\d+$/.test(v)) {
+    const n = Number(v);
+    return Number.isSafeInteger(n) && n > 0 ? n : null;
+  }
+  throw new WalletError('EXPLORER_SCHEMA', 'Unexpected explorer response.');
+}
+
+/**
+ * A 404 from this explorer means one of two very different things:
+ *   - `{"error":"Address not found"}` — the address has never been seen: unused.
+ *   - `{"message":"Route GET:/… not found","error":"Not Found","statusCode":404}`
+ *     — the base URL or path is wrong. Treating that as "unused" would render a
+ *     funded wallet as empty, so it must surface as EXPLORER_UNAVAILABLE.
+ * A 404 with a non-JSON body (an HTML page from a proxy) is a route problem too.
+ */
+export function isAddressNotFound(json: unknown): boolean {
+  return isRecord(json) && json.error === 'Address not found';
+}
+
+/** Fastify's default 404 body — i.e. we are pointed at the wrong route or host. */
+export function isRouteMiss(json: unknown): boolean {
+  return isRecord(json) && typeof json.message === 'string' && /Route\s+\S+\s+not found/i.test(json.message);
 }
 
 /** Node-Buffer JSON `{type:"Buffer",data:[...]}` or a hex string. */
@@ -46,8 +88,5 @@ export function parseScriptPubKey(v: unknown): Uint8Array {
   throw new WalletError('EXPLORER_SCHEMA', 'Unexpected explorer response.');
 }
 
-export function scriptsEqual(a: Uint8Array, b: Uint8Array): boolean {
-  if (a.length !== b.length) return false;
-  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
-  return true;
-}
+/** One definition of byte equality lives in util/bytes.ts. */
+export const scriptsEqual = bytesEqual;

@@ -50,8 +50,16 @@ export function keyPairFromSeed(seed: Uint8Array): MldsaKeyPair {
   return { publicKey: kp.publicKey, secretKey: kp.secretKey };
 }
 
+/**
+ * Public key only. The 2560-byte secret key derived on the way is zeroed before
+ * returning: address derivation runs on every scan, and leaving hundreds of
+ * live ML-DSA secret keys in the service worker's heap turns any later memory
+ * disclosure into a spendable-key disclosure.
+ */
 export function publicKeyFromSeed(seed: Uint8Array): Uint8Array {
-  return keyPairFromSeed(seed).publicKey;
+  const kp = keyPairFromSeed(seed);
+  kp.secretKey.fill(0);
+  return kp.publicKey;
 }
 
 /**
@@ -63,7 +71,13 @@ export function signTransactionHash(seed: Uint8Array, sighash: Uint8Array, sigha
   if (sighash.length !== 32) throw new Error('BTQ sighash must be 32 bytes');
   if (sighashType === 0x00) throw new Error('SIGHASH_DEFAULT is rejected by BTQ P2MR consensus');
   const { secretKey } = keyPairFromSeed(seed);
-  const raw = ml_dsa44.sign(secretKey, sighash, EMPTY_CONTEXT);
+  let raw: Uint8Array;
+  try {
+    raw = ml_dsa44.sign(secretKey, sighash, EMPTY_CONTEXT);
+  } finally {
+    // The secret key exists for exactly one signature.
+    secretKey.fill(0);
+  }
   if (raw.length !== SIGNATURE_BYTES) throw new Error('unexpected ML-DSA signature size');
   const out = new Uint8Array(TX_SIGNATURE_BYTES);
   out.set(raw, 0);

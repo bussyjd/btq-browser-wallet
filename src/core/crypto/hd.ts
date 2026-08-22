@@ -21,6 +21,7 @@ import { sha512 } from '@noble/hashes/sha512';
 import { sha256 } from '@noble/hashes/sha256';
 import { ripemd160 } from '@noble/hashes/ripemd160';
 import { publicKeyFromSeed } from './mldsa.js';
+import { concatBytes } from '../util/bytes.js';
 
 export const HARDENED = 0x80000000;
 export const EXTKEY_SIZE = 73;
@@ -38,14 +39,6 @@ function ser32BE(n: number): Uint8Array {
   const b = new Uint8Array(4);
   new DataView(b.buffer).setUint32(0, n >>> 0, false);
   return b;
-}
-
-function concat(...parts: Uint8Array[]): Uint8Array {
-  const total = parts.reduce((n, p) => n + p.length, 0);
-  const out = new Uint8Array(total);
-  let o = 0;
-  for (const p of parts) { out.set(p, o); o += p.length; }
-  return out;
 }
 
 /** btq-core CDilithiumPubKey::GetID — HASH160 of the 1312-byte public key. */
@@ -72,7 +65,7 @@ export function deriveChild(parent: DilithiumExtKey, index: number): DilithiumEx
     throw new Error('BTQ ML-DSA derivation is hardened-only: index must have the 0x80000000 bit set');
   }
   if (parent.depth === 0xff) throw new Error('maximum derivation depth reached');
-  const I = hmac(sha512, parent.chaincode, concat(new Uint8Array([0x00]), parent.seed, ser32BE(index)));
+  const I = hmac(sha512, parent.chaincode, concatBytes(new Uint8Array([0x00]), parent.seed, ser32BE(index)));
   const parentId = publicKeyId(publicKeyFromSeed(parent.seed));
   return {
     depth: parent.depth + 1,
@@ -83,9 +76,22 @@ export function deriveChild(parent: DilithiumExtKey, index: number): DilithiumEx
   };
 }
 
-/** Derive along a hardened path, e.g. [0', 0', n']. */
+/**
+ * Derive along a hardened path, e.g. [0', 0', n']. Intermediate nodes are
+ * spendable secrets for whole subtrees; they are zeroed as we walk past them.
+ * The caller's `master` is never touched.
+ */
 export function derivePath(master: DilithiumExtKey, path: number[]): DilithiumExtKey {
-  return path.reduce((k, i) => deriveChild(k, i), master);
+  let node = master;
+  for (const index of path) {
+    const child = deriveChild(node, index);
+    if (node !== master) {
+      node.seed.fill(0);
+      node.chaincode.fill(0);
+    }
+    node = child;
+  }
+  return node;
 }
 
 export type Chain = 'external' | 'internal';
@@ -98,10 +104,20 @@ export function accountKey(master: DilithiumExtKey, chain: Chain): DilithiumExtK
   return derivePath(master, [HARDENED, HARDENED + (chain === 'internal' ? 1 : 0)]);
 }
 
-/** The ML-DSA seed at m/0'/{0,1}'/index'. */
+/**
+ * The ML-DSA seed at m/0'/{0,1}'/index'. The intermediate account key is a
+ * spendable secret for the whole chain, so it is zeroed on the way out — only
+ * the caller's leaf seed survives.
+ */
 export function deriveKeySeed(master: DilithiumExtKey, chain: Chain, index: number): Uint8Array {
   if (index < 0 || index >= HARDENED) throw new Error('index out of range');
-  return deriveChild(accountKey(master, chain), (index | HARDENED) >>> 0).seed;
+  const account = accountKey(master, chain);
+  try {
+    return deriveChild(account, (index | HARDENED) >>> 0).seed;
+  } finally {
+    account.seed.fill(0);
+    account.chaincode.fill(0);
+  }
 }
 
 export function keyPath(chain: Chain, index: number): string {
@@ -110,5 +126,7 @@ export function keyPath(chain: Chain, index: number): string {
 
 /** 73-byte serialization (btq-core CDilithiumExtKey::Encode). */
 export function encodeExtKey(k: DilithiumExtKey): Uint8Array {
-  return concat(new Uint8Array([k.depth]), k.fingerprint, ser32BE(k.child), k.chaincode, k.seed);
+  const out = concatBytes(new Uint8Array([k.depth]), k.fingerprint, ser32BE(k.child), k.chaincode, k.seed);
+  if (out.length !== EXTKEY_SIZE) throw new Error(`extkey must be ${EXTKEY_SIZE} bytes`);
+  return out;
 }

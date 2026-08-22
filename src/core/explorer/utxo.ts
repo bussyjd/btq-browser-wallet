@@ -1,16 +1,30 @@
 import { WalletError } from '../wallet/errors.js';
-import { isRecord, parseSats, parseScriptPubKey, parseTxid, scriptsEqual } from './parse.js';
+import {
+  isAddressNotFound,
+  isRecord,
+  parseBlockHeight,
+  parseSats,
+  parseScriptPubKey,
+  parseTxid,
+  scriptsEqual,
+} from './parse.js';
 
 export interface ExplorerUtxo {
   txid: string;
   vout: number;
   value: bigint;
   script: Uint8Array;
+  /** null while the coin is still only in the mempool (`block_height: null`). */
+  blockHeight: number | null;
 }
 
 /**
  * Parse `/api/v1/address/{addr}/utxos`. Amounts are not used for signing until
  * the caller has matched `script` to a script it derived itself.
+ *
+ * A never-seen address answers 200 with `items: []` on the live indexer, so a
+ * 404 here is a wrong-URL/route problem unless the body is the indexer's own
+ * "Address not found" — a route miss must never read as "no coins".
  */
 export function parseUtxoResponse(
   status: number,
@@ -18,11 +32,17 @@ export function parseUtxoResponse(
   expectedAddress: string,
   expectedScript: Uint8Array,
 ): ExplorerUtxo[] {
-  if (status === 404) return [];
+  if (status === 404) {
+    if (isAddressNotFound(json)) return [];
+    throw new WalletError(
+      'EXPLORER_UNAVAILABLE',
+      'Explorer returned HTTP 404 for the UTXO route — check the explorer URL in Settings.',
+    );
+  }
   if (status < 200 || status >= 300) {
     throw new WalletError('EXPLORER_UNAVAILABLE', `Explorer returned HTTP ${status}.`);
   }
-  if (isRecord(json) && json.error === 'Address not found') return [];
+  if (isAddressNotFound(json)) return [];
   if (!isRecord(json) || !Array.isArray(json.items)) {
     throw new WalletError('EXPLORER_SCHEMA', 'Unexpected explorer response.');
   }
@@ -54,6 +74,7 @@ export function parseUtxoResponse(
       vout: raw.vout,
       value: parseSats(raw.value),
       script,
+      blockHeight: parseBlockHeight(raw.block_height),
     });
   }
   return out;

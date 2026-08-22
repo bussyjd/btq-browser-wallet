@@ -16,7 +16,6 @@ import { wordlist } from '@scure/bip39/wordlists/english';
 import { WalletError } from '../wallet/errors.js';
 import { hexToBytes } from '../util/hex.js';
 
-export const BIP39_WORDLIST = wordlist;
 const WORD_SET = new Set(wordlist);
 
 export function normalizeMnemonic(input: string): string {

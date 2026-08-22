@@ -1,5 +1,11 @@
 import { bytesToHex, hexToBytes } from '../core/util/hex.js';
-import type { ActivityItem, WalletMeta, WalletStorage } from '../core/wallet/storage.js';
+import {
+  parseActivity,
+  parseMeta,
+  type ActivityItem,
+  type WalletMeta,
+  type WalletStorage,
+} from '../core/wallet/storage.js';
 
 const VAULT_KEY = 'vault';
 const META_KEY = 'meta';
@@ -21,9 +27,10 @@ export class ChromeWalletStorage implements WalletStorage {
 
   async loadMeta(): Promise<WalletMeta | null> {
     const r = await chrome.storage.local.get(META_KEY);
-    const v = r[META_KEY];
-    if (!v || typeof v !== 'object') return null;
-    return v as WalletMeta;
+    // Validated, never cast: chrome.storage is writable by anything with
+    // extension access, and a bogus externalNext would make unlock derive
+    // thousands of ML-DSA keys.
+    return parseMeta(r[META_KEY]);
   }
 
   async saveMeta(meta: WalletMeta): Promise<void> {
@@ -32,7 +39,10 @@ export class ChromeWalletStorage implements WalletStorage {
 
   async loadOrigins(): Promise<string[]> {
     const r = await chrome.storage.local.get(ORIGINS_KEY);
-    return Array.isArray(r[ORIGINS_KEY]) ? (r[ORIGINS_KEY] as string[]) : [];
+    const raw = r[ORIGINS_KEY];
+    if (!Array.isArray(raw)) return [];
+    // Only well-formed origins; a junk entry must never widen the allowlist.
+    return raw.filter((o): o is string => typeof o === 'string' && /^https?:\/\/[^/]+$/.test(o));
   }
 
   async saveOrigins(origins: string[]): Promise<void> {
@@ -53,7 +63,7 @@ export class ChromeWalletStorage implements WalletStorage {
 
   async loadActivity(): Promise<ActivityItem[]> {
     const r = await chrome.storage.local.get(ACTIVITY_KEY);
-    return Array.isArray(r[ACTIVITY_KEY]) ? (r[ACTIVITY_KEY] as ActivityItem[]) : [];
+    return parseActivity(r[ACTIVITY_KEY]);
   }
 
   async saveActivity(items: ActivityItem[]): Promise<void> {

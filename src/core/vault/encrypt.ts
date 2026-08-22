@@ -16,8 +16,13 @@ const SALT_LEN = 16;
 const IV_LEN = 12;
 const HEADER_LEN = 4 + 1 + 4 + SALT_LEN + IV_LEN; // 37
 
-/** OWASP-adjacent; ~200ms on a laptop, painful for offline brute force. */
-export const DEFAULT_PBKDF2_ITERATIONS = 210_000;
+/**
+ * OWASP's 2023 PBKDF2-SHA256 floor is 600k. ~0.5 s on a laptop, and the only
+ * thing standing between a copied storage blob and the seed, so the cost
+ * is worth paying once per unlock. Older vaults carry their own count in the
+ * header and still open.
+ */
+export const DEFAULT_PBKDF2_ITERATIONS = 600_000;
 export const MIN_PBKDF2_ITERATIONS = 1_000;
 
 export interface EncryptOptions {

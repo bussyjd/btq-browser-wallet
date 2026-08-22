@@ -32,7 +32,11 @@ export function parseSendRawResult(result: unknown): { txid: string } {
   return { txid: parseTxid(result) };
 }
 
-export function parseBlockchainInfo(result: unknown): { chain: string; blocks: number } {
+export function parseBlockchainInfo(result: unknown): {
+  chain: string;
+  blocks: number;
+  bestblockhash?: string;
+} {
   if (!isRecord(result) || typeof result.chain !== 'string') {
     throw new WalletError('BAD_BACKEND', 'Node did not return getblockchaininfo.chain.');
   }
@@ -46,11 +50,30 @@ export function parseBlockchainInfo(result: unknown): { chain: string; blocks: n
     throw new WalletError('BAD_BACKEND', `Unexpected chain "${chain}". Need BTQ testnet.`);
   }
   const blocks = typeof result.blocks === 'number' && Number.isInteger(result.blocks) ? result.blocks : 0;
-  return { chain, blocks };
+  const bestblockhash =
+    typeof result.bestblockhash === 'string' && /^[0-9a-f]{64}$/i.test(result.bestblockhash)
+      ? result.bestblockhash.toLowerCase()
+      : undefined;
+  return bestblockhash ? { chain, blocks, bestblockhash } : { chain, blocks };
 }
 
+/** getblockhash / getbestblockhash return a bare 64-hex string. */
+export function parseBlockHash(result: unknown): string {
+  if (typeof result !== 'string' || !/^[0-9a-f]{64}$/i.test(result)) {
+    throw new WalletError('BAD_BACKEND', 'Node did not return a block hash.');
+  }
+  return result.toLowerCase();
+}
+
+/**
+ * RFC 7617 Basic credentials. `btoa` throws on any code point above U+00FF, so
+ * a node password with a non-Latin-1 character would otherwise break every RPC
+ * call (including the broadcast that moves funds). Encode to UTF-8 bytes first.
+ */
 export function basicAuthHeader(user: string, password: string): string | null {
   if (!user && !password) return null;
-  const token = btoa(`${user}:${password}`);
-  return `Basic ${token}`;
+  const bytes = new TextEncoder().encode(`${user}:${password}`);
+  let binary = '';
+  for (const b of bytes) binary += String.fromCharCode(b);
+  return `Basic ${btoa(binary)}`;
 }

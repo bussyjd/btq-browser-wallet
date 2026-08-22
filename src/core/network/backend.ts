@@ -94,3 +94,17 @@ export function isLoopbackHost(endpoint: string): boolean {
   const host = new URL(endpoint).hostname;
   return host === '127.0.0.1' || host === 'localhost' || host === '[::1]' || host === '::1';
 }
+
+/**
+ * Plain http to anything other than this machine. The RPC Basic-auth header and
+ * every address we look up travel in clear text over that link, so the Testnet
+ * panel warns before the user relies on it. Loopback is fine — nothing leaves
+ * the machine.
+ */
+export function isInsecureRemote(endpoint: string): boolean {
+  try {
+    return new URL(endpoint).protocol === 'http:' && !isLoopbackHost(endpoint);
+  } catch {
+    return false;
+  }
+}

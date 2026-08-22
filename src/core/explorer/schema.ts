@@ -3,30 +3,30 @@
  * we never copy an explorer address into the signing path, and a mismatched
  * `address` field is a hard error (hostile-explorer injection).
  *
- * Unused addresses: the public explorer returns `{error:"Address not found"}`
- * (or HTTP 404) rather than a zeroed record. That is unused, not a failure.
+ * Unused addresses: the public explorer answers a never-seen address with HTTP
+ * 404 `{error:"Address not found"}`. A 404 that is a *route* miss (wrong base
+ * URL, proxy error page) must never look the same — see parse.ts.
+ *
+ * The `balance` field here is display-only; spendable balance is the sum of
+ * `/utxos` (the live indexer reports negative balances for busy addresses).
  */
 import { WalletError } from '../wallet/errors.js';
 import type { AddressActivity } from '../wallet/gap.js';
+import { isAddressNotFound, isRecord, parseDisplayBalanceSats } from './parse.js';
 
-function isRecord(v: unknown): v is Record<string, unknown> {
-  return typeof v === 'object' && v !== null && !Array.isArray(v);
-}
-
-function parseSats(v: unknown): bigint {
-  if (typeof v === 'number' && Number.isInteger(v) && v >= 0) return BigInt(v);
-  if (typeof v === 'string' && /^-?\d+$/.test(v)) {
-    const n = BigInt(v);
-    if (n < 0n) return 0n;
-    return n;
-  }
-  throw new WalletError('EXPLORER_SCHEMA', 'Unexpected explorer response.');
-}
-
-const UNUSED: AddressActivity = { used: false, txCount: 0, balanceSats: 0n };
+const UNUSED: AddressActivity = { used: false, txCount: 0, reportedBalanceSats: 0n };
 
 export function parseAddressResponse(status: number, json: unknown, expectedAddress: string): AddressActivity {
-  if (status === 404) return UNUSED;
+  if (status === 404) {
+    // Only the indexer's own "Address not found" body means unused. A wrong
+    // explorer URL 404s too, and calling that "unused" would silently render a
+    // funded wallet as empty and let a restore stop at index 0.
+    if (isAddressNotFound(json)) return UNUSED;
+    throw new WalletError(
+      'EXPLORER_UNAVAILABLE',
+      'Explorer returned HTTP 404 for the address route — check the explorer URL in Settings.',
+    );
+  }
   // Non-2xx is a failure even if the body says "Address not found" — treating
   // that as unused would hide funds when the explorer is down or hostile.
   if (status < 200 || status >= 300) {
@@ -47,10 +47,27 @@ export function parseAddressResponse(status: number, json: unknown, expectedAddr
     }
   }
 
-  const balanceSats = json.balance === undefined ? 0n : parseSats(json.balance);
   return {
     used,
     txCount: json.tx_count,
-    balanceSats,
+    reportedBalanceSats: json.balance === undefined ? 0n : parseDisplayBalanceSats(json.balance),
   };
+}
+
+/** `/api/v1/blocks/tip` — the chain tip we count confirmations against. */
+export function parseTipResponse(status: number, json: unknown): { height: number; hash: string } {
+  if (status < 200 || status >= 300) {
+    throw new WalletError('EXPLORER_UNAVAILABLE', `Explorer returned HTTP ${status} for /blocks/tip.`);
+  }
+  if (
+    !isRecord(json) ||
+    typeof json.height !== 'number' ||
+    !Number.isInteger(json.height) ||
+    json.height < 0 ||
+    typeof json.hash !== 'string' ||
+    !/^[0-9a-f]{64}$/i.test(json.hash)
+  ) {
+    throw new WalletError('EXPLORER_SCHEMA', 'Unexpected explorer response.');
+  }
+  return { height: json.height, hash: json.hash.toLowerCase() };
 }
