@@ -1,0 +1,18 @@
+{
+  // Everything that runs in Node: the test suite, the vector generator, the
+  // build config and the manifest. These may use node types; `src/` may not.
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "types": ["node", "vitest/globals", "chrome"],
+    "allowImportingTsExtensions": true
+  },
+  "include": [
+    "tests",
+    "scripts",
+    "src/manifest.config.ts",
+    "vite.config.ts",
+    "vitest.config.ts",
+    "eslint.config.js"
+  ]
+}

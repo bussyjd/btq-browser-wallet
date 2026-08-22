@@ -36,7 +36,8 @@ src/ui/                   create / import / unlock / receive / send / activity
 ```sh
 npm install
 npm test            # unit + security + golden vectors (no node required)
-npm run typecheck
+npm run typecheck   # src (browser-only types) and tests/tooling (node) separately
+npm run lint
 npm run build
 ```
 
@@ -70,7 +71,9 @@ error and no seed. Locking (or a service-worker restart) wipes keys from memory.
 
 ```sh
 npm test            # unit tests + golden vectors + security tests (no node required)
-npm run typecheck
+npm run typecheck   # src (browser-only types) and tests/tooling (node) separately
+npm run lint        # eslint, type-aware on src/
+npm run check       # all three
 ```
 
 ### Cross-check against a real btq-core node

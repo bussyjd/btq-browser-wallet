@@ -1,26 +1,13 @@
 {
+  // The shipped extension. It runs in a service worker, a popup page and a
+  // content script — never in Node — so `types` is empty: no `process`, no
+  // `Buffer`, no `node:*` globals can typecheck their way into `src/`.
+  // Chrome and Vite ambient types come in through src/vite-env.d.ts.
+  "extends": "./tsconfig.base.json",
   "compilerOptions": {
-    "target": "ES2022",
-    "module": "ESNext",
-    "moduleResolution": "bundler",
-    "lib": [
-      "ES2022",
-      "DOM"
-    ],
-    "strict": true,
-    "jsx": "react-jsx",
-    "noUncheckedIndexedAccess": true,
-    "esModuleInterop": true,
-    "skipLibCheck": true,
-    "noEmit": true,
-    "types": [
-      "vitest/globals",
-      "node"
-    ]
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "types": []
   },
-  "include": [
-    "src",
-    "tests",
-    "scripts"
-  ]
+  "include": ["src"],
+  "exclude": ["src/manifest.config.ts"]
 }
