@@ -129,7 +129,7 @@ End to end, in a real browser:
 
 ```sh
 npm run playwright:install   # once: fetches the Chromium build Playwright drives
-npm run test:e2e             # builds dist/, loads it in Chromium, 21 tests (~25 s)
+npm run test:e2e             # builds dist/, loads it in Chromium, 22 tests (~25 s)
 npm run test:all             # the above, after npm test
 SKIP_BUILD=1 npm run test:e2e    # reuse the current dist/ while iterating
 ```
