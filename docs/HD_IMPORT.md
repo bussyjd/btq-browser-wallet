@@ -108,7 +108,9 @@ sequenceDiagram
     loop gap-limit scan, both chains
         SW->>SW: derive address at next index
         SW->>EX: GET /api/v1/address/{addr}
-        EX-->>SW: tx_count, balance
+        EX-->>SW: tx_count (404 "Address not found" = unused)
+        SW->>EX: GET /api/v1/address/{addr}/utxos
+        EX-->>SW: unspent outputs — the balance is their sum
         Note over SW: stop after 20 consecutive unused
     end
     SW-->>UI: accounts restored, balances shown
@@ -117,7 +119,8 @@ sequenceDiagram
 The gap-limit scan (20, matching Bitcoin convention) is what makes import *restore* a
 wallet rather than merely re-create key material: used addresses beyond index 0 are
 found by asking the explorer, exactly the way the balance screen does, so an imported
-wallet shows its history immediately.
+wallet shows its history immediately. A lookup that fails is an error, never "unused" —
+otherwise a flaky explorer would silently truncate the restore.
 
 ## The failure modes we test
 

@@ -7,12 +7,16 @@ anchors corrected) and re-framed here for this project.
 
 **How to use it:** treat the `btq-core` column as ground truth. The *In this wallet*
 column says where the fact lives in our code, or why it does not apply — so this doubles
-as a coverage checklist. Anything marked _planned_ is a milestone still to land.
+as a coverage checklist. Anything still marked _planned_ is a fact the wallet relies on
+but does not encode — the four left are consensus limits (script element size, sigop cost,
+the per-input validation budget, block weight) that only matter if a future change makes
+them binding.
 
 Legend: **implemented** · _planned_ · not applicable
 
 
-_Coverage: 41 implemented, 17 planned, 37 not applicable._
+_Coverage: 53 implemented, 4 planned, 38 not applicable. Re-audited after the send path,
+the explorer client and the node RPC landed._
 
 ## Signatures and script validation
 
@@ -237,56 +241,56 @@ _Coverage: 41 implemented, 17 planned, 37 not applicable._
 - **Bitcoin:** WITNESS_SCALE_FACTOR = 4; a witness byte costs 1/4 vbyte (75% discount).
 - **BTQ:** WITNESS_SCALE_FACTOR = 16; a witness byte costs 1/16 vbyte (93.75% discount), so a 2421-byte ML-DSA signature prices at ~151 vB instead of ~605 vB. Every weight/vsize/dust constant below is derived from this one change.
 - **btq-core:** `src/consensus/consensus.h:21` (WITNESS_SCALE_FACTOR = 16)
-- **In this wallet:** _planned_ — `src/core/tx/fee.ts` — coin selection and fee policy
+- **In this wallet:** **implemented** — `src/core/tx/fee.ts` — every weight, vsize and fee number derives from this constant
 
 ### Transaction weight formula
 
 - **Bitcoin:** GetTransactionWeight = stripped_size * 3 + total_size.
 - **BTQ:** GetTransactionWeight = stripped_size * (WITNESS_SCALE_FACTOR - 1) + total_size = stripped_size * 15 + total_size. Same for GetBlockWeight and GetTransactionInputWeight (which adds the separately-serialized witness stack).
 - **btq-core:** `src/consensus/validation.h:148-151` (GetTransactionWeight); :152-155 (GetBlockWeight); :156-160 (GetTransactionInputWeight)
-- **In this wallet:** _planned_ — `src/core/tx/fee.ts`
+- **In this wallet:** **implemented** — `src/core/tx/fee.ts` `transactionWeight()`
 
 ### Virtual size computation
 
 - **Bitcoin:** GetVirtualTransactionSize = (max(weight, sigops*bytes_per_sigop) + 3) / 4.
 - **BTQ:** GetVirtualTransactionSize = (max(nWeight, nSigOpCost * bytes_per_sigop) + WITNESS_SCALE_FACTOR - 1) / WITNESS_SCALE_FACTOR, i.e. ceil(weight/16). DEFAULT_BYTES_PER_SIGOP is unchanged at 20 (policy.h:40).
 - **btq-core:** `src/policy/policy.cpp:357-360` (GetVirtualTransactionSize(nWeight,...)); :362-365 (from CTransaction); :367-370 (GetVirtualTransactionInputSize)
-- **In this wallet:** _planned_ — `src/core/tx/fee.ts` — coin selection and fee policy
+- **In this wallet:** **implemented** — `src/core/tx/fee.ts` `virtualSizeCeil()`
 
 ### Standard-transaction weight ceiling vs P2MR input cost
 
 - **Bitcoin:** MAX_STANDARD_TX_WEIGHT = 400,000 WU = 100,000 vB; ~2,700 P2WPKH inputs fit in one standard tx.
 - **BTQ:** MAX_STANDARD_TX_WEIGHT is still 400,000 WU but now equals only 25,000 vB. With a single-key P2MR input at 4402 WU, a consolidation tx (2 P2MR outputs) holds at most 90 inputs: 90 inputs = 397,718 WU (standard), 91 inputs = 402,120 WU (rejected 'tx-size').
 - **btq-core:** `src/policy/policy.h:30` (MAX_STANDARD_TX_WEIGHT{400'000}); `src/policy/policy.cpp:112-116` (IsStandardTx sets reason="tx-size"); `src/wallet/spend.cpp:1298-1302` ("Transaction too large")
-- **In this wallet:** _planned_ — `src/core/tx/fee.ts`
+- **In this wallet:** **implemented** — `src/core/tx/fee.ts` / `src/core/tx/coinselect.ts` — inputs capped at MAX_P2MR_INPUTS = 90
 
 ### Single-key P2MR input weight = 4402 WU / 275.125 vB
 
 - **Bitcoin:** P2WPKH input ~272 WU (68 vB); P2TR key-path input ~230 WU (57.5 vB).
 - **BTQ:** 41 non-witness bytes (32 txid + 4 vout + 1 empty scriptSig len + 4 nSequence) * 16 = 656 WU, plus a 3746-byte witness = 4402 WU = 275.125 vB. The 3746 is exact: varint(3) + [3-byte len + 2421-byte ML-DSA sig] + [3-byte len + 1316-byte leaf script (OP_PUSHDATA2 <1312-byte pubkey> OP_CHECKSIGDILITHIUM)] + [1-byte len + 1-byte control block].
 - **btq-core:** `src/consensus/validation.h:156-160` (GetTransactionInputWeight); `src/wallet/rpc/spend.cpp:690-695` (min_input_weight CHECK_NONFATAL == 41*WITNESS_SCALE_FACTOR + 1 = 657)
-- **In this wallet:** _planned_ — `src/core/tx/fee.ts`
+- **In this wallet:** **implemented** — `src/core/tx/fee.ts` `P2MR_INPUT_WEIGHT = 4402`, `P2MR_INPUT_VSIZE = 275.125`
 
 ### Passing the P2MR input weight hint to btq-core over RPC
 
 - **Bitcoin:** walletcreatefundedpsbt input {"weight": N} is optional; Core solves the input itself from wallet/solving data.
 - **BTQ:** btq-core cannot solve a watch-only P2MR input, so the caller must supply weight explicitly. The RPC validates it against min_input_weight = 41*16+1 = 657 and against MAX_STANDARD_TX_WEIGHT = 400,000, then uses it for fee sizing.
 - **btq-core:** `src/wallet/rpc/spend.cpp:685-701` (weight parsing, min/max checks, coinControl.SetInputWeight)
-- **In this wallet:** _planned_ — `src/core/tx/fee.ts`
+- **In this wallet:** not applicable — the wallet builds and signs its own transactions; it never asks a node to fund one, so there is no weight hint to pass
 
 ### Dust threshold for a P2MR output
 
 - **Bitcoin:** A 43-byte serialized witness txout (P2TR/P2WSH) gets nSize = 43 + (32+4+1+107/4+4) = 43+67 = 110, so dust = 110*3000/1000 = 330 sats. P2WPKH = 294 sats.
 - **BTQ:** The scale factor enters GetDustThreshold only through the integer division 107/WITNESS_SCALE_FACTOR: 107/16 = 6, so nSize = 43 + (32+4+1+6+4) = 90 and dust = 90*3000/1000 = 270 sats for a P2MR output (34-byte scriptPubKey OP_2 <32>, 43 bytes serialized). P2WPKH drops to 234 sats. DUST_RELAY_TX_FEE is unchanged at 3000 sat/kvB.
 - **btq-core:** `src/policy/policy.cpp:26-63` (GetDustThreshold; witness branch at :54-57 adds 32+4+1+(107/WITNESS_SCALE_FACTOR)+4); `src/policy/policy.h:61` (DUST_RELAY_TX_FEE{3000}); `src/policy/policy.cpp:147-150` (IsDust -> reason="dust")
-- **In this wallet:** _planned_ — `src/core/tx/fee.ts` — coin selection and fee policy
+- **In this wallet:** **implemented** — `src/core/tx/fee.ts` `P2MR_DUST_SATS = 270n`, enforced on the destination and on change
 
 ### Minimum relay fee rate
 
 - **Bitcoin:** DEFAULT_MIN_RELAY_TX_FEE = 1000 sat/kvB = 1 sat/vB; a 1-in/2-out P2WPKH spend at the floor costs ~141 sats.
 - **BTQ:** Unchanged at 1000 sat/kvB, but a vbyte is now 16 WU, so the same floor charges ~4x less per witness byte. A 1-in/2-out single-key P2MR spend costs 372 sats at the floor (372 vB) rather than the ~1074 sats it would cost at scale 4. DEFAULT_INCREMENTAL_RELAY_FEE also unchanged at 1000.
 - **btq-core:** `src/policy/policy.h:63` (DEFAULT_MIN_RELAY_TX_FEE{1000}); :38 (DEFAULT_INCREMENTAL_RELAY_FEE{1000})
-- **In this wallet:** _planned_ — `src/core/tx/fee.ts` — coin selection and fee policy
+- **In this wallet:** **implemented** — `src/core/tx/fee.ts` `MIN_RELAY_SAT_PER_KVB`; the UI offers 1000 / 2000 / 5000 sat/kvB
 
 ### Witness stack item size limit raised for post-quantum pushes
 
@@ -321,7 +325,7 @@ _Coverage: 41 implemented, 17 planned, 37 not applicable._
 - **Bitcoin:** Sparrow displays vsize as Transaction.getWeightUnits()/4 and fee rate as fee/vsize everywhere.
 - **BTQ:** Qparrow routes the transaction-detail vsize and fee-rate displays, the RBF replacement sizing and the CPFP child sizing through the policy-aware Wallet.getVirtualSize (scale 16), and prices an extra RBF input at witnessLength/16 rather than /4.
 - **btq-core:** `src/core_write.cpp:183-184` (RPC "vsize" = GetVirtualTransactionSize(tx), "weight" = GetTransactionWeight(tx)) — the values the UI must reproduce
-- **In this wallet:** _planned_ — `src/core/tx/fee.ts`
+- **In this wallet:** **implemented** — `src/ui/screens/home/Send.tsx` — the review card shows sat/vB and vB alongside the fee in tBTQ
 
 ## Key management and derivation
 
@@ -521,14 +525,14 @@ _Coverage: 41 implemented, 17 planned, 37 not applicable._
 - **Bitcoin:** Identical semantics: confirmations negative for conflicted, "generated" only for coinbase, details[].abandoned, blockheight/blockhash/time/fee/hex.
 - **BTQ:** Unchanged; BTQ adds no fields here. confirmations = tip - confirmed_height + 1, or -(tip - conflicting_height + 1) for conflicted, 0 otherwise. gettransaction's second positional is include_watchonly (verbose is the third).
 - **btq-core:** `src/wallet/rpc/transactions.cpp:22` (confirmations), :24 (generated), :27-28 (blockhash/blockheight), :43 (time), :351 and :392 (details[].abandoned), :403-409 (help text), :432 (listtransactions), :686 (gettransaction, arg order :691-695), :729 (hex); depth formula `src/wallet/wallet.cpp:3478-3488`
-- **In this wallet:** _planned_ — `src/background/explorer.ts` — history from `/api/v1/address/{a}/txs`
+- **In this wallet:** **implemented** — `src/background/explorer.ts` — history paged from `/api/v1/address/{a}/txs`
 
 ### testmempoolaccept + sendrawtransaction as the only broadcast path
 
 - **Bitcoin:** Identical RPCs and shapes.
 - **BTQ:** Unchanged. btq-core additionally ships a wallet-scoped testp2mrtransaction returning [{txid, allowed, reject-reason}] — with no wtxid — but the wallet deliberately uses the node-level testmempoolaccept so it can pin the witness txid of the locally finalised bytes before broadcasting. maxfeerate defaults to COIN/10 per kvB on both calls.
 - **btq-core:** `src/rpc/mempool.cpp:103` (testmempoolaccept; txid :128, wtxid :129, allowed :131, reject-reason :142) and :34 (sendrawtransaction; result :53-55); `src/node/transaction.h:27` (DEFAULT_MAX_RAW_TX_FEE_RATE = COIN/10); BTQ-only variant `src/wallet/rpc/p2mr.cpp:346` (testp2mrtransaction)
-- **In this wallet:** _planned_ — `src/background/explorer.ts` — broadcast via `POST /api/v1/tx/send`
+- **In this wallet:** **implemented** — `src/background/node-rpc.ts` — `testmempoolaccept` + `sendrawtransaction` over JSON-RPC. The explorer has **no push route** (`POST /api/v1/tx/send` → 404), so a node is the only broadcast path; see `docs/REFERENCE.md §6`
 
 ### Per-input weight hint in walletcreatefundedpsbt (the only way a keyless watch wallet can size a P2MR input)
 
@@ -556,7 +560,7 @@ _Coverage: 41 implemented, 17 planned, 37 not applicable._
 - **Bitcoin:** Identical: /wallet/<name> selects the wallet, root falls back to the single loaded wallet.
 - **BTQ:** Unchanged, but the wallet enforces the split explicitly: chain identity, help, testmempoolaccept and sendrawtransaction go to the root endpoint; every wallet RPC goes to /wallet/<name>, and the URI is validated (loopback-only for plain HTTP, no credentials/query/fragment in the URI).
 - **btq-core:** `src/wallet/rpc/util.cpp:62-70` (GetWalletNameFromJSONRPCRequest, URI-prefix based) and :72-82 (GetWalletForJSONRPCRequest, CHECK_NONFATAL(request.mode == EXECUTE) at :74 — which is why `help <walletrpc>` works on the root endpoint)
-- **In this wallet:** _planned_ — `src/background/explorer.ts` — broadcast via `POST /api/v1/tx/send`
+- **In this wallet:** **implemented** — `src/core/network/jsonrpc.ts` + `src/background/node-rpc.ts` — node-level calls go to the root endpoint, and `parseHttpEndpoint()` refuses credentials, fragments and non-http(s) schemes
 
 ### IBD guard and Core-sourced tip height
 
@@ -570,7 +574,7 @@ _Coverage: 41 implemented, 17 planned, 37 not applicable._
 - **Bitcoin:** Identical RPC.
 - **BTQ:** Unchanged, but the wallet trusts nothing it returns: every entry's address is re-parsed as same-network P2MR by drongo and its output script re-derived and compared to Core's scriptPubKey, duplicates and out-of-range amounts are rejected, and zero-value outputs are dropped.
 - **btq-core:** `src/wallet/rpc/coins.cpp:500` (listunspent; args minconf/maxconf/addresses/include_unsafe/query_options), entry fields :718-729 (spendable, solvable, safe, desc)
-- **In this wallet:** _planned_ — `src/background/explorer.ts` — UTXOs from `/api/v1/address/{a}/utxos`
+- **In this wallet:** **implemented** — `src/background/explorer.ts` — UTXOs paged from `/api/v1/address/{a}/utxos`
 
 ## PSBT extensions (not used here)
 

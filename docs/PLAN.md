@@ -1,9 +1,11 @@
 # BTQ Browser Wallet — implementation plan
 
-Take-home: a MetaMask-style browser extension for Bitcoin Quantum (testnet only).
-138 points. This plan front-loads the two things that decide whether it works at all
-— **HD derivation compatibility** and **the explorer API** — both already verified
-against source in this plan (see §1, §2).
+A MetaMask-style browser extension for Bitcoin Quantum (testnet only). This plan
+front-loads the two things that decide whether it works at all — **HD derivation
+compatibility** and **the explorer API** — both verified against source in §1 and §2.
+
+It is kept as written, with status marked where reality disagreed with the plan: §2 (the
+explorer has no broadcast route), §4 (what shipped), §6 (what did not).
 
 ---
 
@@ -65,43 +67,59 @@ Base: `https://explorer.bitcoinquantum.com`
 | `GET /api/v1/address/{addr}` | balance, total_received/sent, tx_count, unspent_count, `script_type: witness_v2_p2mr`, `isDilithium` |
 | `GET /api/v1/address/{addr}/utxos` | **coin selection** |
 | `GET /api/v1/address/{addr}/txs` | history |
-| `GET /api/v1/blocks`, `/api/v1/block/{hash}` | tip height, confirmations |
-| `POST /api/v1/tx/send` | **broadcast** (returns 400 on GET ⇒ route exists, expects a body) |
+| `GET /api/v1/blocks/tip`, `/api/v1/block/{hash}` | tip height, confirmations |
+| ~~`POST /api/v1/tx/send`~~ | **no push route** — 404 `Route POST:/api/v1/tx/send not found` |
 
-Confirm the send payload shape in M0. Fallback if unusable: broadcast via a BTQ Core
-testnet node over RPC behind a tiny proxy — but explorer-only is the goal (no node).
+**Resolved, against the plan's expectation:** there is no broadcast route. The 400 this
+plan originally read as "the route exists and wants a body" was a `GET` colliding with
+`/api/v1/tx/:txid`; the `POST` 404s, as does every other guessed path. Broadcast goes
+through a BTQ Core node's `testmempoolaccept` + `sendrawtransaction`, configured under
+Settings — so "explorer-only, no node" was not achievable. The wallet signs first and
+keeps the hex when there is no node, rather than pretending. Paging, 404 semantics and the
+untrustworthy `balance` field are recorded in `docs/REFERENCE.md §6`.
 
 ---
 
 ## 3. Stack & repo layout
 
-**Chrome MV3 + TypeScript + React + Vite (`@crxjs/vite-plugin`), pnpm.**
+**Chrome MV3 + TypeScript + React + Vite (`@crxjs/vite-plugin`), npm.**
 Crypto: `@noble/post-quantum` (ML-DSA-44), `@noble/hashes` (HMAC-SHA512/SHA256/SHAKE),
 `@scure/base` (bech32m), `@scure/bip39`. All audited, pure TS, no WASM — keeps the
 bundle reviewable and MV3-safe (no `unsafe-eval`).
 
+What shipped (the plan's layout, corrected to the tree that exists):
+
 ```
 btq-browser-wallet/
 ├─ src/
-│  ├─ core/                 # pure, dependency-free, 100%-tested
+│  ├─ core/                 # pure, browser-safe, no I/O
 │  │  ├─ crypto/            # mldsa.ts, hd.ts (the §1.1 scheme), mnemonic.ts
-│  │  ├─ script/            # p2mr.ts, address.ts, taproot-sighash.ts
-│  │  ├─ tx/                # builder.ts, coinselect.ts, fee.ts (scale-16), psbt-lite.ts
-│  │  └─ vault/             # encrypt.ts (AES-GCM + PBKDF2/Argon2), serialize.ts
+│  │  ├─ script/            # p2mr.ts, address.ts
+│  │  ├─ tx/                # serialize, parse, sighash, fee (scale-16), coinselect, builder
+│  │  ├─ vault/             # encrypt.ts (PBKDF2-SHA256 600k + AES-256-GCM), payload.ts
+│  │  ├─ wallet/            # keyring.ts, derive, gap, storage, destination, format, errors
+│  │  ├─ explorer/          # parse, schema, utxo, history, broadcast (parsers only)
+│  │  ├─ rpc/               # protocol.ts, dispatch.ts, origin.ts
+│  │  └─ network/           # backend.ts (endpoint validation), jsonrpc.ts
 │  ├─ background/           # MV3 service worker: the ONLY place keys are decrypted
-│  │  ├─ keyring.ts         # unlock/lock, in-memory only, auto-lock timer
-│  │  ├─ rpc-router.ts      # typed port messaging, origin checks
-│  │  └─ explorer.ts        # API client, retry/backoff, response validation
-│  ├─ ui/                   # popup + onboarding + approval screens (React)
-│  ├─ content/              # injects provider, relays only; never sees secrets
-│  └─ inpage/               # window.btq provider (EIP-1193-shaped)
+│  │  ├─ index.ts           # message listener, auto-lock alarm, connect wiring
+│  │  ├─ connect.ts         # the approval broker (holds the page's promise)
+│  │  ├─ explorer.ts        # API client: retry/backoff, paging, schema validation
+│  │  └─ node-rpc.ts  backend-store.ts  chrome-storage.ts
+│  ├─ ui/                   # React popup: App.tsx, hooks/, components/, screens/
+│  ├─ content/              # relays allowlisted page.* only; never sees secrets
+│  └─ inpage/               # btq-provider.js — window.btq, MAIN world, frozen
 ├─ tests/
-│  ├─ vectors/              # golden vectors incl. btq-core cross-check output
-│  ├─ unit/  integration/  security/
-│  └─ e2e/                  # Playwright, real extension in Chromium
-├─ docs/  README.md  SECURITY.md  ARCHITECTURE.md
-└─ scripts/gen-vectors.ts   # regenerates vectors from a regtest btq-core node
+│  ├─ vectors/              # golden.json — the frozen contract with consensus
+│  ├─ unit/  security/  integration/
+│  ├─ fixtures/explorer/    # bodies recorded from the live explorer
+│  └─ e2e/                  # Playwright, the built extension in Chromium
+├─ examples/dapp.html  demo/  docs/  README.md  SECURITY.md
+└─ scripts/gen-vectors.ts  scripts/stitch-demo.sh
 ```
+
+`ARCHITECTURE.md` was never written as a separate file: `README.md` §Layout,
+`docs/REFERENCE.md` and this plan cover it, and a fourth overlapping document would rot.
 
 **Trust boundary (the thing a security team looks for):** the mnemonic and private
 seeds exist **only** inside the service worker, only while unlocked. The content
@@ -112,34 +130,45 @@ signing primitive that doesn't route through explicit user approval.
 
 ## 4. Milestones
 
-**M0 — Compatibility spike (before any UI).** Prove derivation + signing against a
-real node. Run btq-core regtest locally, generate an HD wallet, and assert our TS
-derivation reproduces its addresses; sign a P2MR spend in TS and have the node accept it
-via `testmempoolaccept`. Freeze the results as golden vectors. *If this fails, nothing
-else matters — so it happens first.*
+**M0 — Compatibility spike (before any UI). ✅ done.** Derivation and signing proved
+against a regtest btq-core: our addresses, `scriptPubKey` and merkle roots match
+`getnewp2mraddress` byte for byte, and `testmempoolaccept` accepted a transaction we
+signed (`tests/integration/`). Frozen as `tests/vectors/golden.json`.
 
-**M1 — Core (rubric: create 8, import 8, receive 10).** BIP39 create/import, vault
-encrypt/unlock, address derivation, gap-limit scan against the explorer, receive screen + QR.
+**M1 — Create, import, receive. ✅ done.** BIP39 create/import plus raw 32-byte HD seed
+import, PBKDF2 + AES-GCM vault, hardened derivation, 20-address gap scan on both chains,
+receive screen with QR and path.
 
-**M2 — Send (12) + balance/history (8).** UTXO fetch, scale-16 fee estimation, coin
-selection with the weight ceiling, sighash, sign, broadcast, pending→confirmed states.
+**M2 — Send, balance and history. ✅ done.** UTXOs and history paged from the explorer,
+balance summed from `/utxos`, scale-16 fee estimation, coin selection under the weight
+ceiling, BIP341 sighash, signing, and node broadcast. Broadcast turned out to require a
+node (§2); a failed broadcast keeps the signed hex and says why.
 
-**M3 — UX polish (looks/feels 10, writing 5).** Onboarding, seed-confirm challenge,
-lock/auto-lock, activity list, error copy that says what to do next.
+**M3 — UX polish. ✅ done.** Onboarding, seed-confirm challenge, lock and a 1-minute
+auto-lock alarm, activity list with confirmations, brand palette in both colour schemes,
+and error copy that names the cause and the next step.
 
-**M4 — Site-connect (4) + fees/accounts/onboarding (3).** `window.btq` provider,
-connect approval with origin display, per-site permissions, multiple accounts, fee selection.
+**M4 — Site-connect, fees, onboarding. ◐ mostly.** `window.btq` provider, held approval
+with the origin displayed, per-site permissions with revoke, `accountsChanged`, three fee
+presets and a Max button. **Not done: multiple accounts** — the keyring derives one
+account (`m/0'/…`) and no RPC exposes a second, so it was left out rather than faked.
 
-**M5 — Tests (15) + README + video (5+2).** See §5.
+**M5 — Tests, README, video. ✅ done.** 311 unit + security tests, an 18-journey Playwright
+suite against the built extension, this README, and `demo/btq-wallet-demo.mp4` recorded by
+that suite (`npm run demo:video`); `docs/VIDEO.md` is the shot list for a narrated cut.
 
-**M6 — The 40-point bucket** (§6).
+**M6 — "What you'd ship in a real wallet." ◐ partly** — see §6 for which of the ten
+landed.
 
 ---
 
 ## 5. Test plan — written for a security team, not a demo
 
-Runner: **Vitest** (unit/integration) + **Playwright** (E2E on the real extension).
-`pnpm test`, `pnpm test:e2e`, `pnpm test:security` — all documented in the README.
+Runner: **Vitest** (unit, security, integration) + **Playwright** (end-to-end on the real
+extension). `npm test`, `npm run test:e2e`, `npm run test:all` — documented in the README;
+there is no separate `test:security` script, the security suite runs inside `npm test`.
+What each layer proves is tabulated in the README; `tests/e2e/README.md` covers what is
+mocked and what each hostile case would otherwise miss.
 
 **Correctness / compatibility**
 - Golden vectors from btq-core: seed → address, at multiple indices, both chains
@@ -178,36 +207,61 @@ Runner: **Vitest** (unit/integration) + **Playwright** (E2E on the real extensio
 
 ---
 
-## 6. The 40-point bucket — "what you'd ship in a real wallet"
+## 6. "What you'd ship in a real wallet" — what landed
 
-Ranked by signal per unit of effort:
-1. **Reproducible, verifiable builds** — pinned deps, `pnpm audit` in CI, a build that a reviewer can reproduce hash-for-hash
-2. **Address verification UX** — full address display, checksummed chunking, copy-confirm, "first send to this address" warning
-3. **Transaction preview that cannot lie** — decode our own signed tx and show inputs/outputs/fee from the *signed bytes*, not from intent
-4. **Auto-lock + re-auth on send**, configurable timeout
-5. **Encrypted vault backup / restore** file, with a documented format
-6. **Explorer failover + offline mode** — cached balances, clear stale-data banner
-7. **Phishing resistance** — connected-site list with revoke, origin pinning, anti-clickjacking on approval screens
-8. **Accessibility & i18n scaffolding** — keyboard-navigable approvals, screen-reader labels
-9. **Structured error taxonomy** and a debug log that redacts secrets by construction
-10. **CI**: typecheck, lint, unit, E2E, and a packaged `.zip` artifact per commit
+Ranked as planned, marked against the tree:
+
+1. **Reproducible builds** ◐ — lockfile committed, CI runs `npm ci` and uploads `dist/`. No
+   `npm audit` gate and no hash-for-hash reproducibility claim.
+2. **Address verification UX** ◐ — full address, mono chunking, copy with confirmation, the
+   derivation path on screen. No "first send to this address" warning.
+3. **Transaction preview that cannot lie** ✅ — `previewFromSigned` decodes the signed bytes
+   back (`src/core/tx/parse.ts`) and refuses to display if txid, weight, outputs or change
+   disagree with the plan the user approved.
+4. **Auto-lock + re-auth on send** ✅ — a 1-minute alarm enforces the idle timeout and every
+   `confirmSend` re-authenticates with the password. The timeout is not user-configurable.
+5. **Encrypted vault backup / restore file** ✗ — not built. Recovery is the phrase or the
+   raw seed; a second export path is a second thing that can leak.
+6. **Explorer failover / offline mode** ✗ — deliberately not built. A failed lookup is a
+   loud error, never a silent "0"; caching a stale balance behind a banner was judged worse
+   than saying the backend is down.
+7. **Phishing resistance** ✅ — exact-origin matching on the browser-reported origin,
+   connected-site list with revoke, the approval lives in the extension's own window, and
+   the relay drops any message whose source or origin is not this page.
+8. **Accessibility** ◐ — real forms, submit buttons, autofocus, `role="tablist"` with roving
+   focus, `aria-busy`, `aria-pressed`, contrast checked in both schemes. **i18n** ✗.
+9. **Structured error taxonomy** ✅ — `WalletError` codes across the RPC surface, with
+   user-facing text written per code; `SECRET_RESULT_KEYS` keeps secrets out of results.
+   No debug log was added (nothing to redact is better than redacting).
+10. **CI** ✅ — `.github/workflows/ci.yml` runs lint, typecheck, the unit and security
+    suites, the build, and the end-to-end suite against that exact `dist/`, and uploads it.
+    No packaged `.zip` release artifact.
+
+Also shipped, not on the original list: unlock back-off after 5 failures, pending-outpoint
+reservation so a second send cannot replace one in flight, node-vs-explorer chain identity
+checking, and a warning when the RPC password would cross the network in the clear.
 
 ---
 
 ## 7. Risks
 
-| Risk | Mitigation |
+| Risk | How it played out |
 |---|---|
-| BIP39→`SetSeed` mapping is unstandardised | Resolve in M0 against a live node; document it explicitly; make it configurable if BTQ later publishes a standard |
-| Explorer lacks a usable broadcast body | Node-RPC fallback behind a config flag (documented as such) |
-| ML-DSA keygen mismatch vs btq-core | Golden vectors in M0; fail the build if they drift |
-| 2421-byte signatures bloat popup memory | Stream/limit UTXO counts; cap inputs at the standardness ceiling anyway |
-| Testnet funds | Old smoke-wallet funds are unreliable (chain fork during earlier work) — mine or faucet fresh coins for the demo |
+| BIP39→`SetSeed` mapping is unstandardised | Still unstandardised. Resolved by implementing btq-core's scheme and documenting our BIP39 mapping as this wallet's own (`docs/HD_IMPORT.md`), plus raw-32-byte-seed import for a btq-core wallet |
+| Explorer lacks a usable broadcast body | **Realised, worse than expected** — there is no route at all (§2). Node RPC under Settings is the only push path; without one the wallet signs and keeps the hex |
+| ML-DSA keygen mismatch vs btq-core | Did not happen; `golden.json` + `tests/integration/` pin it, and the e2e mock node re-verifies every signature |
+| 2421-byte signatures bloat popup memory | Inputs capped at 90 by the standardness ceiling; the bulky decoded view stays in the worker and never crosses the RPC |
+| Testnet funds | **Realised** — the chain forked between heights 299000 and 300000, so old coins and old nodes are on a dead fork. A demo needs a `v0.5.0-testnet` node on the explorer's chain |
 
 ---
 
 ## 8. Definition of done
-Clone → `pnpm i && pnpm build` → load unpacked in Chrome → create wallet, import wallet,
-receive, send, all against public testnet; `pnpm test && pnpm test:e2e` green from a
-clean checkout; README walks a reviewer through each flow in under five minutes; video
-shows create → import → receive → send.
+Clone → `npm install && npm run build` → load unpacked in Chrome → create wallet, import
+wallet, receive, send; `npm test && npm run test:e2e` green from a clean checkout; README
+walks a reviewer through each flow in under five minutes; video shows create → import →
+receive → send.
+
+**Status:** all of it, with one asterisk — "send, against public testnet" needs a BTQ Core
+`v0.5.0-testnet` node configured under Settings, because the explorer cannot broadcast.
+The end-to-end suite (`tests/e2e/smoke.spec.ts`) walks the whole definition of done
+against the built extension on every run, and `npm run demo:video` records it.

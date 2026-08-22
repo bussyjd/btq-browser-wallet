@@ -135,6 +135,7 @@ sighash = tagged_hash("TapSighash",
 | Dilithium sigop cost | 50 per CHECKSIG | `src/script/script.h:68` |
 | Validation weight / sigop | 500 | `src/script/script.h:71` |
 | Min relay fee | 1000 sat/kvB (unchanged, but a vB is now 16 WU) | `src/policy/policy.h:63` |
+| Dust, P2MR output | **270 sats** — 43-byte output + (32+4+1+⌊107/16⌋+4)=47 B spend estimate = 90 B × 3000 sat/kvB | `src/policy/policy.cpp:26-63`, `src/policy/policy.h:61` |
 | Block weight | 8,000,000 WU | `src/consensus/consensus.h:13` |
 
 **Always compute fees from the scale-16 vsize.** Using Bitcoin's scale-4 vsize
@@ -177,19 +178,48 @@ This wallet therefore:
 
 ## 6. Explorer API ✅ probed live
 
-Base `https://explorer.bitcoinquantum.com`
+Base `https://explorer.bitcoinquantum.com`. Recorded response bodies, byte for byte, live
+in `tests/fixtures/explorer/*.json` and are driven through the real parsers by
+`tests/unit/explorer-fixtures.test.ts`.
 
 | Endpoint | Returns |
 |---|---|
 | `GET /api/v1/address/{addr}` | `balance`, `total_received`, `total_sent`, `tx_count`, `unspent_count`, `script_type: "witness_v2_p2mr"`, `isDilithium`, `first_seen_height` |
-| `GET /api/v1/address/{addr}/utxos` | spendable outputs — **coin selection** |
-| `GET /api/v1/address/{addr}/txs` | history (`{items:[…]}`) |
-| `GET /api/v1/blocks?limit=n` | tip and recent blocks (`items[].height`) |
-| `GET /api/v1/block/{hash}` | one block |
-| `POST /api/v1/tx/send` | broadcast (a GET returns **400**, i.e. the route exists and wants a body) |
+| `GET /api/v1/address/{addr}/utxos` | `{items:[{txid, vout, block_height, value, script_pub_key{type:"Buffer",data:[…]}, script_type, spent_txid, spent_vin}]}` — **coin selection** |
+| `GET /api/v1/address/{addr}/txs` | `{items:[{address, txid, block_height, tx_index, value_change}], total, page, limit}` |
+| `GET /api/v1/tx/{txid}` | `fee, vsize, weight, is_dilithium, block_height, inputs[], outputs[]` |
+| `GET /api/v1/blocks/tip` | `{hash, height, timestamp, …}` — confirmations |
+| `GET /api/v1/blocks?limit=n`, `/api/v1/block/{hash}` | recent blocks, one block |
+| `GET /api/v1/mempool/summary` | `{txCount, totalVsize, totalFees, feeHistogram}` |
 
-Amounts are strings in satoshis. **Never trust an explorer amount for signing** —
-verify against the UTXO you are spending.
+**There is no broadcast route.** `POST /api/v1/tx/send` answers
+`404 {"message":"Route POST:/api/v1/tx/send not found"}`, every other guessed push path
+404s, and the api-docs page lists none. The `GET` on that path returns 400 only because it
+collides with `/api/v1/tx/:txid` — that 400 is not evidence of a route. Broadcast
+therefore goes through a BTQ Core node's JSON-RPC (`testmempoolaccept` +
+`sendrawtransaction`); `src/core/explorer/broadcast.ts` keeps the constant and the 404
+handling so the failure is reported honestly rather than guessed at.
+
+Facts worth pinning, all verified against the live API:
+
+- Amounts are **strings** in satoshis. **Never trust an explorer amount for signing** —
+  verify against the UTXO you are spending, whose script you re-derived.
+- The `balance` field is **not trustworthy**: a heavily used address reported
+  `balance: -266828342816391` and `unspent_count: -224` while `/utxos` listed 91 real
+  unspents. Spendable balance is the sum of `/utxos`, nothing else.
+- A never-seen address returns **404** `{"error":"Address not found"}`, while its `/utxos`
+  and `/txs` return 200 with `items: []`. Only that exact body means "unused" — a Fastify
+  route-miss body or a non-JSON 404 is an outage and must not be read as an empty wallet.
+- `/utxos` pages with **`?offset=N&limit=M`** (`page` is ignored, no `total` is returned).
+  The default returned all 91 for the test address; the cap is undocumented, so page
+  defensively until a short page comes back.
+- `/txs` pages with **`?page=N&limit=M`**, 1-based, **default limit 25, max 100**
+  (`limit=1000` returns nothing). `total` is present, so the walk can stop on
+  `page * limit >= total`.
+- The chain still carries **legacy Dilithium P2PKH** outputs (`script_type:
+  "dilithium_pubkeyhash"`, `76a914…88bb`, base58 `n…` on testnet). The docs call them
+  historical; P2MR is the only supported receive type, and this wallet refuses them as
+  destinations with that reason.
 
 ---
 
