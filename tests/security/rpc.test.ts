@@ -101,9 +101,22 @@ describe('message sender origin', () => {
     expect(isUntrustedSender({ origin: EXT }, EXT)).toBe(false);
   });
 
-  it('a tab is untrusted even when origin looks like the extension', () => {
-    expect(isUntrustedSender({ tab: { id: 1 }, origin: EXT }, EXT)).toBe(true);
+  it('a content script in a tab is untrusted whatever the page claims', () => {
+    // Attacker gain: a content script that passed as the extension would reach
+    // wallet.unlock / wallet.confirmSend with page-supplied parameters.
     expect(isUntrustedSender({ tab: { id: 1 }, origin: 'https://evil.example' }, EXT)).toBe(true);
+    expect(isUntrustedSender({ tab: { id: 1 }, origin: `${EXT}.evil.example` }, EXT)).toBe(true);
+    expect(isUntrustedSender({ tab: { id: 1 }, url: 'https://evil.example/x' }, EXT)).toBe(true);
+    // No origin at all and attached to a tab: refuse rather than guess.
+    expect(isUntrustedSender({ tab: { id: 1 } }, EXT)).toBe(true);
+  });
+
+  it('an extension page in a tab or window is trusted — the approval window is one', () => {
+    // Regression: treating any tab sender as a page locked the site-connect
+    // approval window (chrome.windows.create) and an onboarding tab out of
+    // wallet.*, so a user could never approve a site or finish onboarding.
+    expect(isUntrustedSender({ tab: { id: 7 }, origin: EXT }, EXT)).toBe(false);
+    expect(isUntrustedSender({ tab: { id: 7 }, url: `${EXT}/src/ui/index.html?connect=1` }, EXT)).toBe(false);
   });
 
   it('a popup with no tab and the exact extension origin is trusted', () => {

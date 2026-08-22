@@ -119,12 +119,62 @@ describe('site-connect exact origin', () => {
     await k.scan(async (address) => ({
       used: address === first.address,
       txCount: address === first.address ? 1 : 0,
-      balanceSats: address === first.address ? 1n : 0n,
+      reportedBalanceSats: address === first.address ? 1n : 0n,
     }));
     const next = await k.receiveAddress();
     await k.approveConnect('https://dapp.example');
     const result = await k.getAccounts('https://dapp.example');
     expect(result.accounts).toEqual([next.address]);
     expect(result.accounts[0]).not.toBe(first.address);
+  });
+});
+
+describe('site-connect state machine through dispatch', () => {
+  const DAPP = 'https://dapp.example';
+  const OTHER = 'https://other.example';
+  const fromPage = (origin: string) => ({ fromTab: true as const, pageOrigin: origin });
+  const fromPopup = { fromTab: false as const };
+
+  function ringWithStore() {
+    const store = new MemoryWalletStorage();
+    return { k: new Keyring(store, { encrypt: TEST_ENCRYPT, network: 'testnet' }), store };
+  }
+
+  it('walks pending → denied → pending → approved without ever leaking accounts early', async () => {
+    const { k, store } = ringWithStore();
+    await k.importMnemonic(MNEMONIC, PASSWORD);
+
+    // An origin nobody approved gets a prompt, not an address.
+    expect(await dispatch(k, { method: 'page.requestAccounts' }, fromPage(DAPP))).toEqual({ pending: true });
+    expect(store.pendingConnect).toEqual({ origin: DAPP });
+    expect(await dispatch(k, { method: 'page.getAccounts' }, fromPage(DAPP))).toEqual({ accounts: [] });
+
+    // Deny clears the prompt and changes nothing else.
+    await dispatch(k, { method: 'wallet.denyConnect' }, fromPopup);
+    expect(store.pendingConnect).toBeNull();
+    expect(await dispatch(k, { method: 'page.getAccounts' }, fromPage(DAPP))).toEqual({ accounts: [] });
+
+    // Ask again, approve this time.
+    expect(await dispatch(k, { method: 'page.requestAccounts' }, fromPage(DAPP))).toEqual({ pending: true });
+    await dispatch(k, { method: 'wallet.approveConnect', params: { origin: DAPP } }, fromPopup);
+    expect(store.pendingConnect).toBeNull();
+    const address = (await k.receiveAddress()).address;
+    expect(await dispatch(k, { method: 'page.getAccounts' }, fromPage(DAPP))).toEqual({ accounts: [address] });
+    expect(await dispatch(k, { method: 'page.requestAccounts' }, fromPage(DAPP))).toEqual({ accounts: [address] });
+
+    // Approving one site says nothing about any other site.
+    expect(await dispatch(k, { method: 'page.getAccounts' }, fromPage(OTHER))).toEqual({ accounts: [] });
+    expect(await dispatch(k, { method: 'page.requestAccounts' }, fromPage(OTHER))).toEqual({ pending: true });
+  });
+
+  it('a tab whose sender carries no origin cannot call page.* at all', async () => {
+    const { k } = ringWithStore();
+    await k.importMnemonic(MNEMONIC, PASSWORD);
+    await expect(dispatch(k, { method: 'page.requestAccounts' }, { fromTab: true })).rejects.toThrow(
+      /not available to pages/,
+    );
+    await expect(
+      dispatch(k, { method: 'page.getAccounts', params: { origin: DAPP } }, { fromTab: true }),
+    ).rejects.toThrow(/not available to pages/);
   });
 });

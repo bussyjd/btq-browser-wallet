@@ -29,5 +29,4 @@ export function revokeOrigin(allowed: readonly string[], origin: string): string
 }
 
 export const PAGE_METHODS = ['page.requestAccounts', 'page.getAccounts', 'page.disconnect'] as const;
-export type PageMethod = (typeof PAGE_METHODS)[number];
 export const PAGE_METHOD_SET: ReadonlySet<string> = new Set(PAGE_METHODS);
