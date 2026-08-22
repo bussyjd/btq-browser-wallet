@@ -12,23 +12,22 @@ You are building a MetaMask-style **browser extension wallet for Bitcoin Quantum
 full 95-row BTQ-vs-Bitcoin difference map with coverage status per row; `docs/HD_IMPORT.md`
 explains the import-from-seed design with diagrams.
 
-## What the wallet has to do
+## What the wallet does
 
-The feature checklist:
-
-- Create a wallet from a new seed; import an existing one.
-- Receive and send Dilithium (P2MR) payments on testnet.
-- Read balance and history from the public explorer.
-- Sign inside the extension; keep the keys there.
-- Look and feel like something a person would trust with money, and say clearly what it is
-  doing — in the UI and in the README.
-- Structured, readable code, and a test suite written the way a professional security
-  operations team would test a program that holds keys: create and import, unlock, a bad
-  seed, a send that must be rejected, what is in storage, and what a webpage can reach.
-- Site-connect like MetaMask: a page asks, the user approves an exact origin, and it can
-  be revoked.
-- Fee choice, onboarding polish, and everything else a real wallet ships — that last part
-  is open-ended, and it is where the difference between a demo and a wallet shows.
+- Creates a wallet from a new BIP39 phrase, and imports an existing one — either a phrase
+  or a raw 32-byte btq-core HD seed. They are different inputs, not two spellings of one.
+- Receives and sends P2MR (ML-DSA-44) payments on BTQ testnet.
+- Reads balance and history from the public explorer, and broadcasts through a BTQ Core
+  node's JSON-RPC, because the explorer has no push route.
+- Signs inside the service worker and keeps the keys there.
+- Connects to sites the way MetaMask does: a page asks, the user approves one exact
+  origin, and the grant is revocable.
+- Ships the wallet-shaped work around the protocol — fee presets, gap-limit restore,
+  auto-lock, activity with confirmations, and error copy that names the cause and the next
+  step.
+- Is tested the way a security operations team would test a program that holds keys:
+  create and import, unlock, a bad seed, a send that must be refused, what is in storage,
+  and what a web page can reach.
 
 ## Non-negotiable protocol facts
 
@@ -63,14 +62,18 @@ src/core/       pure, browser-safe: no Buffer, no node:, no chrome.*, no fetch
   vault/        encrypt.ts (PBKDF2-SHA256 600k + AES-256-GCM)  payload.ts
   wallet/       keyring.ts (the state machine) derive gap storage destination format errors
   explorer/     parse · schema · utxo · history · broadcast (no I/O — pure parsers)
+  connect/      permissions.ts (the per-origin allowlist)
   rpc/          protocol.ts (method union) dispatch.ts origin.ts
   network/      backend.ts (endpoint validation) jsonrpc.ts
+  util/         bytes.ts hex.ts
 src/background/ MV3 service worker — THE ONLY place keys are decrypted
                 index.ts (message listener) explorer.ts node-rpc.ts backend-store.ts
                 chrome-storage.ts connect.ts (the approval broker)
 src/content/    relay only; allowlisted page.* methods; never sees key material
 src/inpage/     btq-provider.js — window.btq, MAIN world, frozen surface
-src/ui/         React popup: App.tsx router, hooks/useWallet.ts, components/, screens/,
+src/ui/         React popup: App.tsx router, hooks/useWallet.ts, components/, screens/
+                (Welcome Onboarding CreatePassword ShowSeed ConfirmSeed ImportChoice
+                ImportMnemonic ImportRawSeed Unlock Home Settings ConnectApproval),
                 screens/home/{Receive,Send,Activity}, types.ts (RPC result shapes)
 ```
 
@@ -79,10 +82,14 @@ only while unlocked. Content scripts and pages get a narrow allowlisted message 
 Any change that moves key material outward is a bug, however convenient.
 
 **Connect lifecycle:** an unapproved origin's `page.requestAccounts` is held — the broker
-parks the response, stores the pending origin, and opens the approval window. Approve →
-one address; deny, closed window, or a 5-minute timeout → `USER_REJECTED` (EIP-1193
-`4001`). One pending request per origin; a locked wallet answers `LOCKED` and opens
-nothing.
+parks the response in a timestamped per-origin map and opens a dedicated approval window
+whose URL carries the site: `?connect=1&origin=…`. `wallet.approveConnect` is refused
+unless the broker is still holding that origin *and* it matches the sender window's own
+`?origin=`, so a window opened for one site can never grant another; `wallet.denyConnect`
+carries its origin too. Approve → one address; deny, a closed window, or a 5-minute
+timeout → `USER_REJECTED` (EIP-1193 `4001`). A repeat request from the same origin joins
+the first; at most three origins wait at once and the next is rejected rather than queued.
+A locked wallet answers `LOCKED` and opens nothing.
 
 ## Working conventions
 

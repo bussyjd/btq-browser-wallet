@@ -5,6 +5,10 @@ keys, P2MR (witness v2) addresses, `tbtq1z…`. The seed is generated, sealed an
 inside the extension's service worker; balances and history come from the public explorer,
 and every transaction is built and signed locally before anything touches the network.
 
+> **Unofficial, unaudited, testnet only.** An independent project, not affiliated with or
+> endorsed by Bitcoin Quantum. It has had no third-party security audit.
+> Use it with testnet keys and testnet coins only — never a mainnet seed, never real funds.
+
 Five-minute path: [load the extension](#load-the-extension) → [try the flows](#try-the-flows)
 → [run the tests](#run-the-tests). If you only read one caveat, read
 [Broadcast: the truth](#broadcast-the-truth).
@@ -13,20 +17,21 @@ Five-minute path: [load the extension](#load-the-extension) → [try the flows](
 
 | | |
 |---|---|
-| <img src="docs/screenshots/create-seed.png" alt="The 12-word recovery phrase, shown once with a warning that closing the window discards it" width="330"> | <img src="docs/screenshots/receive.png" alt="Receive tab: balance, QR code, the tbtq1z address and its derivation path" width="330"> |
+| <img src="docs/screenshots/create-seed.png" alt="The recovery-phrase screen: twelve numbered slots, blanked for this screenshot, under a warning that closing the window discards the phrase" width="330"> | <img src="docs/screenshots/receive.png" alt="Receive tab: balance, QR code, the tbtq1z address and its derivation path" width="330"> |
 | **Create** — the phrase is shown once and never written to storage. | **Receive** — next unused address, its path, QR, copy. |
 | <img src="docs/screenshots/send-review.png" alt="Send review card: destination, amount, fee in tBTQ and sat/vB, change, inputs, total debited, password field" width="330"> | <img src="docs/screenshots/connect.png" alt="Connection request screen naming the site origin and what it will and will not see" width="330"> |
 | **Send** — the review card replaces the form, so what you read is what gets signed. | **Site-connect** — exact origin, revocable, and it can never move funds. |
 
-Dark theme shown; the popup follows the OS light/dark setting. The recovery phrase above
-belongs to a throwaway wallet made for the screenshot.
+Dark theme shown; the popup follows the OS light/dark setting. The twelve words in the
+first shot are blanked in the DOM before the capture — a wallet's own README is no place
+for a legible recovery phrase.
 
 ## Load the extension
 
 Requires **Node 20.19+ (or 22.12+)** — Vite 7 and the Playwright runner both need it.
 
 ```sh
-npm install
+npm ci
 npm run build      # → dist/
 ```
 
@@ -87,10 +92,11 @@ window, or five minutes of silence gets it `USER_REJECTED` (EIP-1193 code `4001`
 on the relay's allowlist.
 
 **Settings** (the sliders icon in the header). Explorer URL, an optional BTQ Core JSON-RPC
-(URL, user, password), **Test connection** — which reports the explorer tip, the node's
-chain and height, and warns if the node is behind or on a different chain — **Connected
-sites** with **Revoke**, **Rescan all addresses**, **Lock now**, and **Remove wallet from
-this device**, which only proceeds once you type DELETE.
+(URL, user, password), **Test connection** — which reports the explorer tip and the node's
+chain and height, warns when the node is behind, and refuses one whose block hash at the
+explorer's tip disagrees — **Connected sites** with **Revoke**, **Rescan all addresses**,
+**Lock now**, and **Remove wallet from this device**, which only proceeds once you type
+DELETE.
 
 ## Broadcast: the truth
 
@@ -129,7 +135,8 @@ End to end, in a real browser:
 
 ```sh
 npm run playwright:install   # once: fetches the Chromium build Playwright drives
-npm run test:e2e             # builds dist/, loads it in Chromium, 22 tests (~25 s)
+npm run test:e2e             # builds dist/, loads it in Chromium: 23 tests, plus the
+                             # regtest tier, which skips unless a node is running
 npm run test:all             # the above, after npm test
 SKIP_BUILD=1 npm run test:e2e    # reuse the current dist/ while iterating
 ```
@@ -187,16 +194,19 @@ case would otherwise miss, and the one thing the suite asserts *is* stored in th
 ## Video
 
 [`demo/btq-wallet-demo.mp4`](demo/btq-wallet-demo.mp4) is the end-to-end suite recording
-itself — the real popup, driven by the tests, nothing staged. Regenerate it with:
+itself — the real popup, driven by the tests, nothing staged. It runs create → receive →
+lock and unlock → fund → send, then a restore from the phrase on a second profile.
 
 ```sh
 npm run demo:video     # RECORD_VIDEO=1 playwright test tests/e2e/smoke.spec.ts, then
                        # scripts/stitch-demo.sh concatenates the clips (needs ffmpeg)
+RECORD_VIDEO=1 npm run test:e2e && sh scripts/stitch-demo.sh   # the whole suite, site-connect included
 ```
 
-It is silent and popup-only by design. For a narrated walkthrough that also shows the
-browser chrome and the dapp page, [`docs/VIDEO.md`](docs/VIDEO.md) is a shot list with
-timings and what to say.
+Playwright records video and nothing else, so the file is silent, popup-only (360×600, no
+browser chrome, no cursor) and machine-paced. Clips are written one per page under
+`demo/raw/` — git-ignored, ordered by `demo/raw/order.txt` — and only the stitched mp4 is
+committed.
 
 ## Protocol notes
 
@@ -240,7 +250,7 @@ tests/e2e/fixtures the mock explorer and node, the independent verifiers, dapp.h
 tests/integration/ cross-checks against a live btq-core node (opt-in)
 tests/vectors/     golden.json — the frozen contract with consensus
 scripts/           gen-vectors.ts · stitch-demo.sh
-docs/              REFERENCE · HD_IMPORT · BTQ_CORE_MAP · PLAN · VIDEO · screenshots
+docs/              REFERENCE · HD_IMPORT · BTQ_CORE_MAP · PLAN · screenshots
 demo/              btq-wallet-demo.mp4, recorded by npm run demo:video
-.claude/           the skill and the security-review agent used to build this
+.claude/           agent instructions: the wallet skill and a security-review reviewer
 ```

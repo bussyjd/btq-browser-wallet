@@ -10,11 +10,12 @@ broadcast goes through a BTQ Core node's JSON-RPC.
 1. `.claude/skills/btq-wallet/SKILL.md` — non-negotiable protocol facts, architecture,
    conventions, per-feature definition of done, known traps.
 2. `docs/REFERENCE.md` — every protocol constant with its `btq-core` file:line, verified
-   against a live regtest node (Milestone 0).
+   against a live regtest node.
 3. `docs/BTQ_CORE_MAP.md` — 95 verified BTQ-vs-Bitcoin differences, each tagged
    implemented / planned / n-a for this wallet. Coverage checklist.
 4. `docs/HD_IMPORT.md` — the import-from-seed design with byte-level diagrams.
-5. `docs/PLAN.md` — milestones M0–M6 and the test plan, with what landed.
+5. `docs/PLAN.md` — the engineering plan: protocol facts, build order, the test plan,
+   and what is deliberately not built.
 
 Never assert a protocol constant from memory — cite `docs/REFERENCE.md` or btq-core
 source. Reading that source needs a local checkout of
@@ -62,22 +63,24 @@ the wallet.
 - `tests/vectors/golden.json` is the contract with consensus. Never regenerate it to make
   a test pass; regenerate only via `npx tsx scripts/gen-vectors.ts` with a fresh
   `BTQ_REGTEST=1` cross-check green.
-- The repo ships the product and nothing else. Working notes, briefs and PDFs stay
+- The repo ships the product and nothing else. Working notes and scratch files stay
   outside it (`.gitignore` covers `*.pdf`); anything committed is something a reader of
   the wallet is meant to read.
 
 ## Architecture
 
 ```
-src/core/          pure protocol code: crypto script tx vault wallet explorer rpc network
+src/core/          pure protocol code: crypto script tx vault wallet explorer connect
+                   rpc network util
 src/background/    MV3 service worker: index.ts (listener) keyring dispatch
                    explorer.ts node-rpc.ts backend-store.ts chrome-storage.ts connect.ts
 src/content/       isolated-world relay — allowlisted page.* only
 src/inpage/        btq-provider.js — MAIN world, frozen surface, no chrome.*
 src/ui/            App.tsx router · hooks/useWallet.ts (the only caller of rpc())
                    components/ (Button Card Field Header Toast TabBar AddressBlock qr …)
-                   screens/ (Welcome CreatePassword ShowSeed ConfirmSeed ImportChoice
-                   ImportMnemonic ImportRawSeed Unlock Home Settings ConnectApproval)
+                   screens/ (Welcome Onboarding CreatePassword ShowSeed ConfirmSeed
+                   ImportChoice ImportMnemonic ImportRawSeed Unlock Home Settings
+                   ConnectApproval)
                    screens/home/ (Receive Send Activity) · types.ts = RPC result shapes
 ```
 
@@ -86,11 +89,23 @@ The popup⇄worker RPC surface is `wallet.*`; pages reach only `page.requestAcco
 `src/core/rpc/protocol.ts` + `dispatch.ts`, its result shape in `src/ui/types.ts`.
 
 **Connect lifecycle.** An unapproved origin's `page.requestAccounts` is *held*: the broker
-(`src/background/connect.ts`) parks `sendResponse`, stores the pending origin, and opens
-the approval UI (`chrome.action.openPopup()`, else `chrome.windows.create(…?connect=1)`).
-`wallet.approveConnect` resolves it with one address; deny, a closed window, or a
-5-minute timeout rejects with `USER_REJECTED` → EIP-1193 `4001`. One pending request per
-origin. A locked wallet answers `LOCKED` and opens nothing.
+(`src/background/connect.ts`) parks `sendResponse` in a map keyed by canonical origin, each
+entry timestamped, and opens a dedicated approval window at
+`src/ui/index.html?connect=1&origin=…` — the origin travels in the URL so the window can
+only ever speak for the site it was opened for. (`chrome.action.openPopup()` is the last
+resort when no window can be created: it has no window id to close, and no e2e test can
+drive it.)
+
+`wallet.approveConnect` requires both that the broker is still holding that origin and that
+it matches the sender window's own `?origin=`; anything else is `FORBIDDEN`, so the popup
+cannot grant a site that is not, right now, waiting. `wallet.denyConnect` carries its origin
+too, so cancelling one prompt never rejects a site the user never looked at. Approve
+resolves with one address; deny, a closed window, or the 5-minute timeout rejects with
+`USER_REJECTED` → EIP-1193 `4001`. A second request from the same origin joins the first;
+at most three origins wait at once (`MAX_PENDING_PROMPTS`) and the fourth is rejected rather
+than queued. A locked wallet answers `LOCKED` and opens nothing. Storage holds only a
+timestamped mirror of what is pending — stale or unheld entries are dropped when read, and
+nothing is ever granted out of it.
 
 ## Commands
 

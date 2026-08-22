@@ -1,9 +1,10 @@
 # BTQ protocol reference for wallet implementers
 
 Everything here was **verified against btq-core source** (and, where marked ✅, against a
-running regtest node). Line numbers are from the `feature/p2mr-error-test` branch of
-`btq-ag/btq-core`. If you are starting a fresh session, this file plus `SKILL.md` is
-all the protocol knowledge you need.
+running regtest node). Line numbers come from a `btq-ag/btq-core` checkout on the
+`v0.5.0-testnet` line; if yours has drifted, the symbol names are the stable anchor. This
+file plus [`BTQ_CORE_MAP.md`](BTQ_CORE_MAP.md) is the protocol knowledge a BTQ wallet
+needs.
 
 ---
 
@@ -232,7 +233,7 @@ Facts worth pinning, all verified against the live API:
 
 ---
 
-## 8. Milestone 0 evidence ✅
+## 8. Cross-check evidence ✅
 
 Reproduce with a regtest node (see README):
 
@@ -246,7 +247,7 @@ Reproduce with a regtest node (see README):
 
 ---
 
-## 9. Security notes carried over from a prior BTQ wallet review
+## 9. Security notes for a P2MR signer
 
 - **Never sign a PSBT-supplied leaf without checking it commits to the witness program.**
   btq-core enforces this in `src/psbt_dilithium.cpp` `ValidateP2MRDilithiumInput`

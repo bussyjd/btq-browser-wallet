@@ -1,6 +1,20 @@
 # Security model
 
-This wallet holds ML-DSA-44 seeds. Treat it like a key-custody program, not a demo.
+> **Unofficial, unaudited, testnet only.** An independent project, not affiliated with or
+> endorsed by Bitcoin Quantum. No third-party audit has been done.
+> Use it with testnet keys and testnet coins only — never a mainnet seed, never real funds.
+
+This wallet holds ML-DSA-44 seeds. Treat it like key-handling software, not a demo.
+
+## Reporting a vulnerability
+
+Report privately on GitHub: **Security → Advisories → Report a vulnerability** on this
+repository. If private advisories are not available to you, open an issue saying only that
+you have found something and asking for a private channel — no details in the issue.
+
+There is no monitored email address for this project, and no bug bounty. Responses are
+best-effort. A vulnerability in btq-core itself belongs with
+[btq-ag/btq-core](https://github.com/btq-ag/btq-core), not here.
 
 ## Trust boundary
 

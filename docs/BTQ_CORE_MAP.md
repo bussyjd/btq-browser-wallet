@@ -1,9 +1,9 @@
 # btq-core reference map, through the browser-wallet lens
 
 95 verified differences between Bitcoin Quantum and Bitcoin, each anchored to a
-`btq-core` source line. This map was produced by a multi-agent sweep of the btq-core,
-drongo and Sparrow sources for a previous BTQ wallet integration, then audited (nine
-anchors corrected) and re-framed here for this project.
+`btq-core` source line. The map was compiled by reading the btq-core sources directly
+during earlier BTQ work, then re-audited for this repository (nine anchors corrected)
+and re-framed around this wallet.
 
 **How to use it:** treat the `btq-core` column as ground truth. The *In this wallet*
 column says where the fact lives in our code, or why it does not apply — so this doubles
@@ -99,15 +99,15 @@ the explorer client and the node RPC landed._
 
 ### Every ML-DSA-signed transaction is re-validated by btq-core's own interpreter before broadcast
 
-- **Bitcoin:** Sparrow finalizes and broadcasts through Electrum; no local consensus script validation of the signature it just produced.
-- **BTQ:** The BTQ backend hands the finalized bytes to testmempoolaccept first — which runs the real P2MR witness-program check, the tapleaf commitment and OP_CHECKSIGDILITHIUM verification — and refuses to broadcast unless Core's txid and wtxid match the locally serialized bytes. Only then does it call sendrawtransaction and re-check the returned txid.
+- **Bitcoin:** A wallet that pushes through an Electrum server or a public API gets no consensus check of the signature it just produced; the first real validation happens on a node it cannot see.
+- **BTQ:** testmempoolaccept is a usable dry run: it runs the real P2MR witness-program check, the tapleaf commitment and OP_CHECKSIGDILITHIUM verification, so a wallet can refuse to broadcast unless Core's txid and wtxid match the bytes it serialized locally, and only then call sendrawtransaction and re-check the returned txid.
 - **btq-core:** `src/script/interpreter.cpp:2276-2314` (witness v2 P2MR: control-block size/parity at :2296-2303, ComputeTapleafHash with control[0] & TAPROOT_LEAF_MASK at :2304, VerifyP2MRCommitment at :2305, then ExecuteWitnessScript at SigVersion::P2MR_TAPSCRIPT at :2314); `src/policy/policy.cpp:295-313`
 - **In this wallet:** **implemented** — `src/core/crypto/mldsa.ts`, `src/core/script/p2mr.ts`
 
 ### Watch-only registration proves btq-core recognises the wallet's Dilithium leaf template
 
 - **Bitcoin:** Descriptor import of an xpub; the node derives the same scripts from the descriptor.
-- **BTQ:** ML-DSA has no descriptor form, so the backend registers the leaf explicitly via getnewp2mraddress({depth:0, leaf_version:0xc0, script:<leaf hex>}) and then requires Core to echo back the identical address, scriptPubKey and merkle_root, plus getaddressinfo reporting witness_version 2, solvable and isdilithium — the last of which is true only when Core's own solver parses the leaf as a single Dilithium key.
+- **BTQ:** ML-DSA has no descriptor form, so a wallet registers the leaf explicitly via getnewp2mraddress({depth:0, leaf_version:0xc0, script:<leaf hex>}) and then requires Core to echo back the identical address, scriptPubKey and merkle_root, plus getaddressinfo reporting witness_version 2, solvable and isdilithium — the last of which is true only when Core's own solver parses the leaf as a single Dilithium key.
 - **btq-core:** `src/wallet/rpc/p2mr.cpp:41-92` (getnewp2mraddress); `src/wallet/rpc/addresses.cpp:723-731` (isdilithium requires GetSingleDilithiumKeyIDForP2MR for a WitnessV2P2MR dest); `src/script/dilithium_leaf.cpp:80-93` (ParseP2MRDilithiumLeaf); `src/script/solver.cpp:115-129` (MatchPayToDilithiumPubkey, OP_PUSHDATA2 form)
 - **In this wallet:** **implemented** — `src/core/crypto/mldsa.ts`, `src/core/script/p2mr.ts`
 
@@ -162,10 +162,10 @@ the explorer client and the node RPC landed._
 - **btq-core:** `src/wallet/rpc/p2mr.cpp:41` (getnewp2mraddress), :54-57 (returns address / p2mr_id / scriptPubKey / merkle_root); `src/wallet/p2mr.cpp:399-402` (leaf_version parity check then P2MRBuilder::Add); `src/wallet/p2mr.cpp:595-599` (CreateSingleLeafDilithiumP2MR: CScript() << ToByteVector(pubkey) << OP_CHECKSIGDILITHIUM at depth 0, leaf_version TAPROOT_LEAF_TAPSCRIPT)
 - **In this wallet:** **implemented** — `src/core/script/p2mr.ts`, `src/core/script/address.ts`
 
-### P2MR-only wallet policy in the app (SINGLE_MLDSA + ScriptType.P2MR)
+### A P2MR address comes from an ML-DSA public key, not from an EC key
 
-- **Bitcoin:** Sparrow offers P2PKH/P2SH-P2WPKH/P2WPKH/P2WSH/P2TR per policy type; no ML-DSA policy exists.
-- **BTQ:** A BTQ wallet is created as PolicyType.SINGLE_MLDSA with ScriptType.P2MR; that ScriptType allows only PolicyType.SINGLE_MLDSA, refuses every ECKey-based address/script/descriptor entry point, and has no UR/descriptor export. Addresses and output scripts come from the ML-DSA public key rather than from an ECKey: Wallet.getAddress → P2MR.addressForPublicKey, Wallet.getOutputScript → ScriptType.P2MR.getOutputScript(merkleRootForPublicKey). Descriptor export degrades to addr(<address>) because no descriptor language exists for raw ML-DSA keys.
+- **Bitcoin:** A wallet picks an output type per keystore — P2PKH / P2SH-P2WPKH / P2WPKH / P2WSH / P2TR — and every one of them hangs off a secp256k1 key and has a descriptor.
+- **BTQ:** A BTQ wallet is P2MR-only, and there is no EC key anywhere in the path: the address and the output script are derived from the 1312-byte ML-DSA public key wrapped in a single leaf. The key is over 0xff bytes, so CScript encodes the push as OP_PUSHDATA2 + LE16 (0x4d 0x20 0x05) — a leaf built with a one-byte push length is a different script and a different address. Descriptor export degrades to addr(<address>): no descriptor language exists for a raw ML-DSA key.
 - **btq-core:** `src/wallet/p2mr.cpp:595` (single-leaf Dilithium P2MR leaf script); `src/script/script.h:494` (CScript push encoding: >0xff ⇒ OP_PUSHDATA2 + LE16, so the 1312-byte key encodes as 0x4d 0x20 0x05); `src/script/script.h:220` (OP_CHECKSIGDILITHIUM = 0xbb); `src/crypto/dilithium_key.h:243` (CDilithiumPubKey::SIZE = DilithiumConstants::PUBLIC_KEY_SIZE, 1312 at line 64)
 - **In this wallet:** **implemented** — `src/core/script/p2mr.ts`, `src/core/script/address.ts`
 
@@ -227,10 +227,10 @@ the explorer client and the node RPC landed._
 - **btq-core:** `src/script/interpreter.cpp:1966` (if (nHashType == SIGHASH_DEFAULT) return false), :116 (sig.size() must be BTQ_DILITHIUM_SIGNATURE_SIZE + 1), :1730 (hash_type <= 0x03 || 0x81..0x83), :1728 (SIGHASH_DEFAULT -> SIGHASH_ALL for output_type), :1296-1297 (NULLFAIL on non-empty failing sig); `src/script/sign.cpp:105` (hashtype = nHashType == SIGHASH_DEFAULT ? SIGHASH_ALL : nHashType), :119 (vchSig.push_back(hashtype)); `src/crypto/dilithium_wrapper.h:18` (BTQ_DILITHIUM_SIGNATURE_SIZE 2420)
 - **In this wallet:** **implemented** — `src/core/tx/sighash.ts`
 
-### Wallet-side dispatch and live digest verification
+### Nothing but the wallet computes the digest, so verify it against a node
 
-- **Bitcoin:** Sparrow signs with per-keystore ECKeys and TransactionSignature objects; the node backend is an Electrum/Core RPC that never re-validates the local digest.
-- **BTQ:** PolicyType.SINGLE_MLDSA short-circuits the ECKey path into signBtq, which fills the BIP360 leaf/root fields and delegates the digest entirely to drongo; the finalized transaction is then dry-run against BTQ Core's testmempoolaccept before broadcast, so a wrong digest surfaces as a rejection rather than a lost coin.
+- **Bitcoin:** A wallet signs the digest it computed itself, and the backend it broadcasts through never re-derives it.
+- **BTQ:** Same exposure, larger blast radius: the P2MR digest is the BIP341 tapscript sighash over a leaf only the wallet holds, and no explorer or PSBT field carries it. The cheap defence is a dry run against testmempoolaccept before broadcast, where a wrong digest surfaces as a rejection rather than a lost coin.
 - **btq-core:** `src/script/interpreter.cpp:1974` (VerifyDilithiumSignature gate reached only after the P2MR digest matches), :2314 (ExecuteWitnessScript with SigVersion::P2MR_TAPSCRIPT)
 - **In this wallet:** **implemented** — `src/core/tx/sighash.ts`
 
@@ -322,8 +322,8 @@ the explorer client and the node RPC landed._
 
 ### Scale-16 fee rate and virtual size in the UI
 
-- **Bitcoin:** Sparrow displays vsize as Transaction.getWeightUnits()/4 and fee rate as fee/vsize everywhere.
-- **BTQ:** Qparrow routes the transaction-detail vsize and fee-rate displays, the RBF replacement sizing and the CPFP child sizing through the policy-aware Wallet.getVirtualSize (scale 16), and prices an extra RBF input at witnessLength/16 rather than /4.
+- **Bitcoin:** Weight/4 is vsize everywhere, so a UI can divide by 4 wherever it needs a size or a fee rate.
+- **BTQ:** Every size a user sees has to come out of the scale-16 arithmetic: the transaction's vsize, the fee rate in sat/vB, the sizing of an RBF replacement or a CPFP child, and the price of one more P2MR input (witness bytes/16, not /4). A display left on Bitcoin's /4 reports a fee rate roughly 4x too low for the same fee.
 - **btq-core:** `src/core_write.cpp:183-184` (RPC "vsize" = GetVirtualTransactionSize(tx), "weight" = GetTransactionWeight(tx)) — the values the UI must reproduce
 - **In this wallet:** **implemented** — `src/ui/screens/home/Send.tsx` — the review card shows sat/vB and vB alongside the fee in tBTQ
 
@@ -350,12 +350,12 @@ the explorer client and the node RPC landed._
 - **btq-core:** `src/wallet/scriptpubkeyman.cpp:2448` (GenerateNewDilithiumKeyLocked); :2467 (desc_ctx literal); :2472 (htobe32(next_index)); :2477 (type_byte = OutputType::DILITHIUM_LEGACY); :2503 (next_index++); `src/wallet/p2mr.cpp:640` (requires an active OutputType::LEGACY ScriptPubKeyMan)
 - **In this wallet:** **implemented** — `src/core/crypto/hd.ts`, `src/core/crypto/mldsa.ts`
 
-### Wallet scheme #3: HKDF-SHA512 custody derivation (wallet-level convention only)
+### Wallet-level derivation is unstandardised, and consensus never sees it
 
-- **Bitcoin:** Key derivation is standardised across implementations by BIP32/BIP44/BIP84/BIP86 so any wallet can restore any other wallet's seed.
-- **BTQ:** Qparrow derives every key from a 32-byte master secret with RFC 5869 HKDF-SHA512: PRK = HMAC-SHA512(salt="Qparrow/BTQ/Custody/v1", ikm=masterSecret), then OKM = first 32 bytes of HMAC-SHA512(PRK, "ML-DSA-44/P2MR" || 0x00 || rpcChain || chainByte(0=receive,1=change) || ser32BE(index) || 0x01); btq-core standardises nothing here — consensus only ever sees the 1312-byte public key pushed on the witness stack.
+- **Bitcoin:** Key derivation is standardised across implementations by BIP32/BIP44/BIP84/BIP86, so any wallet can restore any other wallet's seed.
+- **BTQ:** Outside btq-core's own two schemes there is no published BTQ standard, and derivation is not consensus-visible at all: the only key material a block ever sees is the 1312-byte public key pushed on the witness stack. Two wallets can therefore disagree about how a seed becomes keys and both produce valid spends — which makes a seed portable only between wallets that state, and share, the same convention.
 - **btq-core:** `src/script/interpreter.cpp:1270` (OP_CHECKSIGDILITHIUM reads sig and pubkey off the stack; no derivation is consensus-visible); `src/outputtype.h:24` (comment: P2MR "is not descriptor-backed: destinations come from wallet/p2mr.cpp, which stores the script tree as wallet metadata")
-- **In this wallet:** **implemented** — `src/core/crypto/hd.ts`, `src/core/crypto/mldsa.ts`
+- **In this wallet:** **implemented** — `src/core/crypto/hd.ts`; the convention this wallet adopts, and why, is stated in `docs/HD_IMPORT.md`
 
 ### Seed-to-keypair expansion is FIPS 204 ML-DSA-44 on both sides
 
@@ -381,58 +381,58 @@ the explorer client and the node RPC landed._
 ### Key generation entry points: node-derived vs wallet-derived
 
 - **Bitcoin:** getnewaddress always makes the node derive the key from its own descriptor/HD seed.
-- **BTQ:** btq-core offers getnewdilithiumaddress, which derives a Dilithium key internally and wraps it in a single leaf <pubkey> OP_CHECKSIGDILITHIUM at depth 0, leaf_version TAPROOT_LEAF_TAPSCRIPT (0xc0), and rejects any address_type other than "p2mr"; Qparrow never calls it and instead pushes its own leaf through getnewp2mraddress, so BTQ Core stores the key material but never generates it.
+- **BTQ:** btq-core offers getnewdilithiumaddress, which derives a Dilithium key internally and wraps it in a single leaf <pubkey> OP_CHECKSIGDILITHIUM at depth 0, leaf_version TAPROOT_LEAF_TAPSCRIPT (0xc0), and rejects any address_type other than "p2mr". A wallet that derives its own keys never calls it and pushes its leaf through getnewp2mraddress instead, so btq-core can hold and watch key material it never generated.
 - **btq-core:** `src/wallet/rpc/dilithium.cpp:30` (getnewdilithiumaddress, address_type must be "p2mr" at :68); `src/wallet/p2mr.cpp:656` (CreateDilithiumP2MRReceive); `src/wallet/p2mr.cpp:595` (single-leaf script construction); `src/wallet/rpc/p2mr.cpp:41` (getnewp2mraddress takes tree/label/internal and generates no key)
 - **In this wallet:** **implemented** — `src/core/crypto/hd.ts`, `src/core/crypto/mldsa.ts`
 
-### What is stored at rest: 3872-byte expanded keypair vs 32-byte master secret
+### What btq-core stores at rest: the whole 3872-byte keypair
 
 - **Bitcoin:** A wallet stores a 32-byte private key (or just the HD seed) per key.
-- **BTQ:** btq-core stores one full CDilithiumKey per address — GetKeySize() = SECRET_KEY_SIZE (2560) + PUBLIC_KEY_SIZE (1312) = 3872 bytes — in mapDilithiumKeys/mapCryptedDilithiumKeys and base58-check-encodes all 3872 bytes for WIF export; Qparrow persists only the 32-byte master secret and re-derives seeds on demand, so nothing key-sized is ever written.
+- **BTQ:** btq-core stores one full CDilithiumKey per address — GetKeySize() = SECRET_KEY_SIZE (2560) + PUBLIC_KEY_SIZE (1312) = 3872 bytes — in mapDilithiumKeys/mapCryptedDilithiumKeys and base58-check-encodes all 3872 bytes for WIF export. A wallet that persists only the 32-byte seed and re-derives on demand writes nothing key-sized at all — and cannot import or export in btq-core's WIF form.
 - **btq-core:** `src/crypto/dilithium_key.h:222` (GetKeySize); `src/crypto/dilithium_key.h:91` (KeyType = SECRET_KEY_SIZE + PUBLIC_KEY_SIZE array); `src/key_io.cpp:388` (EncodeDilithiumSecret over the whole key); `src/wallet/scriptpubkeyman.cpp:1037` (mapDilithiumKeys[keyID] = key)
 - **In this wallet:** **implemented** — `src/core/crypto/hd.ts`, `src/core/crypto/mldsa.ts`
 
 ### Encryption of Dilithium secret material
 
 - **Bitcoin:** Wallet encryption wraps each private key with the master key using an IV derived from the public key hash.
-- **BTQ:** btq-core encrypts each 3872-byte Dilithium key with EncryptDilithiumSecret under an IV of Hash(keyid) (double-SHA256 of the CKeyID), keeping a legacy fallback IV of the raw CKeyID bytes for pre-existing wallets, and revalidates on decrypt that the recovered key's pubkey hashes back to the stored keyid; Qparrow encrypts only the 32-byte master secret through drongo's standard Argon2 + AES-CBC-PKCS7 EncryptableItem lifecycle.
+- **BTQ:** btq-core encrypts each 3872-byte Dilithium key with EncryptDilithiumSecret under an IV of Hash(keyid) (double-SHA256 of the CKeyID), keeping a legacy fallback IV of the raw CKeyID bytes for pre-existing wallets, and revalidates on decrypt that the recovered key's pubkey hashes back to the stored keyid — per key, because per key is what it stores.
 - **btq-core:** `src/wallet/crypter.cpp:153` (DeriveDilithiumKeyIV = Hash(Span{keyid})); `src/wallet/crypter.cpp:158` (DeriveLegacyDilithiumKeyIV fallback); `src/wallet/crypter.cpp:165-173` (SetDilithiumKeyFromSecret checks CKeyID(candidate.GetPubKey().GetID()) == keyid)
 - **In this wallet:** **implemented** — `src/core/crypto/hd.ts`, `src/core/crypto/mldsa.ts`
 
 ### Network binding of the derivation
 
 - **Bitcoin:** BIP32 derivation is network-agnostic; BIP44 encodes the network only as a coin-type path element the wallet may ignore.
-- **BTQ:** btq-core's two Dilithium derivations mix in no chain identifier at all, so one HD seed yields identical Dilithium keys on mainnet, testnet, signet and regtest; Qparrow binds BTQ Core's own RPC chain name ("main"/"test"/"signet"/"regtest") into the HKDF info, with TESTNET and TESTNET4 deliberately sharing "test".
+- **BTQ:** btq-core's two Dilithium derivations mix in no chain identifier at all, so one HD seed yields identical Dilithium keys on mainnet, testnet, signet and regtest. Only the address HRP separates the networks: a seed used on testnet also owns the corresponding mainnet addresses, which is why a testnet-only wallet must never be handed a phrase that guards real funds.
 - **btq-core:** `src/crypto/dilithium_key.cpp:362` (SetSeed hashkey is only "Dilithium seed"); `src/wallet/scriptpubkeyman.cpp:2467-2478` (desc_ctx HMAC input is descriptor key + descriptor id + index + type byte, with no chain component)
 - **In this wallet:** **implemented** — `src/core/crypto/hd.ts`, `src/core/crypto/mldsa.ts`
 
 ### Master fingerprint and derivation-path identity for a keyless-BIP32 wallet
 
 - **Bitcoin:** A keystore is identified by the BIP32 master fingerprint HASH160(master pubkey)[0:4] plus a real derivation path, both of which a signing device can reproduce.
-- **BTQ:** btq-core's legacy path still writes BIP32-shaped metadata (hdKeypath "m/0'/0'/n'" and a fingerprint taken from the Dilithium master extended key's own pubkey id), while the descriptor path writes none; Qparrow has no BIP32 tree at all and synthesises a fingerprint as the first 4 bytes of SHA-256 of the receive-chain index-0 ML-DSA public key, with the literal path "m/0'".
+- **BTQ:** btq-core's legacy path still writes BIP32-shaped metadata (hdKeypath "m/0'/0'/n'" and a fingerprint taken from the Dilithium master extended key's own pubkey id), while the descriptor path writes none. Neither is reproducible by a second implementation from the seed alone, so a Dilithium keystore has no portable identity to quote at a signing device.
 - **btq-core:** `src/wallet/scriptpubkeyman.cpp:1267` (metadata.hdKeypath "m/0'/0'/n'"), :1277-1279 (fingerprint from CKeyID(masterKey.key.GetPubKey().GetID())); `src/wallet/scriptpubkeyman.cpp:2448` (descriptor path records no key origin)
 - **In this wallet:** **implemented** — `src/core/crypto/hd.ts`, `src/core/crypto/mldsa.ts`
 
-### App-side persistence of the master secret and the public-key cache
+### No xpub means the public keys have to be cached, and the cache is large
 
-- **Bitcoin:** Sparrow persists a mnemonic/xprv plus an xpub; addresses are re-derived from the xpub on every open.
-- **BTQ:** V11 adds a btqMasterSecret table (Argon2/AES columns mirroring the seed table) plus keystore.btqPublicKeyCache, and V12 widens that column from varbinary(262144) to varbinary(8388608); the cache is a positional blob of version byte 0x01 then, per chain, [KeyPurpose ordinal, uint16 count, count x 1312-byte keys], written only up to the first null so a hole cannot re-index later keys.
-- **btq-core:** `src/wallet/wallet.cpp:2966` (SetP2MRMetadata — btq-core's equivalent store is the address-book receive-request map, not a key cache); `src/wallet/wallet.cpp:2984` (ListP2MRMetadata)
-- **In this wallet:** **implemented** — `src/core/crypto/hd.ts`, `src/core/crypto/mldsa.ts`
+- **Bitcoin:** A wallet persists an xprv (or a mnemonic) plus an xpub, and re-derives every address from the xpub on open — no secret involved.
+- **BTQ:** There is no public derivation, so a 1312-byte public key exists only while the secret does. Anything a wallet wants to show while locked — the receive address, the address book, a gap scan — has to be cached, at 1312 bytes per address on each of the two chains, and a hole in that cache silently re-indexes every key above it. btq-core's own equivalent store is the address-book receive-request map, keyed by p2mr_id.
+- **btq-core:** `src/wallet/wallet.cpp:2966` (SetP2MRMetadata — the address-book receive-request map, not a key cache); `src/wallet/wallet.cpp:2984` (ListP2MRMetadata)
+- **In this wallet:** **implemented** — `src/core/wallet/storage.ts` caches addresses and gap cursors as public metadata; the seed stays in the sealed vault
 
-### Wallet creation: raw 32-byte hex secret, no mnemonic
+### Wallet creation: btq-core has no mnemonic for a Dilithium wallet
 
 - **Bitcoin:** A new wallet is a BIP39 mnemonic with a wordlist checksum, optionally plus a passphrase.
-- **BTQ:** Qparrow generates 32 bytes from SecureRandom, shows them once as 64 hex characters, and imports them back by requiring exactly 64 hex characters — there is no mnemonic, no checksum and no passphrase; btq-core's nearest equivalent is sethdseed taking an ECDSA WIF (legacy wallets only), from which the Dilithium tree hangs.
+- **BTQ:** There is no mnemonic path at all: btq-core's nearest equivalent is sethdseed, which takes an ECDSA WIF (legacy wallets only) and hangs the Dilithium tree off it. What has to survive a backup is 32 bytes; whether a wallet shows them as 64 hex characters or wraps them in a checksummed word list is its own decision, and the two forms are not interchangeable — the same words and the same hex are different wallets.
 - **btq-core:** `src/wallet/rpc/wallet.cpp:502` (sethdseed); `src/wallet/scriptpubkeyman.cpp:1246` (DeriveNewDilithiumChildKey reads that seed via GetKey(hd_chain.seed_id, seed))
-- **In this wallet:** **implemented** — `src/core/crypto/hd.ts`, `src/core/crypto/mldsa.ts`
+- **In this wallet:** **implemented** — `src/core/crypto/mnemonic.ts`, `src/core/crypto/hd.ts` — both forms are offered as separate imports, and `docs/HD_IMPORT.md` states the mapping
 
 ### Signing re-derives from the seed and re-checks the leaf commitment
 
 - **Bitcoin:** A signer looks up the private key for the scriptPubKey and signs; the pubkey is implied by the script.
-- **BTQ:** Qparrow derives the 32-byte seed per input, expands it to the 1312-byte public key, rebuilds the single-key leaf <pubkey> OP_CHECKSIGDILITHIUM and refuses to sign unless it equals the PSBT input's committed leaf script, then self-verifies the 2421-byte (2420 + SIGHASH_ALL 0x01) signature before writing the BIP360 0x1b field; btq-core instead resolves the key id out of the stored P2MR tree and looks it up in the keystore.
+- **BTQ:** btq-core resolves the key id out of the P2MR tree it stored and looks it up in the keystore. A wallet that keeps no such tree has to work the other way round — derive the seed for the input, expand it to the 1312-byte public key, rebuild the leaf <pubkey> OP_CHECKSIGDILITHIUM, and refuse to sign unless that leaf is the one the output being spent commits to. Skipping the check means signing for a script somebody else chose.
 - **btq-core:** `src/wallet/p2mr.cpp:461` (GetSingleDilithiumKeyIDForP2MR); `src/wallet/p2mr.cpp:125` (GetP2MRDilithiumKeyIDs parses each leaf); `src/wallet/p2mr.cpp:473` (BuildP2MRSigningProvider populates dilithium_keys/dilithium_pubkeys from the tree)
-- **In this wallet:** **implemented** — `src/core/crypto/hd.ts`, `src/core/crypto/mldsa.ts`
+- **In this wallet:** **implemented** — `src/core/script/p2mr.ts` (`commitsToProgram`), `src/core/tx/builder.ts`; the foreign-leaf refusal is a security test
 
 ## Node RPC surface (context for the explorer client)
 
@@ -513,10 +513,10 @@ the explorer client and the node RPC landed._
 - **btq-core:** `src/rpc/output_script.cpp:187-227` (getdescriptorinfo; descriptor :221, checksum :222, isrange :223, issolvable :224, hasprivatekeys :225)
 - **In this wallet:** not applicable — Watch-only-wallet registration is a node concept; this wallet reads the explorer instead.
 
-### Custody wallet invariant: blank + descriptors + private_keys_enabled=false
+### Watch-only wallet invariant: blank + descriptors + private_keys_enabled=false
 
 - **Bitcoin:** getwalletinfo exposes the same three flags; blank means "no keys, scripts, or descriptors".
-- **BTQ:** Unchanged code, but importing an addr() descriptor does NOT clear WALLET_FLAG_BLANK_WALLET — AddWalletDescriptor reaches only WriteDescriptor, and the descriptor-wallet UnsetBlankWalletFlag call site is SetupDescriptorGeneration, unreachable in a disable-private-keys wallet. The custody wallet therefore stays blank=true forever, which the wallet re-asserts on every poll.
+- **BTQ:** Unchanged code, but importing an addr() descriptor does NOT clear WALLET_FLAG_BLANK_WALLET — AddWalletDescriptor reaches only WriteDescriptor, and the descriptor-wallet UnsetBlankWalletFlag call site is SetupDescriptorGeneration, unreachable in a disable-private-keys wallet. A watch-only wallet registered this way therefore stays blank=true forever, which is worth re-asserting on every poll rather than treating as an error.
 - **btq-core:** `src/wallet/rpc/wallet.cpp:122` (private_keys_enabled), :132 (descriptors), :134 (blank); createwallet flag wiring :342, :345, :376; blank never unset on import: `src/wallet/wallet.cpp:3947` (WriteDescriptor) vs. `src/wallet/scriptpubkeyman.cpp:3123` (only UnsetBlankWalletFlag on the descriptor path, inside SetupDescriptorGeneration)
 - **In this wallet:** not applicable — Watch-only-wallet registration is a node concept; this wallet reads the explorer instead.
 
@@ -564,15 +564,15 @@ the explorer client and the node RPC landed._
 
 ### IBD guard and Core-sourced tip height
 
-- **Bitcoin:** getblockchaininfo.initialblockdownload exists; Sparrow normally takes the tip from an Electrum server.
-- **BTQ:** Unchanged RPC. BTQ has no Electrum backend, so the wallet takes both the IBD verdict and the chain tip from getblockchaininfo and refuses to register addresses or present history while initialblockdownload is true.
+- **Bitcoin:** getblockchaininfo.initialblockdownload exists; a wallet normally takes the tip from an Electrum server or a block explorer instead.
+- **BTQ:** Unchanged RPC, but BTQ has no Electrum backend, so a node-backed wallet takes both the IBD verdict and the chain tip from getblockchaininfo — and must refuse to register addresses or present history while initialblockdownload is true, because a syncing node reports coins that are not there yet.
 - **btq-core:** getblockchaininfo blocks/headers/initialblockdownload/pruned/pruneheight (standard Bitcoin fields, unmodified in BTQ)
 - **In this wallet:** not applicable — Watch-only-wallet registration is a node concept; this wallet reads the explorer instead.
 
 ### listunspent as the coin-selection source with full client-side re-derivation
 
 - **Bitcoin:** Identical RPC.
-- **BTQ:** Unchanged, but the wallet trusts nothing it returns: every entry's address is re-parsed as same-network P2MR by drongo and its output script re-derived and compared to Core's scriptPubKey, duplicates and out-of-range amounts are rejected, and zero-value outputs are dropped.
+- **BTQ:** Unchanged, but nothing it returns should be trusted into the signing path: every entry's address has to be re-parsed as same-network P2MR and its output script re-derived and compared with the scriptPubKey the node reported, duplicates and out-of-range amounts rejected, zero-value outputs dropped.
 - **btq-core:** `src/wallet/rpc/coins.cpp:500` (listunspent; args minconf/maxconf/addresses/include_unsafe/query_options), entry fields :718-729 (spendable, solvable, safe, desc)
 - **In this wallet:** **implemented** — `src/background/explorer.ts` — UTXOs paged from `/api/v1/address/{a}/utxos`
 
@@ -602,7 +602,7 @@ the explorer client and the node RPC landed._
 ### Bounded parsing of the P2MR fields
 
 - **Bitcoin:** BIP371 fields are bounded implicitly by fixed key sizes; taproot control blocks are checked at 33 + 32k, k <= 128 in the PSBT parser.
-- **BTQ:** btq-core bounds every P2MR field at parse time against the consensus limits, deliberately matching rather than tightening them: control block key 1 + 1 .. 1 + 1 + 32*128 with (len-2) % 32 == 0; leaf script <= MAX_SCRIPT_SIZE (100000) after stripping the version byte and >= 1 byte; at most 20 Dilithium partial sigs. drongo checks only the 0x1a length (32), the 0x1b key length (1344) and the 0x1b value length (2421), plus a non-empty 0x19 key.
+- **BTQ:** btq-core bounds every P2MR field at parse time against the consensus limits, deliberately matching rather than tightening them: control block key 1 + 1 .. 1 + 1 + 32*128 with (len-2) % 32 == 0; leaf script <= MAX_SCRIPT_SIZE (100000) after stripping the version byte and >= 1 byte; at most 20 Dilithium partial sigs.
 - **btq-core:** `src/psbt.h:723-729` (control block key size + modulo checks); `src/psbt.h:731-737` (leaf script empty / MAX_P2MR_LEAF_SCRIPT_SIZE); `src/psbt.h:84` (MAX_P2MR_LEAF_SCRIPT_SIZE = MAX_SCRIPT_SIZE); `src/script/script.h:43` (MAX_SCRIPT_SIZE = 100000); `src/psbt.h:761-763` (MAX_DILITHIUM_PARTIAL_SIGS_PER_INPUT cap)
 - **In this wallet:** not applicable — This wallet builds and signs transactions directly; no PSBT interchange. Revisit if hardware signing or multi-party flows are added.
 
@@ -616,35 +616,35 @@ the explorer client and the node RPC landed._
 ### P2MR witness finalization order [signature, leafScript, controlBlock]
 
 - **Bitcoin:** Taproot script path finalizes to [...script inputs, script, control_block] with a 33+32k control block carrying the internal key and parity.
-- **BTQ:** P2MR has no key path, so a spend is always script path. The interpreter pops the control block first, then the script, leaving the leaf's stack inputs below; the control block's low bit must be 1 (no internal key means fixed parity) and the leaf version is control[0] & 0xfe. For a single-key leaf btq-core produces exactly [sig, leafScript, controlBlock] — SignStep pushes the 2421-byte sig for TxoutType::DILITHIUM_PUBKEY, then SignP2MR appends the script and the shortest control block. drongo assembles the identical three-element stack.
+- **BTQ:** P2MR has no key path, so a spend is always script path. The interpreter pops the control block first, then the script, leaving the leaf's stack inputs below; the control block's low bit must be 1 (no internal key means fixed parity) and the leaf version is control[0] & 0xfe. For a single-key leaf btq-core produces exactly [sig, leafScript, controlBlock] — SignStep pushes the 2421-byte sig for TxoutType::DILITHIUM_PUBKEY, then SignP2MR appends the script and the shortest control block.
 - **btq-core:** `src/script/interpreter.cpp:2276-2318` (VerifyWitnessProgram witversion == 2 branch); :2289-2294 (require >= 2 elements, pop control then script); :2299-2301 (parity bit must be 1); :2303-2307 (tapleaf hash + VerifyP2MRCommitment); `src/script/sign.cpp:518-544` (SignP2MR); :533-535 (push script, then *control_blocks.begin()); `src/script/sign.cpp:636-640` (TxoutType::DILITHIUM_PUBKEY pushes the sig); `src/script/sign.cpp:759-764` (WITNESS_V2_P2MR result becomes sigdata.scriptWitness.stack)
 - **In this wallet:** not applicable — This wallet builds and signs transactions directly; no PSBT interchange. Revisit if hardware signing or multi-party flows are added.
 
 ### Finalized P2MR input drops the signing material
 
 - **Bitcoin:** BIP174 combiners/finalizers remove partial sigs and other non-final fields once 0x07/0x08 exist; Core gates all partial fields behind a not-finalized check.
-- **BTQ:** btq-core extends the same rule to the P2MR fields: PSBTInput::Serialize writes 0x19/0x1A/0x1B only inside the `final_script_sig.empty() && final_script_witness.IsNull()` block, and FromSignatureData clears m_p2mr_scripts, m_p2mr_dilithium_script_sigs and m_p2mr_merkle_root when sigdata.complete, because that material (1312 + 2420 bytes per key) dwarfs the rest of the input. drongo does not do this: it emits 0x19/0x1A/0x1B unconditionally alongside 0x08.
+- **BTQ:** btq-core extends the same rule to the P2MR fields: PSBTInput::Serialize writes 0x19/0x1A/0x1B only inside the `final_script_sig.empty() && final_script_witness.IsNull()` block, and FromSignatureData clears m_p2mr_scripts, m_p2mr_dilithium_script_sigs and m_p2mr_merkle_root when sigdata.complete, because that material (1312 + 2420 bytes per key) dwarfs the rest of the input. A producer that emits the three fields unconditionally alongside 0x08 leaves ~3.7 KB of dead weight per input in every finalized PSBT.
 - **btq-core:** `src/psbt.h:340`,383 (Serialize gate opening and closing around the partial fields, P2MR writes at 359-382); `src/psbt.cpp:166-172` (FromSignatureData clears the three P2MR members when sigdata.complete); `src/psbt.cpp:322-325` (PSBTInputSigned = final scriptSig or final witness present)
 - **In this wallet:** not applicable — This wallet builds and signs transactions directly; no PSBT interchange. Revisit if hardware signing or multi-party flows are added.
 
 ### PSBT combine/merge semantics for the P2MR fields
 
 - **Bitcoin:** PSBTInput::Merge unions maps and keeps the existing scalar when non-empty (first writer wins). For taproot, m_tap_scripts uses a plain map::insert, which drops a second control block for a leaf already present.
-- **BTQ:** btq-core unions P2MR control blocks per leaf (an incoming empty set can never discard a known control block), unions the Dilithium partial-signature map (keyed by pubkey hash + leaf hash, so independent signers accumulate up to the leaf's threshold), and keeps the existing 0x1a root — first writer wins. This is a deliberate improvement over the taproot line immediately above it in the same function. drongo's combine is the opposite: the incoming input's leaf/control block/root/signature overwrite the local ones.
+- **BTQ:** btq-core unions P2MR control blocks per leaf (an incoming empty set can never discard a known control block), unions the Dilithium partial-signature map (keyed by pubkey hash + leaf hash, so independent signers accumulate up to the leaf's threshold), and keeps the existing 0x1a root — first writer wins. This is a deliberate improvement over the taproot line immediately above it in the same function; a combiner that instead lets the incoming input overwrite the local leaf, control block, root or signature throws away work another signer already did.
 - **btq-core:** `src/psbt.cpp:222-252` (PSBTInput::Merge); :239-241 (per-leaf control-block union); :242 (Dilithium sig map union); :251 (m_p2mr_merkle_root keep-existing); :237 (m_tap_scripts plain insert, unchanged from upstream); `src/psbt.cpp:25-48` (PartiallySignedTransaction::Merge)
 - **In this wallet:** not applicable — This wallet builds and signs transactions directly; no PSBT interchange. Revisit if hardware signing or multi-party flows are added.
 
 ### Duplicate-key rejection for the P2MR records
 
 - **Bitcoin:** BIP174 requires unique keys per map; Core throws "Duplicate Key" from key_lookup during Unserialize.
-- **BTQ:** Each of the three P2MR types participates in the same key_lookup set, so an exact repeat of any full key is rejected with a type-specific message. Because the control block lives in the 0x19 key and the pubkey+leaf hash in the 0x1B key, two different control blocks for one leaf and two different signers on one leaf are distinct keys and are legitimately accepted. drongo reaches the same outcome for exact duplicates via a generic per-input duplicate scan, but has no per-type message and no multi-record model.
+- **BTQ:** Each of the three P2MR types participates in the same key_lookup set, so an exact repeat of any full key is rejected with a type-specific message. Because the control block lives in the 0x19 key and the pubkey+leaf hash in the 0x1B key, two different control blocks for one leaf and two different signers on one leaf are distinct keys and are legitimately accepted, so a generic per-input duplicate scan is not equivalent: it has no multi-record model.
 - **btq-core:** `src/psbt.h:721-723` (0x19 duplicate), :746-748 (0x1A duplicate), :756-758 (0x1B duplicate)
 - **In this wallet:** not applicable — This wallet builds and signs transactions directly; no PSBT interchange. Revisit if hardware signing or multi-party flows are added.
 
 ### SIGHASH_ALL-only P2MR PSBT signatures
 
 - **Bitcoin:** BIP341/342 taproot signatures default to SIGHASH_DEFAULT (0x00), serialized as a bare 64-byte signature with no trailing type byte.
-- **BTQ:** The P2MR tapscript checker rejects SIGHASH_DEFAULT outright, so every Dilithium leaf signature carries a trailing hash-type byte — which is why the 0x1B value is fixed at 2421 bytes and why the PSBT layer refuses any input sighash_type other than SIGHASH_ALL. The wallet computes the sighash with drongo's BIP341 tapscript path (SigHash.ALL, leaf script as the tapleaf) rather than an independent serializer.
+- **BTQ:** The P2MR tapscript checker rejects SIGHASH_DEFAULT outright, so every Dilithium leaf signature carries a trailing hash-type byte — which is why the 0x1B value is fixed at 2421 bytes and why the PSBT layer refuses any input sighash_type other than SIGHASH_ALL. A signer therefore computes the BIP341 tapscript sighash with SIGHASH_ALL and the leaf script as the tapleaf, and never the taproot default.
 - **btq-core:** `src/script/interpreter.cpp:1965-1968` (P2MR_TAPSCRIPT: `if (nHashType == SIGHASH_DEFAULT) return false` before SignatureHashSchnorr); `src/psbt_dilithium.cpp:149-153` (PSBT rejects non-SIGHASH_ALL sighash_type); `src/psbt_dilithium.cpp:27-41` (ComputeLeafSighash: SigVersion::P2MR_TAPSCRIPT, annex absent, codeseparator 0xFFFFFFFF)
 - **In this wallet:** not applicable — This wallet builds and signs transactions directly; no PSBT interchange. Revisit if hardware signing or multi-party flows are added.
 
@@ -658,14 +658,14 @@ the explorer client and the node RPC landed._
 ### Locally finalized transaction dry-run and broadcast (no Core-side PSBT finalization)
 
 - **Bitcoin:** finalizepsbt / FinalizePSBT run in the node: SignPSBTInput with DUMMY_SIGNING_PROVIDER re-derives the witness from the partial fields and gates on VerifyScript.
-- **BTQ:** BTQ Core can still finalize a P2MR PSBT with no keys at all — the 0x19/0x1B fields alone are enough for CreateDilithiumSig to return the stored signature and for ProduceSignature to assemble and verify the witness. Qparrow does not use that path: it finalizes in drongo and submits the raw hex to testmempoolaccept, checking Core's txid and wtxid against the locally computed ones before sendrawtransaction. Consensus, not Core's PSBT finalizer, is the equivalence oracle.
+- **BTQ:** BTQ Core can still finalize a P2MR PSBT with no keys at all — the 0x19/0x1B fields alone are enough for CreateDilithiumSig to return the stored signature and for ProduceSignature to assemble and verify the witness. A wallet need not use that path: finalizing locally and submitting the raw hex to testmempoolaccept — comparing Core's txid and wtxid with the locally computed ones before sendrawtransaction — makes consensus, rather than Core's PSBT finalizer, the equivalence oracle.
 - **btq-core:** `src/psbt.cpp:509-522` (FinalizePSBT via DUMMY_SIGNING_PROVIDER); `src/script/sign.cpp:203-210` (CreateDilithiumSig returns the sig already in sigdata.p2mr_dilithium_script_sigs keyed by (DilithiumPKHash, leaf hash)); `src/script/sign.cpp:779` (sigdata.complete = solved && VerifyScript(... STANDARD_SCRIPT_VERIFY_FLAGS | SCRIPT_VERIFY_DILITHIUM ...))
 - **In this wallet:** not applicable — This wallet builds and signs transactions directly; no PSBT interchange. Revisit if hardware signing or multi-party flows are added.
 
-### BTQ sign / finalize / broadcast routing in the transaction UI
+### Sign, finalize and broadcast are a separate route at every step
 
-- **Bitcoin:** Sparrow signs with the wallet's keystores, finalizes via Wallet.finalise, extracts and broadcasts through Electrum.
-- **BTQ:** A SINGLE_MLDSA wallet takes a separate route at every step: Wallet.sign dispatches to signBtq (which writes 0x19/0x1A/0x1B rather than PSBT_IN_PARTIAL_SIG), Wallet.finalise dispatches to BtqPsbtSigner.finaliseInputs, and the broadcast button routes to BTQ Core's testmempoolaccept + sendrawtransaction instead of Electrum. Signing also merges newly derived ML-DSA public keys back into the keystore cache so addresses stay derivable while locked.
+- **Bitcoin:** One route: sign with the wallet's keystores, finalize, extract, broadcast through Electrum or a node.
+- **BTQ:** A P2MR input diverges at each step. The partial signature is written as 0x19/0x1A/0x1B, not PSBT_IN_PARTIAL_SIG; finalization has to assemble [signature, leafScript, controlBlock] itself; and the only broadcast target is a node's testmempoolaccept + sendrawtransaction, because no Electrum server speaks P2MR and the public explorer has no push route. A signer that derives keys on demand also has to fold the new public keys back into its cache, or the addresses stop resolving once it locks.
 - **btq-core:** `src/psbt.h:52-54` (the three input types the wallet writes); `src/script/interpreter.cpp:2276` (witversion == 2 && program.size() == WITNESS_V2_P2MR_SIZE — the consensus branch this path targets)
 - **In this wallet:** not applicable — This wallet builds and signs transactions directly; no PSBT interchange. Revisit if hardware signing or multi-party flows are added.
 
