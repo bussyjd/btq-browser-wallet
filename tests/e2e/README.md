@@ -39,7 +39,11 @@ first failure:
 6. every output is `OP_2 <32 bytes>` above the 270-sat dust floor, the change
    pays the wallet's own internal address, the fee clears the relay floor at
    scale-16 vsize, and the weight is under 400 000;
-7. the txid is `sha256d(stripped)` reversed — the id the popup shows.
+7. the txid is `sha256d(stripped)` reversed — recomputed from the parsed
+   transaction, and required to differ from the hash of the witness-carrying
+   bytes, so the id the popup shows cannot move when a signature is re-encoded.
+   `mock-node.spec.ts` drives that check directly, including the two states it
+   must reject.
 
 `fixtures/bip341.ts` and `fixtures/consensus.ts` never import
 `src/core/tx/sighash.ts`, `src/core/script/p2mr.ts` or `src/core/tx/fee.ts`;
@@ -110,12 +114,14 @@ npm run demo:video                  # the above + demo/btq-wallet-demo.mp4
 | File | |
 |---|---|
 | `smoke.spec.ts` | create, receive, lock/unlock, fund, configure a node, send, restore from seed, bad imports |
+| `mock-node.spec.ts` | the mock node's own txid check, on transactions built in that file — no browser |
 | `connect.spec.ts` | site-connect approval, per-origin scope, revoke, and what a page can reach |
 | `negative.spec.ts` | wrong password, refused destinations and amounts, misbehaving backends, storage contents |
 | `global-setup.ts` | builds `dist/` before the run (`SKIP_BUILD=1` to reuse it) |
 | `regtest.spec.ts` | tier 2 |
 | `fixtures/extension.ts` | launching the built extension, popup gestures |
 | `fixtures/mock-explorer.ts` | the HTTP server: explorer API, node RPC, dapp page, `/__test/*` hooks |
+| `fixtures/dapp.html` | the demo page — served here, and the one the README tells a reader to load by hand |
 | `fixtures/mock-node.ts` | the seven checks and the JSON-RPC surface |
 | `fixtures/bip341.ts` | independent TapLeaf / TapSighash, from the BIP text |
 | `fixtures/consensus.ts` | independent scale-16 weight, vsize, fee and dust math |

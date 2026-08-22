@@ -1,9 +1,9 @@
 # Importing an HD wallet from the seed
 
-The brief asks that someone can *"import an HD wallet they already have, from the
-seed."* For BTQ that sentence hides a real design problem, because BTQ has no published
-HD standard. This document explains what btq-core actually does, what this wallet
-implements, and exactly how the two meet — with the byte-level pipeline drawn out.
+A wallet has to let someone bring an HD wallet they already have, from the seed alone.
+For BTQ that hides a real design problem, because BTQ has no published HD standard. This
+document explains what btq-core actually does, what this wallet implements, and exactly
+how the two meet — with the byte-level pipeline drawn out.
 
 ## Why this is not BIP32
 

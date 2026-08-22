@@ -114,7 +114,7 @@ btq-browser-wallet/
 │  ├─ unit/  security/  integration/
 │  ├─ fixtures/explorer/    # bodies recorded from the live explorer
 │  └─ e2e/                  # Playwright, the built extension in Chromium
-├─ examples/dapp.html  demo/  docs/  README.md  SECURITY.md
+├─ demo/  docs/  README.md  SECURITY.md
 └─ scripts/gen-vectors.ts  scripts/stitch-demo.sh
 ```
 
@@ -153,9 +153,10 @@ with the origin displayed, per-site permissions with revoke, `accountsChanged`, 
 presets and a Max button. **Not done: multiple accounts** — the keyring derives one
 account (`m/0'/…`) and no RPC exposes a second, so it was left out rather than faked.
 
-**M5 — Tests, README, video. ✅ done.** 311 unit + security tests, an 18-journey Playwright
-suite against the built extension, this README, and `demo/btq-wallet-demo.mp4` recorded by
-that suite (`npm run demo:video`); `docs/VIDEO.md` is the shot list for a narrated cut.
+**M5 — Tests, README, video. ✅ done.** The unit + security suites, a Playwright suite of
+journeys against the built extension (current counts live in the README, so there is one
+number of record), the README itself, and `demo/btq-wallet-demo.mp4` recorded by that
+suite (`npm run demo:video`); `docs/VIDEO.md` is the shot list for a narrated cut.
 
 **M6 — "What you'd ship in a real wallet." ◐ partly** — see §6 for which of the ten
 landed.
@@ -258,7 +259,7 @@ checking, and a warning when the RPC password would cross the network in the cle
 ## 8. Definition of done
 Clone → `npm install && npm run build` → load unpacked in Chrome → create wallet, import
 wallet, receive, send; `npm test && npm run test:e2e` green from a clean checkout; README
-walks a reviewer through each flow in under five minutes; video shows create → import →
+walks a new reader through each flow in under five minutes; video shows create → import →
 receive → send.
 
 **Status:** all of it, with one asterisk — "send, against public testnet" needs a BTQ Core

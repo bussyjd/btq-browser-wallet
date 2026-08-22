@@ -1,5 +1,5 @@
 /**
- * The four graded journeys, end to end, against the built extension.
+ * The wallet's core journeys, end to end, against the built extension.
  *
  * Device A creates a wallet, receives coins, locks and unlocks, configures a
  * node and sends — and every number on the screen is checked against a value
@@ -46,7 +46,7 @@ test.describe.configure({ mode: 'serial' });
 const PASSWORD = 'smoke-pass-1';
 const NODE_USER = 'smoke';
 const NODE_PASSWORD = 'smoke-pass';
-/** The golden-vector testnet address — the payee for the graded send. */
+/** The golden-vector testnet address — the payee for the send journey. */
 const B0 = golden.entries[0]!.addresses.testnet;
 const B0_MAINNET = golden.entries[0]!.addresses.mainnet;
 /**
@@ -265,7 +265,12 @@ test('6 · send: the node verifies what the extension signed', async () => {
   await popup.getByTestId('send-confirm').click();
 
   await waitForSendResult(popup);
-  await expect(popup.getByTestId('result-status')).toContainText('Broadcast');
+  // The two outcomes read "Broadcast via node" and "Signed, not broadcast", so
+  // the assertion is the whole string: a success that differs from a failure
+  // only by a capital letter is not an assertion worth making. The failure
+  // branch also renders `result-error`, which must not be on screen at all.
+  await expect(popup.getByTestId('result-status')).toHaveText('Broadcast via node');
+  await expect(popup.getByTestId('result-error')).toHaveCount(0);
   sendTxid = (await popup.getByTestId('result-txid').getAttribute('data-txid')) ?? '';
   expect(sendTxid).toMatch(/^[0-9a-f]{64}$/);
 

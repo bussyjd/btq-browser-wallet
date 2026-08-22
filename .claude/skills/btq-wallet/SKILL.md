@@ -14,7 +14,7 @@ explains the import-from-seed design with diagrams.
 
 ## What the wallet has to do
 
-A feature checklist, not a score sheet:
+The feature checklist:
 
 - Create a wallet from a new seed; import an existing one.
 - Receive and send Dilithium (P2MR) payments on testnet.

@@ -1,7 +1,7 @@
 /**
  * Build the extension before the suite runs, so `npm run test:e2e` from a clean
- * clone drives the same `dist/` a grader would load in Chrome. `SKIP_BUILD=1`
- * reuses the current build while iterating on a test.
+ * clone drives the same `dist/` a person loads at chrome://extensions.
+ * `SKIP_BUILD=1` reuses the current build while iterating on a test.
  */
 import { execFileSync } from 'node:child_process';
 import { existsSync, rmSync } from 'node:fs';

@@ -83,8 +83,8 @@ test.beforeAll(async () => {
   await waitForScan(popup);
 
   // Change must come back to this wallet's own internal chain — checked here as
-  // well as in the graded send, so a change address derived from the wrong
-  // chain fails in two files rather than one.
+  // well as in the send journey (smoke.spec.ts 6), so a change address derived
+  // from the wrong chain fails in two files rather than one.
   backend.node.expectChangeScript = scriptHexFor(
     addressFromHdSeed(mnemonicToHdSeed(MNEMONIC), 'internal', 0, 'testnet').address,
   );
@@ -160,6 +160,11 @@ test('N3 · a backend that misbehaves never costs the wallet the signed bytes', 
   await expect(popup.getByTestId('result-status')).toHaveText('Signed, not broadcast');
   await expect(popup.getByTestId('result-error')).toContainText('different transaction id');
   await expect(popup.getByTestId('copy-hex')).toBeVisible();
+  // smoke.spec.ts 6 asserts the success pill reads exactly "Broadcast via node".
+  // This is its failure twin, so it must not read that in any casing: two
+  // outcomes that differ only by a capital letter would let the success
+  // assertion pass on a send that never left the extension.
+  await expect(popup.getByTestId('result-status')).not.toHaveText(/broadcast via/i);
   // The node did run its checks and did accept the bytes — the wallet refused
   // to call it a broadcast because the id came back wrong.
   expect(backend.node.log.at(-1)?.allowed).toBe(true);

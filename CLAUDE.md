@@ -1,9 +1,9 @@
 # BTQ Browser Wallet — project instructions
 
-This repo is a take-home: a **MetaMask-style browser extension wallet for Bitcoin
-Quantum (BTQ), testnet only**. We build the wallet, not a node. Keys stay in the
-extension; balances and history come from the public explorer; signing happens inside
-the extension and broadcast goes through a BTQ Core node's JSON-RPC.
+This repo is a **MetaMask-style browser extension wallet for Bitcoin Quantum (BTQ),
+testnet only**. We build the wallet, not a node. Keys stay in the extension; balances
+and history come from the public explorer; signing happens inside the extension and
+broadcast goes through a BTQ Core node's JSON-RPC.
 
 ## Read these first, in order
 
@@ -17,7 +17,14 @@ the extension and broadcast goes through a BTQ Core node's JSON-RPC.
 5. `docs/PLAN.md` — milestones M0–M6 and the test plan, with what landed.
 
 Never assert a protocol constant from memory — cite `docs/REFERENCE.md` or btq-core
-source. The local btq-core checkout is at `/Users/bussyjd/Development/btq-core`.
+source. Reading that source needs a local checkout of
+[btq-core](https://github.com/btq-ag/btq-core); point `$BTQ_CORE` at it and cite paths
+relative to it, e.g. `$BTQ_CORE/src/consensus/consensus.h:21`:
+
+```sh
+git clone https://github.com/btq-ag/btq-core ~/src/btq-core   # once, anywhere you like
+export BTQ_CORE=~/src/btq-core
+```
 
 ## BTQ resources
 
@@ -55,7 +62,9 @@ the wallet.
 - `tests/vectors/golden.json` is the contract with consensus. Never regenerate it to make
   a test pass; regenerate only via `npx tsx scripts/gen-vectors.ts` with a fresh
   `BTQ_REGTEST=1` cross-check green.
-- The take-home PDF is gitignored — keep it and any grading material out of the repo.
+- The repo ships the product and nothing else. Working notes, briefs and PDFs stay
+  outside it (`.gitignore` covers `*.pdf`); anything committed is something a reader of
+  the wallet is meant to read.
 
 ## Architecture
 
@@ -116,5 +125,5 @@ npx tsx scripts/gen-vectors.ts                   # regenerate vectors (rule abov
 After any change to key handling, signing, or the send path, run the
 **wallet-security-reviewer** agent (`.claude/agents/wallet-security-reviewer.md`). It
 reviews like a security operations team: paths that leak secrets or move funds, not
-happy paths. The graded test suite is written to that standard — negative cases
-(bad seed, rejected send, page probing the extension) are the point, not the garnish.
+happy paths. The test suite is written to that standard — negative cases (bad seed,
+rejected send, page probing the extension) are the point, not the garnish.

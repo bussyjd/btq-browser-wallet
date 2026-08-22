@@ -39,11 +39,13 @@ Chrome 116 or newer (the provider is injected into the MAIN world, which is Chro
 
 ## Try the flows
 
-**Create.** *Create a wallet* → set a password (≥8 characters) → the 12 words appear, once
-→ confirm three of them. The vault is sealed with PBKDF2-SHA256 (600 000 iterations) and
-AES-256-GCM before anything is persisted; the phrase is never stored.
+**Create.** **Create a wallet** → set a password (≥8 characters) → the 12 words appear,
+once → **I wrote it down** → type three of them back → **Seal the vault**. The vault is
+sealed with PBKDF2-SHA256 (600 000 iterations) and AES-256-GCM before anything is
+persisted; the phrase is never stored.
 
-**Import — both forms.** *I already have a seed* offers two:
+**Import — both forms.** **I already have a seed** offers two, **Use a seed phrase** and
+**Use a raw seed**:
 
 - a **BIP39 phrase** (12 or 24 words, checksum validated) — the same mapping this wallet
   uses when it creates one;
@@ -54,36 +56,41 @@ They are different wallets from different inputs, not two spellings of one. See
 this wallet does about it.
 
 **Receive.** The *Receive* tab shows the next unused external address (`tbtq1z…`), its
-derivation path, a QR of exactly that string, and Copy. Balance is the sum of the
-**unspent outputs** of every derived address — not the explorer's `balance` field, which
-goes negative on busy addresses. A restore runs a 20-address gap scan on both chains, so a
-wallet funded at index 7 comes back with its coins.
+derivation path, a QR of exactly that string, and **Copy address**. Balance is the sum
+of the **unspent outputs** of every derived address — not the explorer's `balance` field,
+which goes negative on busy addresses. A restore runs a 20-address gap scan on both
+chains, so a wallet funded at index 7 comes back with its coins.
 
-**Send.** *Send* → paste a `tbtq1z…` address, enter an amount in tBTQ (or press **Max**),
-pick a fee (Economy 1 / Normal 2 / Priority 5 sat/vB) → **Review**. The review card
+**Send.** The *Send* tab → paste a `tbtq1z…` address, enter an amount in tBTQ (or press
+**Max**), pick a fee (Economy 1 / Normal 2 / Priority 5 sat/vB) → **Review**. The review card
 replaces the form and restates destination, amount, fee (tBTQ, sat/vB and vB), change,
-input count and total debited. Enter the password → **Sign**. Mainnet `qbtc…`, legacy
-base58 Dilithium (`n…`) and anything that fails its checksum are refused with a reason
-before signing, as are amounts below the 270-sat dust floor. The numbers in the result are
-decoded back out of the signed bytes, not carried over from the form.
+input count and total debited. Enter the password → **Sign and broadcast**. Mainnet
+`qbtc…`, legacy base58 Dilithium (`n…`) and anything that fails its checksum are refused
+with a reason before signing, as are amounts below the 270-sat dust floor. The numbers in
+the result are decoded back out of the signed bytes, not carried over from the form.
 
-**Site-connect.** Serve the demo page over HTTP (content scripts do not run on `file://`):
+**Site-connect.** The demo page is
+[`tests/e2e/fixtures/dapp.html`](tests/e2e/fixtures/dapp.html) — the same page the
+end-to-end suite drives, so the page you try by hand is the page CI proves. Serve it over
+HTTP (content scripts do not run on `file://`):
 
 ```sh
-python3 -m http.server 8080 -d examples    # → http://localhost:8080/dapp.html
+python3 -m http.server 8080 -d tests/e2e/fixtures   # → http://localhost:8080/dapp.html
 ```
 
-*Connect* calls `window.btq.request({ method: 'btq_requestAccounts' })`. The extension
-opens an approval window naming the exact origin; the page's promise stays unsettled until
-you answer. Approve and it gets one address; **Cancel**, close the window, or wait five
-minutes and it gets `USER_REJECTED` (EIP-1193 code `4001`). *Disconnect* — or Settings →
-Connected sites → **Revoke** — takes it back and fires `accountsChanged([])`. A page can
-never call `wallet.*`: send, unlock and export are not on the relay's allowlist.
+**Connect wallet** calls `window.btq.request({ method: 'btq_requestAccounts' })`. The
+extension opens an approval window naming the exact origin; the page's promise stays
+unsettled until you answer. **Connect** hands it one address; **Cancel**, closing that
+window, or five minutes of silence gets it `USER_REJECTED` (EIP-1193 code `4001`).
+**Disconnect** — or Settings → Connected sites → **Revoke** — takes it back and fires
+`accountsChanged([])`. A page can never call `wallet.*`: send, unlock and export are not
+on the relay's allowlist.
 
 **Settings** (the sliders icon in the header). Explorer URL, an optional BTQ Core JSON-RPC
 (URL, user, password), **Test connection** — which reports the explorer tip, the node's
-chain and height, and warns if the node is behind or on a different chain — Connected
-sites with revoke, a full rescan, lock now, and a typed-confirmation wipe.
+chain and height, and warns if the node is behind or on a different chain — **Connected
+sites** with **Revoke**, **Rescan all addresses**, **Lock now**, and **Remove wallet from
+this device**, which only proceeds once you type DELETE.
 
 ## Broadcast: the truth
 
@@ -104,14 +111,15 @@ So broadcasting goes through a node's JSON-RPC — `testmempoolaccept` then
 
 Without a node the wallet still **signs**, and says so. The transaction is signed *before*
 any network call, so a broadcast failure never costs you the bytes: the result card shows
-the node's rejection reason verbatim, keeps the signed hex with a copy button, and the
+the node's rejection reason verbatim, keeps the bytes behind **Copy signed hex**, and the
 Activity row is marked **Not broadcast** so it is never mistaken for money in flight. Push
 the hex yourself with `btq-cli sendrawtransaction <hex>` whenever you have a node.
 
 ## Run the tests
 
 ```sh
-npm test            # 311 tests: unit, security, golden vectors — no node, no network
+npm test            # 344 tests: unit, security, golden vectors — no node, no network
+                    # (6 of them skip unless a regtest node is running — see below)
 npm run typecheck   # src (browser-only types) and tests/tooling (node types) separately
 npm run lint
 npm run check       # all three
@@ -121,7 +129,7 @@ End to end, in a real browser:
 
 ```sh
 npm run playwright:install   # once: fetches the Chromium build Playwright drives
-npm run test:e2e             # builds dist/, loads it in Chromium, 18 tests (~25 s)
+npm run test:e2e             # builds dist/, loads it in Chromium, 21 tests (~25 s)
 npm run test:all             # the above, after npm test
 SKIP_BUILD=1 npm run test:e2e    # reuse the current dist/ while iterating
 ```
@@ -225,10 +233,10 @@ src/background/    MV3 service worker — vault, keyring, explorer, node RPC, co
 src/content/       isolated-world relay: allowlisted page methods, never key material
 src/inpage/        window.btq provider (MAIN world, frozen surface)
 src/ui/            React popup: components/ screens/ hooks/, one screen per file
-examples/dapp.html a page that connects, reads accounts, disconnects, and probes for more
 tests/unit/        crypto, derivation, script, address, fee, sighash, explorer parsers
 tests/security/    secret leakage, locked wallet, bad seed, page RPC, connect lifecycle
 tests/e2e/         the built extension in Chromium: journeys, connect, negatives, regtest
+tests/e2e/fixtures the mock explorer and node, the independent verifiers, dapp.html
 tests/integration/ cross-checks against a live btq-core node (opt-in)
 tests/vectors/     golden.json — the frozen contract with consensus
 scripts/           gen-vectors.ts · stitch-demo.sh

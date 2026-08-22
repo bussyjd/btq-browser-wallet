@@ -19,6 +19,8 @@ import {
   bytesEqual,
   fromHex,
   leafCommitsToProgram,
+  reverse,
+  sha256d,
   tapLeafHash,
   tapscriptSighash,
   toHex,
@@ -26,7 +28,7 @@ import {
 } from './bip341.js';
 import { addressForScriptHex } from './btq-address.js';
 import { MAX_STANDARD_TX_WEIGHT, MIN_RELAY_SAT_PER_KVB, P2MR_DUST_SATS, feeForVsize } from './consensus.js';
-import { decodeRaw } from './tx-decode.js';
+import { decodeRaw, serializeStripped, type DecodedRaw } from './tx-decode.js';
 import { Ledger, outpointKey, type LedgerInput, type LedgerOutput } from './ledger.js';
 
 interface MldsaVerifier {
@@ -85,6 +87,32 @@ export interface AcceptedTx {
   outputs: LedgerOutput[];
   /** The checks that passed, in order — asserted by the smoke test. */
   checks: string[];
+}
+
+/**
+ * Check 7, as a check rather than a label: the id this node reports for a
+ * transaction is the double-SHA256 of its *stripped* serialization, reversed
+ * into display order.
+ *
+ * The hash is recomputed here from the parsed transaction instead of being
+ * taken from the decoder, and it is compared with the hash of the *full*
+ * witness-carrying bytes. Those two must differ whenever there is a witness:
+ * an id that moves when a signature is re-encoded is the malleability segwit
+ * exists to prevent, and a stripped serialization that quietly kept the witness
+ * would produce exactly that. Returns the verified txid.
+ */
+export function checkTxid(decoded: DecodedRaw): string {
+  const txid = toHex(reverse(sha256d(serializeStripped(decoded.tx))));
+  if (txid !== decoded.txid) {
+    throw new TxRejected(
+      `bad-txns-txid (reported ${decoded.txid}, but the stripped serialization hashes to ${txid})`,
+    );
+  }
+  const hasWitness = decoded.tx.inputs.some((i) => (i.witness?.length ?? 0) > 0);
+  if (hasWitness && toHex(reverse(sha256d(decoded.raw))) === txid) {
+    throw new TxRejected('bad-txns-txid (the id is not independent of the witness)');
+  }
+  return txid;
 }
 
 /**
@@ -215,10 +243,11 @@ export function verifyTransaction(hex: string, ledger: Ledger, opts: VerifyOptio
   checks.push('outputs-and-fee');
 
   // 7. The txid is the double-SHA256 of the stripped serialization, reversed.
+  const txid = checkTxid(decoded);
   checks.push('txid');
 
   return {
-    txid: decoded.txid,
+    txid,
     hex: hex.trim().toLowerCase(),
     vsize: decoded.vsize,
     weight: decoded.weight,
