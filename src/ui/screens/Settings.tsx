@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from 'react';
+import { useEffect, useState, type FormEvent } from 'react';
 import { Button } from '../components/Button.js';
 import { Card } from '../components/Card.js';
 import { Field, PasswordField } from '../components/Field.js';
@@ -19,7 +19,14 @@ export function Settings({
   onWiped: () => void;
   onToast: (message: string) => void;
 }) {
-  const { backend } = wallet;
+  const { backend, loadSites } = wallet;
+  // The connected-sites list is loaded by a refresh, so it can be older than
+  // this panel: a site may have been approved in the connect window while this
+  // popup was already open. You cannot revoke a connection you cannot see, so
+  // re-read it whenever Settings opens.
+  useEffect(() => {
+    void loadSites().catch(() => undefined);
+  }, [loadSites]);
   // The three network fields show whatever the worker has saved until the user
   // types over them; from then on the edit wins. Deriving them beats copying
   // `backend` into state inside an effect, which races a slow first load and
