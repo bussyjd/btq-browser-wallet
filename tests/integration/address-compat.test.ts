@@ -1,5 +1,5 @@
 /**
- * MILESTONE 0 — address construction must be byte-identical to btq-core.
+ * Address construction must be byte-identical to the node's own.
  *
  * We hand the node the leaf script our wallet builds and compare every field it
  * echoes back (address, scriptPubKey, merkle_root). If any byte differs, funds

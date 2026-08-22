@@ -208,6 +208,14 @@ browser chrome, no cursor) and machine-paced. Clips are written one per page und
 `demo/raw/` — git-ignored, ordered by `demo/raw/order.txt` — and only the stitched mp4 is
 committed.
 
+The recovery phrase is barred out of the recording for the same reason it is barred out of
+the screenshot: on all three screens that show it — the twelve-word grid, the confirmation
+fields and the import box — the words are covered before the first frame is painted, with
+one bar width for every word so the lengths do not leak either.
+Only the recording is masked — with `RECORD_VIDEO` unset the tests behave exactly as they
+do in CI, and either way they read the real phrase and assert against it
+([`tests/e2e/fixtures/redact.ts`](tests/e2e/fixtures/redact.ts)).
+
 ## Protocol notes
 
 - **Addresses** are bech32m witness v2 — `tbtq1z…` on testnet. The witness program *is* a

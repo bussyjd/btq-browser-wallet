@@ -1,5 +1,5 @@
 /**
- * MILESTONE 0 — a transaction our wallet signs must be accepted by btq-core.
+ * A transaction this wallet signs must be accepted by btq-core itself.
  *
  * This exercises the whole signing path against real consensus code: BIP341
  * tapscript sighash, ML-DSA-44 signature with an empty context, the mandatory

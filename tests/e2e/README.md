@@ -109,6 +109,15 @@ RECORD_VIDEO=1 npm run test:e2e     # demo/raw/<NN-device>/*.webm
 npm run demo:video                  # the above + demo/btq-wallet-demo.mp4
 ```
 
+`RECORD_VIDEO` also turns on `fixtures/redact.ts`, which covers the recovery phrase
+on the three screens that show it — the twelve-word grid, the confirmation fields
+and the import textarea — before the first frame is painted, with a bar of one
+fixed width per word. It changes pixels only: the DOM keeps the real words, the
+assertions still run against them, and with `RECORD_VIDEO` unset none of it runs.
+`createWallet`, `confirmSeed` and the two import helpers fail the recording run if a
+surface is left uncovered, so a renamed test id cannot quietly put a phrase back
+into the video.
+
 ## Files
 
 | File | |
@@ -128,3 +137,4 @@ npm run demo:video                  # the above + demo/btq-wallet-demo.mp4
 | `fixtures/tx-decode.ts` | independent serializers + txid over `src/core/tx/parse.ts` |
 | `fixtures/btq-address.ts` | independent bech32m P2MR address codec |
 | `fixtures/ledger.ts` | the in-memory chain, funding, mining and fault injection |
+| `fixtures/redact.ts` | `RECORD_VIDEO` only: covers the phrase before the video sees it |

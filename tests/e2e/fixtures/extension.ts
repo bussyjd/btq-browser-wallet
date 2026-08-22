@@ -14,6 +14,13 @@ import { appendFileSync, mkdirSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  SEED_CHALLENGE,
+  SEED_INPUT,
+  SEED_WORDS,
+  expectRedacted,
+  installRedaction,
+} from './redact.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 export const REPO_ROOT = resolve(HERE, '../../..');
@@ -79,6 +86,10 @@ export async function launchDevice(opts: DeviceOptions): Promise<Device> {
     args,
     ...(opts.videoDir ? { recordVideo: { dir: opts.videoDir, size: POPUP_VIEWPORT } } : {}),
   });
+
+  // When the run is being recorded, cover the recovery phrase in every page this
+  // context will ever open, before any of them paints. A no-op otherwise.
+  await installRedaction(context);
 
   // Every page opened from here on, in order — the demo video's running order.
   // The context's initial about:blank predates this listener, so it never
@@ -170,6 +181,7 @@ export async function createWallet(page: Page, password: string): Promise<string
   await page.getByTestId('pw-continue').click();
 
   await expect(page.getByTestId('seed-word-1')).toBeVisible({ timeout: 30_000 });
+  await expectRedacted(page, SEED_WORDS, 12);
   const words: string[] = [];
   for (let i = 1; i <= 12; i++) {
     words.push(((await page.getByTestId(`seed-word-${i}`).textContent()) ?? '').trim());
@@ -190,6 +202,7 @@ export async function confirmSeed(page: Page, words: string[]): Promise<void> {
     const position = Number(await field.getAttribute('data-word'));
     await field.fill(words[position - 1] ?? '');
   }
+  await expectRedacted(page, SEED_CHALLENGE, count);
   await page.getByTestId('confirm-seal').click();
   await expect(page.getByTestId('balance')).toBeVisible({ timeout: 30_000 });
 }
@@ -198,6 +211,7 @@ export async function importMnemonic(page: Page, mnemonic: string, password: str
   await page.getByTestId('welcome-import').click();
   await page.getByTestId('import-mnemonic').click();
   await page.getByTestId('import-text').fill(mnemonic);
+  await expectRedacted(page, SEED_INPUT, 1);
   await page.getByTestId('pw').fill(password);
   await page.getByTestId('pw2').fill(password);
   await page.getByTestId('import-submit').click();
@@ -207,6 +221,7 @@ export async function importRawSeed(page: Page, seedHex: string, password: strin
   await page.getByTestId('welcome-import').click();
   await page.getByTestId('import-raw').click();
   await page.getByTestId('import-text').fill(seedHex);
+  await expectRedacted(page, SEED_INPUT, 1);
   await page.getByTestId('pw').fill(password);
   await page.getByTestId('pw2').fill(password);
   await page.getByTestId('import-submit').click();

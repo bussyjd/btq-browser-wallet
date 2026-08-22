@@ -154,9 +154,9 @@ from `/utxos`, scale-16 fee estimation, coin selection under the weight ceiling,
 sighash, signing, and node broadcast. Broadcast turned out to require a node (§2); a
 failed broadcast keeps the signed hex and says why.
 
-**Polish.** Onboarding, the seed-confirmation challenge, lock and a 1-minute auto-lock
-alarm, an activity list with confirmations, the brand palette in both colour schemes, and
-error copy that names the cause and the next step.
+**Polish.** Onboarding, the seed-confirmation challenge, lock and auto-lock after five
+minutes idle, an activity list with confirmations, the brand palette in both colour
+schemes, and error copy that names the cause and the next step.
 
 **Site-connect and fees.** The `window.btq` provider, a held approval that names the
 origin, per-site permissions with revoke, `accountsChanged`, three fee presets and a Max
@@ -224,8 +224,8 @@ Each of these was considered and left out on purpose; none is blocked on an unkn
   "0". Caching a stale balance behind a banner was judged worse than saying the backend is
   down.
 - **i18n.** English only.
-- **Configurable auto-lock.** Fixed at one minute idle, with re-authentication on every
-  send.
+- **Configurable auto-lock.** Fixed at five minutes idle — a `chrome.alarms` tick every
+  minute checks the threshold — with re-authentication on every send.
 - **Hardware signing and PSBT interchange.** btq-core's P2MR PSBT fields are mapped in
   `BTQ_CORE_MAP.md`, but nothing here reads or writes a PSBT: the wallet builds and signs
   its own transactions.

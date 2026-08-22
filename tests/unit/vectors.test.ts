@@ -1,9 +1,9 @@
 /**
  * Golden-vector regression. These values were verified against btq-core (see
- * docs/REFERENCE.md §Milestone 0). A failure here means derivation, script
- * construction or address encoding changed — i.e. the wallet would no longer
- * find or spend its own coins. Never "fix" this test by regenerating vectors
- * without re-running the regtest cross-check.
+ * docs/REFERENCE.md §8, "Cross-check evidence"). A failure here means
+ * derivation, script construction or address encoding changed — i.e. the
+ * wallet would no longer find or spend its own coins. Never "fix" this test
+ * by regenerating vectors without re-running the regtest cross-check.
  */
 import { describe, it, expect } from 'vitest';
 import vectors from '../vectors/golden.json' with { type: 'json' };
