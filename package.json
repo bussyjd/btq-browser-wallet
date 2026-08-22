@@ -11,6 +11,10 @@
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "check": "npm run typecheck && npm run lint && npm test",
+    "test:e2e": "playwright test",
+    "test:all": "npm test && npm run test:e2e",
+    "demo:video": "RECORD_VIDEO=1 playwright test tests/e2e/smoke.spec.ts && sh scripts/stitch-demo.sh",
+    "playwright:install": "playwright install chromium",
     "dev": "vite",
     "build": "vite build",
     "vectors": "tsx scripts/gen-vectors.ts"
@@ -27,6 +31,7 @@
   "devDependencies": {
     "@crxjs/vite-plugin": "^2.7.1",
     "@eslint/js": "^10.0.1",
+    "@playwright/test": "^1.62.1",
     "@types/chrome": "^0.2.6",
     "@types/node": "^26.2.0",
     "@types/react": "^19.2.18",

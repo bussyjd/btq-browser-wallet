@@ -5,3 +5,9 @@ dist/
 
 # Take-home brief — keep out of the public repo
 *.pdf
+
+# End-to-end suite (npm run test:e2e)
+test-results/
+playwright-report/
+demo/raw/
+demo/*.webm

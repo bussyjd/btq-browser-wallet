@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>BTQ smoke dapp</title>
+    <style>
+      :root { color-scheme: light dark; --bg:#f1f2f4; --surface:#fff; --ink:#14171c; --ink2:#4b515a; --line:rgba(20,23,28,.13); --accent:#35a4ea; }
+      @media (prefers-color-scheme: dark) { :root { --bg:#070b11; --surface:#0f1620; --ink:#eef2f6; --ink2:#aeb6c0; --line:rgba(255,255,255,.12); } }
+      body { margin:0; padding:40px 20px; background:var(--bg); color:var(--ink); font:15px/1.5 system-ui, sans-serif; }
+      main { max-width:620px; margin:0 auto; background:var(--surface); border:1px solid var(--line); border-radius:10px; padding:24px; }
+      h1 { font-size:20px; margin:0 0 4px; }
+      p.lede { margin:0 0 20px; color:var(--ink2); }
+      .row { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:16px; }
+      button { font:inherit; font-weight:600; padding:9px 16px; border-radius:10px; border:1px solid var(--line); background:var(--surface); color:var(--ink); cursor:pointer; }
+      button.primary { background:var(--accent); border-color:var(--accent); color:#04121d; }
+      pre { margin:0; padding:12px; border:1px solid var(--line); border-radius:10px; background:var(--bg); overflow-x:auto; font-size:13px; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>BTQ smoke dapp</h1>
+      <p class="lede">A page with no privileges. It can only ask <code>window.btq</code> for an address.</p>
+      <div class="row">
+        <button class="primary" id="connect" data-testid="dapp-connect">Connect wallet</button>
+        <button id="accounts" data-testid="dapp-accounts">btq_accounts</button>
+        <button id="disconnect" data-testid="dapp-disconnect">Disconnect</button>
+      </div>
+      <pre id="out" data-testid="dapp-out">provider: checking…</pre>
+    </main>
+    <script>
+      (function () {
+        var out = document.getElementById('out');
+        function show(value) {
+          out.textContent = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
+        }
+        show('provider: ' + (window.btq && window.btq.isBtq ? 'window.btq detected' : 'not found'));
+        function call(method) {
+          return window.btq.request({ method: method }).then(show, function (e) {
+            show('error ' + e.code + ': ' + e.message);
+          });
+        }
+        document.getElementById('connect').onclick = function () { call('btq_requestAccounts'); };
+        document.getElementById('accounts').onclick = function () { call('btq_accounts'); };
+        document.getElementById('disconnect').onclick = function () { call('btq_disconnect'); };
+        if (window.btq && window.btq.on) {
+          window.btq.on('accountsChanged', function (accounts) {
+            show('accountsChanged: ' + JSON.stringify(accounts));
+          });
+        }
+      })();
+    </script>
+  </body>
+</html>
