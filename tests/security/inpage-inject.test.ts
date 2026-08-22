@@ -234,14 +234,10 @@ describe('inpage inject — the exact file Chrome loads as a classic script', ()
 
 describe('the built chunk Chrome actually loads', () => {
   it('keeps the MAIN world, with no extension APIs and no imports', () => {
+    // tests/global-setup.ts builds dist/ when it is absent, so this check is
+    // unconditional: the shipped chunk is always the one under assertion.
     const distManifestFile = join(ROOT, 'dist', 'manifest.json');
-    if (!existsSync(distManifestFile)) {
-      // dist/ is gitignored, so a fresh clone has not built yet. CI must build first.
-      if (process.env.CI) {
-        throw new Error('dist/ is missing — run `npm run build` before `npm test` so this check can run');
-      }
-      return;
-    }
+    expect(existsSync(distManifestFile), 'dist/manifest.json exists after the build').toBe(true);
     const distManifest = JSON.parse(readFileSync(distManifestFile, 'utf8')) as {
       content_scripts: { js: string[]; world?: string }[];
     };
