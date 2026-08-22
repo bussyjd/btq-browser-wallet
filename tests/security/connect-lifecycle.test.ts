@@ -32,6 +32,24 @@ async function ok(call: Call): Promise<unknown> {
   return reply.result;
 }
 
+/**
+ * Connect a site the way a user really does: the page asks, the worker parks
+ * the request and opens a window for it, the user approves. There is no other
+ * way in — `wallet.approveConnect` refuses any origin the broker is not holding,
+ * so the popup cannot grant a site that never asked.
+ */
+async function connectSite(origin: string, tabId = 1): Promise<void> {
+  const request = chromeFake.callFromPage({ method: 'page.requestAccounts' }, origin, tabId);
+  await flush();
+  await ok(chromeFake.call({ method: 'wallet.approveConnect', params: { origin } }));
+  await request.promise;
+}
+
+/** The prompt mirror the popup reads, as stored. */
+function storedPrompts(): { origin: string; at: number }[] | undefined {
+  return chromeFake.store.get('pendingConnects') as { origin: string; at: number }[] | undefined;
+}
+
 beforeEach(async () => {
   await boot();
   await ok(chromeFake.call({ method: 'wallet.importMnemonic', params: { mnemonic: MNEMONIC, password: PASSWORD } }));
@@ -50,9 +68,13 @@ describe('page.requestAccounts lifecycle', () => {
     await flush();
 
     expect(request.settled, 'the page must not be answered before the user decides').toBe(false);
-    expect(chromeFake.store.get('pendingConnect')).toEqual({ origin: DAPP });
+    expect(storedPrompts()).toEqual([{ origin: DAPP, at: expect.any(Number) }]);
     expect(chromeFake.windows).toHaveLength(1);
-    expect(chromeFake.windows[0]?.url).toMatch(/src\/ui\/index\.html\?connect=1$/);
+    // The window carries the origin it was opened for, so it can only ever
+    // render and approve that site.
+    expect(chromeFake.windows[0]?.url).toMatch(
+      /src\/ui\/index\.html\?connect=1&origin=https%3A%2F%2Fdapp\.example$/,
+    );
     expect(chromeFake.windows[0]?.type).toBe('popup');
     expect(chromeFake.badgeText).toBe('1');
 
@@ -73,7 +95,7 @@ describe('page.requestAccounts lifecycle', () => {
     await flush();
     expect(chromeFake.openPopupCalls, 'the toolbar popup is a last resort only').toBe(0);
     expect(chromeFake.windows).toHaveLength(1);
-    expect(chromeFake.windows[0]?.url).toMatch(/src\/ui\/index\.html\?connect=1$/);
+    expect(chromeFake.windows[0]?.url).toMatch(/src\/ui\/index\.html\?connect=1&origin=/);
     await ok(chromeFake.call({ method: 'wallet.approveConnect', params: { origin: DAPP } }));
     await expect(request.promise).resolves.toEqual({ result: { accounts: [address] } });
     expect(chromeFake.removedWindows).toEqual([chromeFake.windows[0]?.id]);
@@ -86,8 +108,8 @@ describe('page.requestAccounts lifecycle', () => {
     await flush();
     expect(chromeFake.windows).toHaveLength(0);
     expect(chromeFake.openPopupCalls).toBe(1);
-    // The prompt is still stored, so the request is answerable either way.
-    expect(chromeFake.store.get('pendingConnect')).toEqual({ origin: DAPP });
+    // The prompt is still mirrored, so the request is answerable either way.
+    expect(storedPrompts()).toEqual([{ origin: DAPP, at: expect.any(Number) }]);
     await ok(chromeFake.call({ method: 'wallet.approveConnect', params: { origin: DAPP } }));
     await expect(request.promise).resolves.toEqual({ result: { accounts: [address] } });
   });
@@ -115,7 +137,7 @@ describe('page.requestAccounts lifecycle', () => {
       error: 'User rejected the request.',
       code: 'USER_REJECTED',
     });
-    expect(chromeFake.store.get('pendingConnect')).toBeUndefined();
+    expect(storedPrompts()).toBeUndefined();
     expect(chromeFake.badgeText).toBe('');
     const accounts = await ok(chromeFake.callFromPage({ method: 'page.getAccounts' }, DAPP));
     expect(accounts).toEqual({ accounts: [] });
@@ -131,7 +153,7 @@ describe('page.requestAccounts lifecycle', () => {
       code: 'USER_REJECTED',
     });
     await flush();
-    expect(chromeFake.store.get('pendingConnect')).toBeUndefined();
+    expect(storedPrompts()).toBeUndefined();
     // We do not try to re-close a window the user already closed.
     expect(chromeFake.removedWindows).toEqual([]);
   });
@@ -158,24 +180,24 @@ describe('page.requestAccounts lifecycle', () => {
     const request = chromeFake.callFromPage({ method: 'page.requestAccounts' }, DAPP);
     await vi.advanceTimersByTimeAsync(1);
     expect(request.settled).toBe(false);
-    expect(chromeFake.store.get('pendingConnect')).toEqual({ origin: DAPP });
+    expect(storedPrompts()).toEqual([{ origin: DAPP, at: expect.any(Number) }]);
 
     await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
     vi.useRealTimers();
     await flush();
 
     expect(request.reply).toEqual({ error: 'User rejected the request.', code: 'USER_REJECTED' });
-    expect(chromeFake.store.get('pendingConnect'), 'a timed-out prompt must not linger').toBeUndefined();
+    expect(storedPrompts(), 'a timed-out prompt must not linger').toBeUndefined();
     expect(chromeFake.badgeText).toBe('');
   });
 
   it('answers an already-approved origin immediately, with no window and no prompt', async () => {
-    await ok(chromeFake.call({ method: 'wallet.approveConnect', params: { origin: DAPP } }));
+    await connectSite(DAPP);
     chromeFake.windows.length = 0;
     const accounts = await ok(chromeFake.callFromPage({ method: 'page.requestAccounts' }, DAPP));
     expect(accounts).toEqual({ accounts: [address] });
     expect(chromeFake.windows).toHaveLength(0);
-    expect(chromeFake.store.get('pendingConnect')).toBeUndefined();
+    expect(storedPrompts()).toBeUndefined();
   });
 
   it('a locked wallet opens no approval window and says why', async () => {
@@ -184,13 +206,13 @@ describe('page.requestAccounts lifecycle', () => {
     expect(reply.code).toBe('LOCKED');
     expect(reply.error).toMatch(/locked/i);
     expect(chromeFake.windows, 'a locked wallet must not pop an approval window').toHaveLength(0);
-    expect(chromeFake.store.get('pendingConnect')).toBeUndefined();
+    expect(storedPrompts()).toBeUndefined();
   });
 });
 
 describe('what a page can reach through the worker', () => {
   it('refuses wallet.* from a tab even when the origin is connected', async () => {
-    await ok(chromeFake.call({ method: 'wallet.approveConnect', params: { origin: DAPP } }));
+    await connectSite(DAPP);
     for (const method of ['wallet.unlock', 'wallet.status', 'wallet.receive', 'wallet.confirmSend']) {
       const reply = await chromeFake.callFromPage({ method, params: { password: PASSWORD } }, DAPP).promise;
       expect(reply.error, method).toMatch(/not available to pages/);
@@ -202,10 +224,12 @@ describe('what a page can reach through the worker', () => {
     const request = chromeFake.callFromPage({ method: 'page.requestAccounts', params: { origin: DAPP } }, EVIL);
     await flush();
     expect(request.settled).toBe(false);
-    expect(chromeFake.store.get('pendingConnect')).toEqual({ origin: EVIL });
+    expect(storedPrompts()).toEqual([{ origin: EVIL, at: expect.any(Number) }]);
 
-    // Approving the origin the page claimed must not answer the evil origin's request.
-    await ok(chromeFake.call({ method: 'wallet.approveConnect', params: { origin: DAPP } }));
+    // Approving the origin the page claimed must not answer the evil origin's
+    // request — and with nobody waiting on that origin, it is refused outright.
+    const claimed = await chromeFake.call({ method: 'wallet.approveConnect', params: { origin: DAPP } }).promise;
+    expect(claimed.code).toBe('FORBIDDEN');
     await flush();
     expect(request.settled).toBe(false);
   });
@@ -219,7 +243,7 @@ describe('what a page can reach through the worker', () => {
 describe('accountsChanged broadcast', () => {
   it('tells the site when it is revoked, and only that site', async () => {
     chromeFake.tabs = [{ id: 7 }, { id: 8 }];
-    await ok(chromeFake.call({ method: 'wallet.approveConnect', params: { origin: DAPP } }));
+    await connectSite(DAPP, 7);
     chromeFake.tabMessages.length = 0;
     await ok(chromeFake.call({ method: 'wallet.revokeSite', params: { origin: DAPP } }));
     await flush();
@@ -235,7 +259,7 @@ describe('accountsChanged broadcast', () => {
 
   it('emits accountsChanged when the page itself disconnects', async () => {
     chromeFake.tabs = [{ id: 3 }];
-    await ok(chromeFake.call({ method: 'wallet.approveConnect', params: { origin: DAPP } }));
+    await connectSite(DAPP, 3);
     chromeFake.tabMessages.length = 0;
     await ok(chromeFake.callFromPage({ method: 'page.disconnect' }, DAPP));
     await flush();

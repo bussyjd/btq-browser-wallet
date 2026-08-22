@@ -505,6 +505,15 @@ export class Keyring {
     return this.storage.loadOrigins();
   }
 
+  /**
+   * The prompt an older build left in the single storage slot, if any.
+   *
+   * The service worker answers `wallet.pendingConnect` from its connect broker
+   * instead — the broker is the only place a request with a live caller behind
+   * it exists — and clears this slot as it migrates. This stays so a keyring
+   * driven without that worker still reports what it can see, and so the
+   * migration has something to read.
+   */
   async pendingConnect(): Promise<{ origin: string } | null> {
     return this.storage.loadPendingConnect();
   }
@@ -518,7 +527,10 @@ export class Keyring {
     if (isOriginAllowed(allowed, o)) {
       return { accounts: [await this.peekReceiveAddress()] };
     }
-    await this.storage.savePendingConnect({ origin: o });
+    // Deliberately no durable record. A parked request lives and dies with the
+    // service worker that holds its `sendResponse`; a note of it that outlives
+    // the worker is a prompt the user could approve days later, granting a site
+    // that is no longer asking. The broker keeps the pending set, timestamped.
     return { pending: true };
   }
 
@@ -544,7 +556,14 @@ export class Keyring {
     return { accounts: [(await this.receiveAddress()).address] };
   }
 
-  async denyConnect(): Promise<void> {
+  /**
+   * Refuse a connection request. `origin` names the request being denied — one
+   * outstanding prompt must never settle another — and is validated here so a
+   * malformed one is a refusal rather than a silent no-op. Settling the parked
+   * caller is the broker's job; all this does is drop any migrated record.
+   */
+  async denyConnect(origin?: string): Promise<void> {
+    if (origin !== undefined) canonicalOrigin(origin);
     await this.storage.savePendingConnect(null);
   }
 

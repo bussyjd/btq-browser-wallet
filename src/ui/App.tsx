@@ -20,6 +20,17 @@ const WANT_CONNECT = params.get('connect') === '1';
 const IS_ONBOARD_TAB = params.get('onboard') === '1';
 const ONBOARD_TAB_FLAG = 'onboardTabOpened';
 
+/**
+ * The site this window was opened to answer for.
+ *
+ * The worker puts the origin in the URL when it opens an approval window, so
+ * the window renders and approves the site that actually asked — never
+ * "whichever request is outstanding by the time the popup has loaded". Two
+ * sites racing each other get one window each, each bound to its own origin.
+ */
+const WINDOW_ORIGIN = ((raw: string | null) =>
+  raw !== null && /^https?:\/\/[^/\s]+$/.test(raw) ? raw : null)(params.get('origin'));
+
 /** The action popup closes on any outside click, which would discard a shown seed. */
 async function isActionPopup(): Promise<boolean> {
   try {
@@ -163,6 +174,9 @@ export function App() {
 
   const unlocked = Boolean(wallet.status?.unlocked);
   const showHeaderTools = unlocked && (screen === 'home' || screen === 'connect');
+  // A dedicated approval window answers for its own site and nothing else; the
+  // toolbar popup shows whatever the worker still has a live caller for.
+  const connectOrigin = WANT_CONNECT ? (WINDOW_ORIGIN ?? wallet.pendingOrigin) : wallet.pendingOrigin;
 
   function screenBody() {
     switch (screen) {
@@ -218,12 +232,12 @@ export function App() {
         );
 
       case 'connect':
-        return wallet.pendingOrigin ? (
+        return connectOrigin ? (
           <ConnectApproval
-            origin={wallet.pendingOrigin}
+            origin={connectOrigin}
             address={wallet.receive?.address ?? null}
             onApprove={async () => {
-              await wallet.approveConnect(wallet.pendingOrigin ?? '');
+              await wallet.approveConnect(connectOrigin);
               finishConnect();
             }}
             onDeny={async () => {

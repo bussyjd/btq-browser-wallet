@@ -13,7 +13,6 @@ import {
   launchDevice,
   openSettings,
   receiveAddress,
-  waitForApprovalPage,
   waitForScan,
   type Device,
 } from './fixtures/extension.js';
@@ -61,23 +60,27 @@ async function relay(page: Page, method: string, params?: unknown): Promise<Reco
 }
 
 /**
- * Run `post`, then wait until the relay has answered the control request `until`
- * (or the deadline passes), and hand back every response id the page saw. The
- * page must already be collecting into `window.__btqSeen`.
+ * Run `post`, then wait until every id in `controls` has come back, and hand
+ * back every response id the page saw. The page must already be collecting into
+ * `window.__btqSeen`.
+ *
+ * The controls are the barrier, and there are two of them on purpose. The relay
+ * handles `message` events in order: a message it accepts is forwarded to the
+ * worker *before* anything posted after it, so if the message under test had
+ * been accepted its answer would be in flight ahead of both controls. Waiting
+ * for two complete page → relay → worker → relay → page round trips is
+ * therefore a real barrier, not a wall-clock wager on how fast the box is.
  */
-async function collectRelayIds(page: Page, until: number, post: () => Promise<void>): Promise<number[]> {
+async function collectRelayIds(page: Page, controls: number[], post: () => Promise<void>): Promise<number[]> {
   await post();
-  return page.evaluate(async (control: number) => {
+  return page.evaluate(async (wanted: number[]) => {
     const seen = () => (window as any).__btqSeen as number[];
-    const deadline = Date.now() + 10_000;
-    while (!seen().includes(control) && Date.now() < deadline) {
-      await new Promise((r) => setTimeout(r, 25));
+    const deadline = Date.now() + 15_000;
+    while (!wanted.every((id) => seen().includes(id)) && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 10));
     }
-    // A late answer to the rejected message would still be a failure, so give
-    // the relay one more round trip's worth of time to produce one.
-    await new Promise((r) => setTimeout(r, 500));
     return [...seen()];
-  }, until);
+  }, controls);
 }
 
 /** `window.btq.request(...)`, resolved or rejected, as plain data. */
@@ -92,15 +95,65 @@ async function providerRequest(page: Page, method: string): Promise<Record<strin
   );
 }
 
+interface PendingRequest {
+  /** Has the page's promise resolved or rejected yet? */
+  settled: () => Promise<boolean>;
+  /** Await it and read the outcome as plain data. */
+  result: () => Promise<Record<string, unknown>>;
+}
+
 /** Start a request that will block on the approval window, and hand back a getter. */
-async function startRequestAccounts(page: Page): Promise<() => Promise<Record<string, unknown>>> {
+async function startRequestAccounts(page: Page): Promise<PendingRequest> {
   await page.evaluate(() => {
-    (window as any).__btqPending = (window as any).btq.request({ method: 'btq_requestAccounts' }).then(
-      (result: unknown) => ({ result }),
-      (e: { message?: string; code?: number }) => ({ error: e.message, code: e.code }),
+    const w = window as any;
+    w.__btqSettled = false;
+    w.__btqPending = w.btq.request({ method: 'btq_requestAccounts' }).then(
+      (result: unknown) => {
+        w.__btqSettled = true;
+        return { result };
+      },
+      (e: { message?: string; code?: number }) => {
+        w.__btqSettled = true;
+        return { error: e.message, code: e.code };
+      },
     );
   });
-  return () => page.evaluate(async () => (window as any).__btqPending as Promise<Record<string, unknown>>);
+  return {
+    settled: () => page.evaluate(() => (window as any).__btqSettled as boolean),
+    result: () => page.evaluate(async () => (window as any).__btqPending as Promise<Record<string, unknown>>),
+  };
+}
+
+/**
+ * The approval window opened for exactly this origin.
+ *
+ * The worker puts the origin in the window's URL, so with two sites waiting at
+ * once each window is identifiable — and each one can only speak for its own
+ * site.
+ */
+async function approvalWindowFor(origin: string): Promise<Page> {
+  const marker = `connect=1&origin=${encodeURIComponent(origin)}`;
+  let found: Page | undefined;
+  await expect
+    .poll(() => {
+      found = device.context.pages().find((p) => p.url().includes(marker));
+      return Boolean(found);
+    }, { timeout: 30_000, message: `no approval window for ${origin}` })
+    .toBe(true);
+  const page = found as Page;
+  await page.waitForSelector('[data-testid="connect-origin"]');
+  return page;
+}
+
+/** Call the wallet RPC surface from inside an extension page, as the popup does. */
+async function fromExtensionPage(page: Page, method: string, params?: unknown): Promise<Record<string, unknown>> {
+  return page.evaluate(
+    ([m, p]) =>
+      new Promise<Record<string, unknown>>((resolve) => {
+        (window as any).chrome.runtime.sendMessage({ method: m, params: p }, resolve);
+      }),
+    [method, params] as [string, unknown],
+  );
 }
 
 test.beforeAll(async () => {
@@ -138,10 +191,10 @@ test('10 · a site asks, the user approves, and only that origin is connected', 
   expect(await providerRequest(siteA, 'btq_accounts')).toEqual({ result: [] });
 
   const pending = await startRequestAccounts(siteA);
-  const approval = await waitForApprovalPage(device.context);
+  const approval = await approvalWindowFor(originA);
   await expect(approval.getByTestId('connect-origin')).toHaveText(originA);
   await approval.getByTestId('connect-approve').click();
-  expect(await pending()).toEqual({ result: [A0] });
+  expect(await pending.result()).toEqual({ result: [A0] });
   expect(await providerRequest(siteA, 'btq_accounts')).toEqual({ result: [A0] });
 
   // A different origin on the same host:port pair is a different site.
@@ -149,10 +202,10 @@ test('10 · a site asks, the user approves, and only that origin is connected', 
   expect(await providerRequest(siteB, 'btq_accounts')).toEqual({ result: [] });
 
   const pendingB = await startRequestAccounts(siteB);
-  const denial = await waitForApprovalPage(device.context);
+  const denial = await approvalWindowFor(originB);
   await expect(denial.getByTestId('connect-origin')).toHaveText(originB);
   await denial.getByTestId('connect-deny').click();
-  const rejected = await pendingB();
+  const rejected = await pendingB.result();
   expect(rejected.code).toBe(4001);
   expect(String(rejected.error)).toContain('rejected');
   expect(await providerRequest(siteB, 'btq_accounts')).toEqual({ result: [] });
@@ -164,6 +217,53 @@ test('10 · a site asks, the user approves, and only that origin is connected', 
   await popup.getByTestId('site-revoke').click();
   await expect(popup.getByTestId('site-row')).toHaveCount(0);
   expect(await providerRequest(siteA, 'btq_accounts')).toEqual({ result: [] });
+});
+
+test('10b · two sites race for the prompt, and each window answers only its own', async () => {
+  // The attack this rules out: a page that fires `btq_requestAccounts` on a
+  // timer, racing the user's click on a site they do trust. Before the window
+  // carried its origin, whichever request landed last owned *every* open
+  // approval window — so the honest site's window granted the racing one.
+  expect(await providerRequest(siteA, 'btq_accounts')).toEqual({ result: [] });
+  expect(await providerRequest(siteB, 'btq_accounts')).toEqual({ result: [] });
+
+  const pendingA = await startRequestAccounts(siteA);
+  const windowA = await approvalWindowFor(originA);
+  const pendingB = await startRequestAccounts(siteB);
+  const windowB = await approvalWindowFor(originB);
+
+  // Two windows, each naming — and bound to — the site that opened it.
+  expect(windowA).not.toBe(windowB);
+  await expect(windowA.getByTestId('connect-origin')).toHaveText(originA);
+  await expect(windowB.getByTestId('connect-origin')).toHaveText(originB);
+
+  // A's window cannot grant B, however it asks the worker.
+  const stolen = await fromExtensionPage(windowA, 'wallet.approveConnect', { origin: originB });
+  expect(stolen.code).toBe('FORBIDDEN');
+  expect(stolen.result).toBeUndefined();
+  expect(await pendingB.settled(), "B's request must not be settled from A's window").toBe(false);
+  expect(await providerRequest(siteB, 'btq_accounts')).toEqual({ result: [] });
+
+  // Nor can any window grant a site that is not asking at all.
+  const invented = await fromExtensionPage(windowA, 'wallet.approveConnect', { origin: 'https://nobody.example' });
+  expect(invented.code).toBe('FORBIDDEN');
+
+  // Cancel in A's window — over RPC, so the deny is judged on its own and not
+  // on the window closing afterwards. It settles A, and only A. Settling also
+  // closes A's window, which can tear the page down before the RPC answer finds
+  // its way back; the outcome that matters is on the page's promise below.
+  await fromExtensionPage(windowA, 'wallet.denyConnect').catch(() => undefined);
+  expect(await pendingA.result()).toMatchObject({ code: 4001 });
+  expect(await pendingB.settled(), "cancelling A must not settle B").toBe(false);
+
+  // B's own window still works, and answers B.
+  await windowB.getByTestId('connect-approve').click();
+  expect(await pendingB.result()).toEqual({ result: [A0] });
+  expect(await providerRequest(siteA, 'btq_accounts')).toEqual({ result: [] });
+
+  // Leave no site connected, for the tests after this one.
+  await providerRequest(siteB, 'btq_disconnect');
+  expect(await providerRequest(siteB, 'btq_accounts')).toEqual({ result: [] });
 });
 
 test('11 · a page cannot reach the wallet surface, or anything in storage', async () => {
@@ -250,15 +350,17 @@ test('11b · another origin cannot drive this page\'s relay, forged or framed', 
   });
   // The control message goes through the whole relay round trip after it, so a
   // reply to the frame's message has had at least that long to turn up.
-  const framedSeen = await collectRelayIds(siteA, 9102, () =>
+  const framedSeen = await collectRelayIds(siteA, [9102, 9103], () =>
     siteA.evaluate(() => {
-      window.postMessage(
-        { channel: 'btq-wallet', id: 9102, kind: 'request', method: 'page.getAccounts' },
-        window.location.origin,
-      );
+      for (const id of [9102, 9103]) {
+        window.postMessage(
+          { channel: 'btq-wallet', id, kind: 'request', method: 'page.getAccounts' },
+          window.location.origin,
+        );
+      }
     }),
   );
-  expect(framedSeen).toContain(9102); // the relay is alive and answering …
+  expect(framedSeen).toEqual(expect.arrayContaining([9102, 9103])); // the relay is alive and answering …
   expect(framedSeen).not.toContain(9101); // … and it said nothing to the frame.
   await siteA.evaluate(() => document.getElementById('attacker')?.remove());
 
@@ -269,7 +371,7 @@ test('11b · another origin cannot drive this page\'s relay, forged or framed', 
   await siteA.evaluate(() => {
     (window as any).__btqSeen = [] as number[];
   });
-  const forgedSeen = await collectRelayIds(siteA, 9202, () =>
+  const forgedSeen = await collectRelayIds(siteA, [9202, 9203], () =>
     siteA.evaluate(
       ([badOrigin, goodOrigin]) => {
         const forge = (id: number, origin: string) =>
@@ -281,21 +383,22 @@ test('11b · another origin cannot drive this page\'s relay, forged or framed', 
             }),
           );
         forge(9201, badOrigin); // claims to be a page on another origin
-        forge(9202, goodOrigin); // the control: same event, honest origin
+        forge(9202, goodOrigin); // the controls: same event, honest origin
+        forge(9203, goodOrigin);
       },
       ['http://attacker.example', originA] as [string, string],
     ),
   );
-  expect(forgedSeen).toContain(9202);
+  expect(forgedSeen).toEqual(expect.arrayContaining([9202, 9203]));
   expect(forgedSeen).not.toContain(9201);
 });
 
 test('12 · a locked wallet answers a site with nothing, and opens no window', async () => {
   // Reconnect first, so the empty answer below can only be the lock talking.
   const pending = await startRequestAccounts(siteA);
-  const approval = await waitForApprovalPage(device.context);
+  const approval = await approvalWindowFor(originA);
   await approval.getByTestId('connect-approve').click();
-  expect(await pending()).toEqual({ result: [A0] });
+  expect(await pending.result()).toEqual({ result: [A0] });
 
   await popup.getByTestId('lock-now').click();
   await expect(popup.getByTestId('unlock-pw')).toBeVisible();

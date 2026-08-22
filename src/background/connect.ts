@@ -1,14 +1,17 @@
 /**
  * Site-connect lifecycle for `page.requestAccounts` (the MetaMask-style approval).
  *
- * The keyring only records *that* an origin asked (`{ pending: true }`); it never
- * blocks. This broker is the part that makes the page's promise behave: it parks
- * the page's `sendResponse` until the user decides in the popup, then answers
- * every parked caller with the same outcome.
+ * The keyring only reports *that* an origin asked (`{ pending: true }`); it never
+ * blocks and it keeps no record. This broker is the part that makes the page's
+ * promise behave: it parks the page's `sendResponse` until the user decides in
+ * the popup, then answers every parked caller with the same outcome.
  *
  * Rules encoded here:
  *  - one pending request per canonical origin — a second `requestAccounts` from
  *    the same origin joins the first and shares its outcome;
+ *  - at most `MAX_PENDING_PROMPTS` origins wait at once. The next one is
+ *    answered `USER_REJECTED` instead of being given a window of its own, so a
+ *    page that controls many subdomains cannot bury the screen in popups;
  *  - approve answers `{ result: { accounts: [...] } }`;
  *  - deny, closing the approval window, and the 5-minute timeout all answer
  *    `{ error: 'User rejected the request.', code: 'USER_REJECTED' }`, which the
@@ -16,15 +19,21 @@
  *  - an origin can only ever settle its own request (the caller passes the
  *    canonical origin; the map is keyed by it).
  *
+ * **This broker is the only authority on what is pending.** `wallet.approveConnect`
+ * is refused for any origin it is not holding, so the popup cannot grant a site
+ * that is not, right now, waiting for an answer. Storage carries a timestamped
+ * mirror of `prompts()` so the popup can render them; nothing is ever granted
+ * out of that mirror, and `parsePendingPrompts` / `freshPrompts` throw away
+ * anything stale or malformed when it is read back.
+ *
  * MV3 lifetime caveat: a parked `sendResponse` lives in the service worker, and
  * Chrome may terminate an idle worker (30 s of no events, 5 min hard cap). If
  * that happens while a request is parked, the message channel closes and the
  * content relay reports it to the page as a disconnect — the page can simply ask
  * again. The `setTimeout` below dies with the worker too, so it is a bound on a
- * *live* worker, not a durable timer; the durable half of the state is the
- * keyring's stored `pendingConnect`, which the popup reads on open and which
- * `onRejected` clears through `wallet.denyConnect`. Re-arming on wake is
- * therefore unnecessary: a worker that woke up has no responders to answer.
+ * *live* worker, not a durable timer. That is precisely why a worker that woke
+ * up refuses every prompt it finds on disk: no responder survived, so approving
+ * one would grant a permanent allowlist entry that no page ever asked for.
  */
 
 export interface ConnectReply {
@@ -40,6 +49,16 @@ export type RejectReason = 'denied' | 'timeout' | 'window-closed';
 
 export type TimerHandle = unknown;
 
+/** What `hold` did with a request: opened a window, joined one, or refused. */
+export type HoldOutcome = 'opened' | 'joined' | 'refused';
+
+/** A parked request as the popup sees it: which origin, and when it asked. */
+export interface PendingPrompt {
+  readonly origin: string;
+  /** ms epoch when the request was parked, so a stale one can be recognised. */
+  readonly at: number;
+}
+
 /** Sent to the page when the user says no, closes the window, or never answers. */
 export const USER_REJECTED_REPLY: Readonly<ConnectReply> = Object.freeze({
   error: 'User rejected the request.',
@@ -48,13 +67,25 @@ export const USER_REJECTED_REPLY: Readonly<ConnectReply> = Object.freeze({
 
 export const CONNECT_TIMEOUT_MS = 5 * 60 * 1000;
 
+/**
+ * How many approval windows may be open at once. Three is enough for an honest
+ * pile-up (a page reloading, two tabs, a redirect) and small enough that the
+ * user can close them; the fourth site is rejected rather than queued, because a
+ * queue is a place for a hostile page to park work the user has to dismiss.
+ */
+export const MAX_PENDING_PROMPTS = 3;
+
 export interface ConnectBrokerOptions {
   timeoutMs?: number;
+  /** How many origins may wait at once (default `MAX_PENDING_PROMPTS`). */
+  maxPending?: number;
   setTimer?: (fn: () => void, ms: number) => TimerHandle;
   clearTimer?: (handle: TimerHandle) => void;
+  /** Clock, injectable so tests can age a prompt without waiting. */
+  now?: () => number;
   /** Called after a request is rejected, so the caller can clear stored state. */
   onRejected?: (origin: string, reason: RejectReason) => void;
-  /** Called whenever the number of waiting requests changes (badge). */
+  /** Called whenever the set of waiting requests changes (badge + mirror). */
   onCountChanged?: (count: number) => void;
   /** Close an approval window this broker was told about. */
   closeWindow?: (windowId: number) => void;
@@ -62,6 +93,7 @@ export interface ConnectBrokerOptions {
 
 interface PendingRequest {
   readonly origin: string;
+  readonly at: number;
   readonly responders: ConnectResponder[];
   timer: TimerHandle;
   windowId: number | null;
@@ -70,32 +102,47 @@ interface PendingRequest {
 export class ConnectBroker {
   private readonly waiting = new Map<string, PendingRequest>();
   private readonly timeoutMs: number;
+  private readonly maxPending: number;
   private readonly setTimer: (fn: () => void, ms: number) => TimerHandle;
   private readonly clearTimer: (handle: TimerHandle) => void;
+  private readonly now: () => number;
   private readonly opts: ConnectBrokerOptions;
 
   constructor(opts: ConnectBrokerOptions = {}) {
     this.opts = opts;
     this.timeoutMs = opts.timeoutMs ?? CONNECT_TIMEOUT_MS;
+    this.maxPending = opts.maxPending ?? MAX_PENDING_PROMPTS;
     this.setTimer = opts.setTimer ?? ((fn, ms) => setTimeout(fn, ms));
     this.clearTimer = opts.clearTimer ?? ((h) => clearTimeout(h as ReturnType<typeof setTimeout>));
+    this.now = opts.now ?? (() => Date.now());
   }
 
   /**
-   * Park a responder for `origin`. Returns true when this is the first request
-   * for that origin — only then should the caller open the approval UI.
+   * Park a responder for `origin`.
+   *
+   * `'opened'` — first request for that origin: open an approval window for it.
+   * `'joined'` — that origin is already waiting; it shares the first outcome.
+   * `'refused'` — too many origins are already waiting. Nothing was parked, so
+   * the caller must answer this request itself (with `USER_REJECTED_REPLY`).
    */
-  hold(origin: string, responder: ConnectResponder): boolean {
+  hold(origin: string, responder: ConnectResponder): HoldOutcome {
     const existing = this.waiting.get(origin);
     if (existing) {
       existing.responders.push(responder);
-      return false;
+      return 'joined';
     }
-    const entry: PendingRequest = { origin, responders: [responder], timer: null, windowId: null };
+    if (this.waiting.size >= this.maxPending) return 'refused';
+    const entry: PendingRequest = {
+      origin,
+      at: this.now(),
+      responders: [responder],
+      timer: null,
+      windowId: null,
+    };
     this.waiting.set(origin, entry);
     entry.timer = this.setTimer(() => this.expire(origin), this.timeoutMs);
     this.countChanged();
-    return true;
+    return 'opened';
   }
 
   /** Remember the approval window we opened, so closing it counts as a deny. */
@@ -118,6 +165,13 @@ export class ConnectBroker {
     return [...this.waiting.keys()];
   }
 
+  /** Everything waiting, newest first — the popup shows the most recent ask. */
+  prompts(): PendingPrompt[] {
+    return [...this.waiting.values()]
+      .map((entry) => ({ origin: entry.origin, at: entry.at }))
+      .sort((a, b) => b.at - a.at || a.origin.localeCompare(b.origin));
+  }
+
   /** Answer the parked callers for `origin` with the approved accounts. */
   approve(origin: string, result: unknown): number {
     return this.settle(origin, { result }, null);
@@ -128,7 +182,7 @@ export class ConnectBroker {
     return this.settle(origin, USER_REJECTED_REPLY, 'denied');
   }
 
-  /** Reject everything still waiting — used when the pending origin is unknown. */
+  /** Reject everything still waiting — used when the vault itself goes away. */
   denyAll(): string[] {
     const settled = this.origins();
     for (const origin of settled) this.deny(origin);
@@ -179,4 +233,47 @@ export class ConnectBroker {
   private countChanged(): void {
     if (this.opts.onCountChanged) this.opts.onCountChanged(this.waiting.size);
   }
+}
+
+// ---------------------------------------------------------------- the mirror
+
+/**
+ * Read the stored prompt mirror, migrating the single-slot `pendingConnect`
+ * record older builds wrote.
+ *
+ * Storage is attacker-adjacent — anything with extension access can write it —
+ * so every field is validated and the list is capped. The legacy record has no
+ * timestamp, which is exactly the L3 case: it was written by a worker that no
+ * longer exists, so it is dated `0` and `freshPrompts` throws it away. Nothing
+ * here can widen the allowlist by itself: `approveConnect` still requires the
+ * broker to be holding the origin.
+ */
+export function parsePendingPrompts(raw: unknown, legacy?: unknown): PendingPrompt[] {
+  const out: PendingPrompt[] = [];
+  const seen = new Set<string>();
+  const push = (origin: unknown, at: unknown): void => {
+    if (typeof origin !== 'string' || !/^https?:\/\/[^/\s]+$/.test(origin)) return;
+    if (seen.has(origin)) return;
+    seen.add(origin);
+    out.push({ origin, at: typeof at === 'number' && Number.isFinite(at) && at >= 0 ? at : 0 });
+  };
+  if (Array.isArray(raw)) {
+    for (const item of raw) {
+      if (typeof item !== 'object' || item === null) continue;
+      const record = item as { origin?: unknown; at?: unknown };
+      push(record.origin, record.at);
+      if (out.length >= MAX_PENDING_PROMPTS) break;
+    }
+  }
+  if (typeof legacy === 'object' && legacy !== null) {
+    push((legacy as { origin?: unknown }).origin, 0);
+  }
+  return out.slice(0, MAX_PENDING_PROMPTS);
+}
+
+/** Prompts still inside the timeout window, newest first. */
+export function freshPrompts(prompts: readonly PendingPrompt[], now: number, maxAgeMs = CONNECT_TIMEOUT_MS): PendingPrompt[] {
+  return prompts
+    .filter((p) => p.at > 0 && now - p.at < maxAgeMs)
+    .sort((a, b) => b.at - a.at || a.origin.localeCompare(b.origin));
 }

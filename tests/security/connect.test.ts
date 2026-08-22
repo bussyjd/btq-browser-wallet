@@ -144,15 +144,23 @@ describe('site-connect state machine through dispatch', () => {
     const { k, store } = ringWithStore();
     await k.importMnemonic(MNEMONIC, PASSWORD);
 
-    // An origin nobody approved gets a prompt, not an address.
+    // An origin nobody approved gets a prompt, not an address — and no durable
+    // record of it: a parked request lives and dies with the worker holding the
+    // page's `sendResponse`, so a note that outlived one would be a prompt the
+    // user could approve after the site stopped asking.
     expect(await dispatch(k, { method: 'page.requestAccounts' }, fromPage(DAPP))).toEqual({ pending: true });
-    expect(store.pendingConnect).toEqual({ origin: DAPP });
-    expect(await dispatch(k, { method: 'page.getAccounts' }, fromPage(DAPP))).toEqual({ accounts: [] });
-
-    // Deny clears the prompt and changes nothing else.
-    await dispatch(k, { method: 'wallet.denyConnect' }, fromPopup);
     expect(store.pendingConnect).toBeNull();
     expect(await dispatch(k, { method: 'page.getAccounts' }, fromPage(DAPP))).toEqual({ accounts: [] });
+
+    // Deny names the request it is refusing, and changes nothing else.
+    await dispatch(k, { method: 'wallet.denyConnect', params: { origin: DAPP } }, fromPopup);
+    expect(store.pendingConnect).toBeNull();
+    expect(await dispatch(k, { method: 'page.getAccounts' }, fromPage(DAPP))).toEqual({ accounts: [] });
+
+    // A deny for an origin that is not an origin at all is refused outright.
+    await expect(
+      dispatch(k, { method: 'wallet.denyConnect', params: { origin: 'dapp.example' } }, fromPopup),
+    ).rejects.toThrow(/Invalid origin/);
 
     // Ask again, approve this time.
     expect(await dispatch(k, { method: 'page.requestAccounts' }, fromPage(DAPP))).toEqual({ pending: true });

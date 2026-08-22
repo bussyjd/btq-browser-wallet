@@ -205,7 +205,11 @@ export async function dispatch(keyring: Keyring, request: RpcRequest, ctx: Dispa
     case 'wallet.approveConnect':
       return keyring.approveConnect(str(p.origin, 'origin'));
     case 'wallet.denyConnect':
-      await keyring.denyConnect();
+      // The origin is optional on the wire: an approval window is already bound
+      // to one by its own URL, which the worker trusts over any parameter. When
+      // a caller does name an origin it is validated here, and the worker
+      // settles that request and no other.
+      await keyring.denyConnect(typeof p.origin === 'string' ? p.origin : undefined);
       return { ok: true as const };
     case 'wallet.connectedSites':
       return { origins: await keyring.connectedSites() };
