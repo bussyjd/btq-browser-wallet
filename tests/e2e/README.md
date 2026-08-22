@@ -47,6 +47,42 @@ first failure:
 against btq-core. So a wallet that signed the wrong message would still produce
 a well-formed transaction — and this suite would still catch it.
 
+### Which layer the golden pin reaches
+
+The pin starts at `entry.keySeed`: from a golden key seed the test builds the
+leaf, hashes it and compares with `entry.tapLeafHash`, and round-trips
+`entry.scriptPubKey` against `entry.addresses.testnet` in both directions. The
+independent sighash is pinned to the digest `tests/unit/sighash.test.ts` freezes
+for the wallet's own implementation, over a spend built from golden scripts.
+
+**The BIP32-style HD layer above that is not pinned here.** Every expected
+address in `tests/e2e/**` is derived with the extension's own
+`addressFromHdSeed` / `mnemonicToHdSeed`, so a change to the derivation path
+would move the test and the wallet together. `tests/vectors/golden.json` has a
+16-byte `hdSeedHex` and the raw-seed importer requires 32, so it cannot be
+imported to close the loop end to end (`smoke.spec.ts` asserts that refusal
+instead). `tests/unit/vectors.test.ts` is what pins derivation to the vectors.
+
+## What each hostile case proves
+
+| Case | The thing that would otherwise go unnoticed |
+|---|---|
+| `smoke.spec.ts` 8 pays external index **7** before Device B restores | a wallet that only ever looks at index 0/1 restores the same balance from a two-address scan |
+| `connect.spec.ts` 11b frames another origin, then forges a `MessageEvent` with `source: window` and a foreign `origin` | the content relay's two guards (`event.source`, `event.origin`) are enforced in the *shipped* bundle, not only in source |
+| `negative.spec.ts` N4 turns on `bogusBalance` | the wallet must sum `/utxos` and ignore the explorer's `balance` field, which is negative on the live indexer |
+| `negative.spec.ts` N5 decodes each stranded hex and re-runs the node's checks | "the bytes are kept" is worth nothing unless the kept bytes are still the transaction the user approved |
+| `negative.spec.ts` sets `expectChangeScript` too | change derived from the wrong chain now fails in two files, not one |
+
+### One thing this suite asserts *is* stored in the clear
+
+`N5` asserts that saving a node in Settings writes `{url, user, password}` to
+`chrome.storage.local` verbatim — because it does. The RPC credential belongs to
+a server the user runs; it is not sealed in the vault and is not treated as
+wallet key material. The assertion states the real behaviour on purpose, so that
+changing it is a decision somebody makes rather than a test quietly going green
+for the wrong reason. Wallet secrets (the mnemonic, the HD seed, the password)
+are asserted absent from storage in the same test, with a node configured.
+
 ## Tier 2 — a real regtest node
 
 ```sh
@@ -76,6 +112,7 @@ npm run demo:video                  # the above + demo/btq-wallet-demo.mp4
 | `smoke.spec.ts` | create, receive, lock/unlock, fund, configure a node, send, restore from seed, bad imports |
 | `connect.spec.ts` | site-connect approval, per-origin scope, revoke, and what a page can reach |
 | `negative.spec.ts` | wrong password, refused destinations and amounts, misbehaving backends, storage contents |
+| `global-setup.ts` | builds `dist/` before the run (`SKIP_BUILD=1` to reuse it) |
 | `regtest.spec.ts` | tier 2 |
 | `fixtures/extension.ts` | launching the built extension, popup gestures |
 | `fixtures/mock-explorer.ts` | the HTTP server: explorer API, node RPC, dapp page, `/__test/*` hooks |

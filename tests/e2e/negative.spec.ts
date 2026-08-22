@@ -16,12 +16,16 @@ import {
   refresh,
   unlock,
   waitForScan,
+  waitForSendResult,
   type Device,
 } from './fixtures/extension.js';
 import { startMockBackend, type MockBackend } from './fixtures/mock-explorer.js';
 import { golden } from './fixtures/golden.js';
 import { videoDir } from './fixtures/video.js';
 import { toHex } from './fixtures/bip341.js';
+import { decodeRaw } from './fixtures/tx-decode.js';
+import { verifyTransaction } from './fixtures/mock-node.js';
+import { scriptHexFor } from './fixtures/btq-address.js';
 import { addressFromHdSeed } from '../../src/core/wallet/derive.js';
 import { mnemonicToHdSeed } from '../../src/core/crypto/mnemonic.js';
 
@@ -77,6 +81,13 @@ test.beforeAll(async () => {
   await expect(popup.getByTestId('network-pill')).toHaveText('Testnet · node');
   await leaveSettings(popup);
   await waitForScan(popup);
+
+  // Change must come back to this wallet's own internal chain — checked here as
+  // well as in the graded send, so a change address derived from the wrong
+  // chain fails in two files rather than one.
+  backend.node.expectChangeScript = scriptHexFor(
+    addressFromHdSeed(mnemonicToHdSeed(MNEMONIC), 'internal', 0, 'testnet').address,
+  );
 });
 
 test.afterAll(async () => {
@@ -145,9 +156,8 @@ test('N3 · a backend that misbehaves never costs the wallet the signed bytes', 
   await review(popup, DEST, '0.1');
   await popup.getByTestId('send-pw').fill(PASSWORD);
   await popup.getByTestId('send-confirm').click();
-  await expect(popup.getByTestId('result-status')).toHaveText('Signed, not broadcast', {
-    timeout: 60_000,
-  });
+  await waitForSendResult(popup);
+  await expect(popup.getByTestId('result-status')).toHaveText('Signed, not broadcast');
   await expect(popup.getByTestId('result-error')).toContainText('different transaction id');
   await expect(popup.getByTestId('copy-hex')).toBeVisible();
   // The node did run its checks and did accept the bytes — the wallet refused
@@ -169,9 +179,8 @@ test('N3 · a backend that misbehaves never costs the wallet the signed bytes', 
   await review(popup, DEST, '0.11');
   await popup.getByTestId('send-pw').fill(PASSWORD);
   await popup.getByTestId('send-confirm').click();
-  await expect(popup.getByTestId('result-status')).toHaveText('Signed, not broadcast', {
-    timeout: 60_000,
-  });
+  await waitForSendResult(popup);
+  await expect(popup.getByTestId('result-status')).toHaveText('Signed, not broadcast');
   await expect(popup.getByTestId('result-error')).toContainText('no broadcast route');
   await expect(popup.getByTestId('copy-hex')).toBeVisible();
 
@@ -203,6 +212,15 @@ test('N4 · a broken explorer fails loudly instead of reporting an empty wallet'
   backend.ledger.setFault('slow', false);
   await waitForScan(popup);
 
+  // The live indexer reports a negative `balance` (and a negative
+  // `unspent_count`) for busy addresses. The wallet must sum /utxos and ignore
+  // the field entirely — not show it, and not treat it as an outage either.
+  backend.ledger.bogusBalance = true;
+  await refresh(popup);
+  await expect(popup.getByTestId('sync-error')).toHaveCount(0);
+  await expect(popup.getByTestId('balance')).toHaveText('1');
+  backend.ledger.bogusBalance = false;
+
   // …and once the explorer is healthy the balance is the real one again.
   await refresh(popup);
   await expect(popup.getByTestId('sync-error')).toHaveCount(0);
@@ -220,16 +238,76 @@ test('N5 · storage holds the sealed vault and the unbroadcast bytes, nothing el
   expect(vault.length / 2).toBeLessThan(400);
 
   // A transaction no backend accepted keeps its hex, or the payment is lost.
-  const activity = storage.activity as { status: string; hex?: string }[];
+  // "Keeps its hex" is worth nothing unless the hex is still the transaction
+  // the user approved, so every stranded item is decoded and put back through
+  // the node's own checks: a wallet could still push these bytes by hand.
+  const activity = storage.activity as {
+    txid: string;
+    status: string;
+    destination: string;
+    amountSats: string;
+    hex?: string;
+  }[];
   const stranded = activity.filter((a) => a.status === 'signed');
   expect(stranded.length).toBe(2);
-  for (const item of stranded) expect((item.hex ?? '').length).toBeGreaterThan(2000);
+  const strandedAmounts: string[] = [];
+  for (const item of stranded) {
+    const hex = item.hex ?? '';
+    expect(hex.length).toBeGreaterThan(2000);
+    const decoded = decodeRaw(hex);
+    expect(decoded.txid).toBe(item.txid);
+    // Still valid, and still valid against the *live* ledger: nothing it spends
+    // was consumed by the attempts that failed.
+    const accepted = verifyTransaction(hex, backend.ledger);
+    expect(accepted.checks).toEqual([
+      'decode',
+      'inputs-unspent',
+      'witness-shape',
+      'leaf-commitment',
+      'signature',
+      'outputs-and-fee',
+      'txid',
+    ]);
+    expect(item.destination).toBe(DEST);
+    const payee = accepted.outputs.find((o) => o.script === scriptHexFor(DEST));
+    expect(payee?.value.toString()).toBe(item.amountSats);
+    strandedAmounts.push(item.amountSats);
+  }
+  // The two amounts that were signed and never broadcast, in the order sent.
+  expect([...strandedAmounts].sort()).toEqual(['10000000', '11000000']);
 
   const blob = JSON.stringify(storage).toLowerCase();
   expect(blob).not.toContain(toHex(mnemonicToHdSeed(MNEMONIC)));
   expect(blob).not.toContain(MNEMONIC);
   expect(blob).not.toContain(PASSWORD);
-  expect(blob).not.toContain(NODE_PASSWORD);
   expect(blob).not.toContain('secretkey');
   expect(blob).not.toContain('privatekey');
+
+  // The node's RPC credential is a different kind of secret, and the wallet
+  // treats it differently: `saveBackend` writes the whole backend config to
+  // chrome.storage.local, password included, in the clear. That is the real
+  // behaviour — asserted here with a node actually configured, so that changing
+  // it is a decision somebody makes rather than an assertion quietly going
+  // vacuous. (N3 removed the node, which is why the blob above holds no
+  // credential at all.)
+  expect((storage.backend as { node: unknown }).node).toBeNull();
+  await openSettings(popup);
+  await popup.getByTestId('node-url').fill(backend.rpcUrl);
+  await popup.getByTestId('node-user').fill(NODE_USER);
+  await popup.getByTestId('node-pw').fill(NODE_PASSWORD);
+  await popup.getByTestId('backend-save').click();
+  await expect(popup.getByTestId('network-pill')).toHaveText('Testnet · node');
+  await leaveSettings(popup);
+
+  const withNode = await device.storage();
+  const node = (withNode.backend as { node: { url: string; user: string; password: string } | null }).node;
+  expect(node?.url).toBe(backend.rpcUrl);
+  expect(node?.user).toBe(NODE_USER);
+  expect(node?.password).toBe(NODE_PASSWORD); // plaintext, and not the vault's key
+  expect(NODE_PASSWORD).not.toBe(PASSWORD);
+  // The wallet's own secrets are still absent, node or no node.
+  const withNodeBlob = JSON.stringify(withNode).toLowerCase();
+  expect(withNodeBlob).not.toContain(toHex(mnemonicToHdSeed(MNEMONIC)));
+  expect(withNodeBlob).not.toContain(MNEMONIC);
+  expect(withNodeBlob).not.toContain(PASSWORD);
 });

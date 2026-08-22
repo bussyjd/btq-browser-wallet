@@ -60,6 +60,26 @@ async function relay(page: Page, method: string, params?: unknown): Promise<Reco
   );
 }
 
+/**
+ * Run `post`, then wait until the relay has answered the control request `until`
+ * (or the deadline passes), and hand back every response id the page saw. The
+ * page must already be collecting into `window.__btqSeen`.
+ */
+async function collectRelayIds(page: Page, until: number, post: () => Promise<void>): Promise<number[]> {
+  await post();
+  return page.evaluate(async (control: number) => {
+    const seen = () => (window as any).__btqSeen as number[];
+    const deadline = Date.now() + 10_000;
+    while (!seen().includes(control) && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    // A late answer to the rejected message would still be a failure, so give
+    // the relay one more round trip's worth of time to produce one.
+    await new Promise((r) => setTimeout(r, 500));
+    return [...seen()];
+  }, until);
+}
+
 /** `window.btq.request(...)`, resolved or rejected, as plain data. */
 async function providerRequest(page: Page, method: string): Promise<Record<string, unknown>> {
   return page.evaluate(
@@ -191,6 +211,83 @@ test('11 · a page cannot reach the wallet surface, or anything in storage', asy
   const vault = storage.vault as string;
   expect(vault.startsWith('42545131')).toBe(true); // "BTQ1"
   expect(vault.length / 2).toBeLessThan(400);
+});
+
+test('11b · another origin cannot drive this page\'s relay, forged or framed', async () => {
+  // (a) A frame on a *different* origin, inside a page the wallet trusts. The
+  //     content scripts are top-frame only (no `all_frames` in the manifest),
+  //     so the frame gets no provider and no relay of its own …
+  const frameUrl = `${originB}/dapp.html`;
+  await siteA.evaluate(async (src) => {
+    const frame = document.createElement('iframe');
+    frame.id = 'attacker';
+    frame.src = src;
+    const loaded = new Promise((resolve) => frame.addEventListener('load', resolve, { once: true }));
+    document.body.appendChild(frame);
+    await loaded;
+  }, frameUrl);
+  const child = siteA.frames().find((f) => f.url() === frameUrl);
+  expect(child, `no frame at ${frameUrl}`).toBeTruthy();
+  expect(await child!.evaluate(() => typeof (window as any).btq)).toBe('undefined');
+  expect(await child!.evaluate(() => typeof (window as any).chrome?.runtime)).toBe('undefined');
+
+  // … and what it posts into the top page's relay is ignored, because that
+  // message did not come from the top page (`event.source !== window`).
+  await siteA.evaluate(() => {
+    (window as any).__btqSeen = [] as number[];
+    window.addEventListener('message', (event: MessageEvent) => {
+      const data = event.data as { channel?: string; kind?: string; id?: number } | null;
+      if (data && data.channel === 'btq-wallet' && data.kind === 'response' && typeof data.id === 'number') {
+        ((window as any).__btqSeen as number[]).push(data.id);
+      }
+    });
+  });
+  await child!.evaluate(() => {
+    window.parent.postMessage(
+      { channel: 'btq-wallet', id: 9101, kind: 'request', method: 'page.getAccounts' },
+      '*',
+    );
+  });
+  // The control message goes through the whole relay round trip after it, so a
+  // reply to the frame's message has had at least that long to turn up.
+  const framedSeen = await collectRelayIds(siteA, 9102, () =>
+    siteA.evaluate(() => {
+      window.postMessage(
+        { channel: 'btq-wallet', id: 9102, kind: 'request', method: 'page.getAccounts' },
+        window.location.origin,
+      );
+    }),
+  );
+  expect(framedSeen).toContain(9102); // the relay is alive and answering …
+  expect(framedSeen).not.toContain(9101); // … and it said nothing to the frame.
+  await siteA.evaluate(() => document.getElementById('attacker')?.remove());
+
+  // (b) A message from this very page that lies about where it came from. Page
+  //     script can dispatch a MessageEvent with `source: window` and any origin
+  //     it likes; the relay compares the origin it was handed with the origin
+  //     it is running on, and drops anything that does not match.
+  await siteA.evaluate(() => {
+    (window as any).__btqSeen = [] as number[];
+  });
+  const forgedSeen = await collectRelayIds(siteA, 9202, () =>
+    siteA.evaluate(
+      ([badOrigin, goodOrigin]) => {
+        const forge = (id: number, origin: string) =>
+          window.dispatchEvent(
+            new MessageEvent('message', {
+              data: { channel: 'btq-wallet', id, kind: 'request', method: 'page.getAccounts' },
+              origin,
+              source: window,
+            }),
+          );
+        forge(9201, badOrigin); // claims to be a page on another origin
+        forge(9202, goodOrigin); // the control: same event, honest origin
+      },
+      ['http://attacker.example', originA] as [string, string],
+    ),
+  );
+  expect(forgedSeen).toContain(9202);
+  expect(forgedSeen).not.toContain(9201);
 });
 
 test('12 · a locked wallet answers a site with nothing, and opens no window', async () => {

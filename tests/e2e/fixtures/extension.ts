@@ -148,12 +148,13 @@ export async function launchDevice(opts: DeviceOptions): Promise<Device> {
     }
   }, opts.explorerBase);
 
+  // Granted context-wide: Chrome does not honour a per-origin grant for a
+  // chrome-extension:// origin, and the receive journey reads the clipboard
+  // back rather than trusting the popup's "copied" toast.
   try {
-    await context.grantPermissions(['clipboard-read', 'clipboard-write'], {
-      origin: `chrome-extension://${extensionId}`,
-    });
+    await context.grantPermissions(['clipboard-read', 'clipboard-write']);
   } catch {
-    /* clipboard permissions are optional; the toast is asserted instead */
+    /* clipboard permissions are optional; the toast is asserted either way */
   }
 
   return device;
@@ -236,6 +237,42 @@ export async function waitForScan(page: Page, timeout = 60_000): Promise<void> {
 export async function refresh(page: Page): Promise<void> {
   await page.getByTestId('refresh').click();
   await waitForScan(page);
+}
+
+/**
+ * Wait for the outcome of a send, whichever way it went.
+ *
+ * The popup shows a result card when it managed to sign, and an inline `error`
+ * when it did not — `signPlan` refuses to hand back a witness that is not a
+ * 2421-byte SIGHASH_ALL signature, and then there is no result card to wait for
+ * at all. Racing the two turns "the wallet can no longer sign" from a 60 s
+ * element-not-found into a one-line failure that names the reason.
+ */
+export async function waitForSendResult(page: Page, timeout = 60_000): Promise<void> {
+  const status = page.getByTestId('result-status');
+  const failure = page.getByTestId('error');
+  await expect
+    .poll(
+      async () => {
+        if ((await status.count()) > 0) return 'result';
+        if ((await failure.count()) > 0) return 'error';
+        return 'waiting';
+      },
+      { timeout, message: 'the popup produced neither a send result nor an error' },
+    )
+    .not.toBe('waiting');
+  if ((await status.count()) === 0) {
+    throw new Error(`the wallet refused to sign: ${(await failure.first().innerText()).trim()}`);
+  }
+}
+
+/** The dark modules of a rendered QR, as "x,y" pairs in document order. */
+export async function qrCells(page: Page, testId: string): Promise<string> {
+  return page
+    .getByTestId(testId)
+    .evaluate((svg) =>
+      [...svg.querySelectorAll('rect')].map((r) => `${r.getAttribute('x')},${r.getAttribute('y')}`).join(' '),
+    );
 }
 
 export async function openSettings(page: Page): Promise<void> {

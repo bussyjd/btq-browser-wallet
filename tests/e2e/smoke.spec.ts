@@ -18,9 +18,11 @@ import {
   leaveSettings,
   openSettings,
   receiveAddress,
+  qrCells,
   refresh,
   unlock,
   waitForScan,
+  waitForSendResult,
   type Device,
 } from './fixtures/extension.js';
 import { startMockBackend, type MockBackend } from './fixtures/mock-explorer.js';
@@ -30,6 +32,9 @@ import { feeForP2mrTx, formatSats } from './fixtures/consensus.js';
 import { buildSingleKeyLeaf } from './fixtures/mock-node.js';
 import { fromHex, tapLeafHash, tapscriptSighash, toHex } from './fixtures/bip341.js';
 import { videoDir } from './fixtures/video.js';
+// The same encoder the popup renders its QR with, run here over the address the
+// test derived — so the QR is proved to encode *this* address and no other.
+import { encode as encodeQr } from 'uqr';
 // The wallet's own derivation, used the way the spec asks: to compute in the
 // test what the extension must show. It never touches the extension's runtime.
 import { addressFromHdSeed } from '../../src/core/wallet/derive.js';
@@ -140,11 +145,24 @@ test('2 · receive: the address on screen is the one the seed derives', async ()
   expect(await receiveAddress(popup)).toBe(A0);
   await expect(popup.getByTestId('receive-address')).toHaveText(A0);
   await expect(popup.getByTestId('receive-path')).toHaveText("m/0'/0'/0'");
-  await expect(popup.getByTestId('receive-qr')).toBeVisible();
   await expect(popup.getByTestId('balance')).toHaveText('0');
 
+  // The QR is this address, not merely some QR: every dark module matches the
+  // code `uqr` produces for A0, and the SVG is sized for that code.
+  const qr = encodeQr(A0, { border: 2, ecc: 'M' });
+  const expectedCells: string[] = [];
+  for (let y = 0; y < qr.size; y++) {
+    for (let x = 0; x < qr.size; x++) if (qr.data[y]?.[x]) expectedCells.push(`${x},${y}`);
+  }
+  await expect(popup.getByTestId('receive-qr')).toBeVisible();
+  await expect(popup.getByTestId('receive-qr')).toHaveAttribute('viewBox', `0 0 ${qr.size} ${qr.size}`);
+  expect(await qrCells(popup, 'receive-qr')).toBe(expectedCells.join(' '));
+
+  // Clipboard permission is granted for the extension origin, so the copy is
+  // read back rather than taken on the toast's word.
   await popup.getByTestId('copy-address').click();
   await expect(popup.getByTestId('toast')).toHaveText('Address copied');
+  expect(await popup.evaluate(() => navigator.clipboard.readText())).toBe(A0);
 });
 
 test('3 · lock, refuse the wrong password, unlock', async () => {
@@ -237,10 +255,17 @@ test('6 · send: the node verifies what the extension signed', async () => {
     `${formatSats(100_000_000n - 25_000_000n - expectedFee)} tBTQ`,
   );
 
+  // What the wallet claims it is paying for, before it signs anything. The node
+  // measures its own vsize from the bytes further down; the two must agree.
+  const feeHint = await popup.getByTestId('review-fee').locator('xpath=..').innerText();
+  const claimedVsize = Number(/·\s*(\d+)\s*vB/.exec(feeHint)?.[1] ?? NaN);
+  expect(claimedVsize).toBe(372);
+
   await popup.getByTestId('send-pw').fill(PASSWORD);
   await popup.getByTestId('send-confirm').click();
 
-  await expect(popup.getByTestId('result-status')).toContainText('Broadcast', { timeout: 60_000 });
+  await waitForSendResult(popup);
+  await expect(popup.getByTestId('result-status')).toContainText('Broadcast');
   sendTxid = (await popup.getByTestId('result-txid').getAttribute('data-txid')) ?? '';
   expect(sendTxid).toMatch(/^[0-9a-f]{64}$/);
 
@@ -259,7 +284,11 @@ test('6 · send: the node verifies what the extension signed', async () => {
     'txid',
   ]);
   expect(accepted?.fee).toBe(expectedFee.toString());
+  // The size the node measured from the wire bytes, the size the wallet quoted
+  // on the review screen, and the size the test computes from btq-core's
+  // scale-16 arithmetic are one number.
   expect(accepted?.vsize).toBe(372);
+  expect(accepted?.vsize).toBe(claimedVsize);
   expect(backend.node.calls.map((c) => c.method)).toContain('testmempoolaccept');
   expect(backend.node.calls.map((c) => c.method)).toContain('sendrawtransaction');
 
@@ -288,6 +317,19 @@ test('6 · send: the node verifies what the extension signed', async () => {
 
 test('8 · Device B restores the same wallet from the phrase alone', async () => {
   test.setTimeout(180_000);
+
+  // A gap the restore has to cross. Device A only ever showed A0 and A1, so a
+  // wallet that looks no further than index 1 restores the same balance from
+  // the same two addresses and nobody notices. Paying index 7 — six unused
+  // addresses past the last one that was paid, well inside GAP_LIMIT 20 —
+  // makes the scan depth observable: the coins only appear if it looks.
+  const A7 = addressFromHdSeed(hdSeed, 'external', 7, 'testnet').address;
+  const A8 = addressFromHdSeed(hdSeed, 'external', 8, 'testnet').address;
+  expect(new Set([A0, A1, A7, A8]).size).toBe(4);
+  backend.ledger.fund(A7, 30_000_000n);
+  backend.ledger.mine(1);
+  const restoredBalance = 150_000_000n - 25_000_000n - 744n + 30_000_000n;
+
   const deviceB = await launchDevice({
     name: 'device-b',
     explorerBase: backend.origin,
@@ -298,18 +340,24 @@ test('8 · Device B restores the same wallet from the phrase alone', async () =>
     await importMnemonic(page, words.join(' '), 'restore-pass-2');
     await waitForScan(page);
 
-    // The same seed, so the same addresses, the same coins and the same ledger.
-    expect(await receiveAddress(page)).toBe(A1);
-    await expect(page.getByTestId('balance')).toHaveText(
-      formatSats(150_000_000n - 25_000_000n - 744n),
-    );
+    // The same seed, so the same addresses, the same coins and the same ledger
+    // — including the payment to index 7, which only a real gap scan finds.
+    await expect(page.getByTestId('balance')).toHaveText(formatSats(restoredBalance));
+    expect(await receiveAddress(page)).toBe(A8);
+    await expect(page.getByTestId('receive-path')).toHaveText("m/0'/0'/8'");
     const receive = await deviceB.rpc<{ address: string; index: number }>(page, 'wallet.receive');
-    expect(receive.address).toBe(A1);
+    expect(receive.address).toBe(A8);
+    expect(receive.index).toBe(8);
     expect(addressFromHdSeed(hdSeed, 'external', 0, 'testnet').address).toBe(A0);
 
     await page.getByTestId('tab-activity').click();
-    await expect(page.getByTestId('activity-row')).toHaveCount(3);
+    await expect(page.getByTestId('activity-row')).toHaveCount(4);
     await expect(page.locator(`[data-testid="activity-row"][data-txid="${sendTxid}"]`)).toBeVisible();
+    // The row for the index-7 payment: the balance above could in principle be
+    // reached by other means, this row cannot.
+    await expect(
+      page.getByTestId('activity-row').filter({ hasText: `+${formatSats(30_000_000n)} tBTQ` }),
+    ).toHaveCount(1);
 
     // 9 · remove the wallet, then import a raw btq-core HD seed.
     await page.getByTestId('gear').click();

@@ -76,6 +76,31 @@ npm run lint        # eslint, type-aware on src/
 npm run check       # all three
 ```
 
+### End to end, in a real browser
+
+`npm run test:e2e` builds `dist/`, loads it into Chromium as an unpacked extension and
+drives the real popup: create, receive, lock/unlock, fund, configure a node, send, restore
+on a second device, plus site-connect and the negative paths. Nothing in the extension is
+stubbed; the explorer and the BTQ Core JSON-RPC are a deterministic mock on `127.0.0.1`
+whose node re-derives the BIP341 sighash and verifies the ML-DSA-44 signature itself. No
+BTQ node and no network access required.
+
+```sh
+npm run playwright:install   # once: downloads the Chromium Playwright drives
+npm run test:e2e             # the whole suite (builds dist/ first; ~30 s)
+npm run test:all             # npm test, then the end-to-end suite
+```
+
+[`tests/e2e/README.md`](tests/e2e/README.md) explains what each journey proves, what is
+mocked, and how to run the opt-in tier 2 against a live regtest `btqd` (`BTQ_REGTEST=1`).
+
+### Video
+
+[`demo/btq-wallet-demo.mp4`](demo/btq-wallet-demo.mp4) is a recording of that suite — the
+popup, driven by the tests, with nothing staged. Regenerate it with `npm run demo:video`
+(`RECORD_VIDEO=1 playwright test tests/e2e/smoke.spec.ts`, then `scripts/stitch-demo.sh`
+concatenates the clips; needs `ffmpeg`).
+
 ### Cross-check against a real btq-core node
 
 The integration tests prove compatibility with consensus. They skip unless a node is
@@ -155,8 +180,10 @@ src/ui/            popup
 tests/unit/        crypto, derivation, script, address, golden vectors
 tests/security/    secret leakage, locked-wallet, bad seed, page RPC
 tests/integration/ cross-checks against a live btq-core node (opt-in)
+tests/e2e/         the built extension in Chromium: journeys, connect, negatives
 tests/vectors/     golden.json — the frozen contract with consensus
-scripts/           gen-vectors.ts
+scripts/           gen-vectors.ts · stitch-demo.sh
+demo/              btq-wallet-demo.mp4, recorded by npm run demo:video
 docs/              REFERENCE.md · BTQ_CORE_MAP.md · HD_IMPORT.md · PLAN.md
 .claude/           skill + security-reviewer agent used to build this
 ```
