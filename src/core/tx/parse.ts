@@ -24,6 +24,21 @@ export class TxParseError extends Error {
   }
 }
 
+/**
+ * Hex → bytes with the parser's own error type. `hexToBytes` throws a plain
+ * `Error` for an odd length or a non-hex character; letting that escape makes
+ * `parseTx`'s contract ("every rejection is a TxParseError") untrue for exactly
+ * the input class a caller is most likely to pass by accident.
+ */
+function toBytes(raw: Uint8Array | string): Uint8Array {
+  if (typeof raw !== 'string') return raw;
+  try {
+    return hexToBytes(raw.trim());
+  } catch (e) {
+    throw new TxParseError(e instanceof Error ? e.message : 'not a hex string');
+  }
+}
+
 class Reader {
   offset = 0;
   constructor(readonly bytes: Uint8Array) {}
@@ -68,7 +83,7 @@ class Reader {
 
 /** Decode a raw transaction (hex or bytes) into the wallet's `Tx` shape. */
 export function parseTx(raw: Uint8Array | string): Tx {
-  const bytes = typeof raw === 'string' ? hexToBytes(raw.trim()) : raw;
+  const bytes = toBytes(raw);
   if (bytes.length < 10) throw new TxParseError('transaction is too short');
   const r = new Reader(bytes);
 
@@ -145,7 +160,7 @@ export interface DecodedTx {
  * that is the whole point: a bug in plan → bytes shows up on the screen.
  */
 export function decodeTxPreview(raw: Uint8Array | string, network: BtqNetwork = 'testnet'): DecodedTx {
-  const bytes = typeof raw === 'string' ? hexToBytes(raw.trim()) : raw;
+  const bytes = toBytes(raw);
   const tx = parseTx(bytes);
   const stripped = serializeStripped(tx);
   const weight = transactionWeight(stripped.length, bytes.length);

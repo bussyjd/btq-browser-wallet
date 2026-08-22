@@ -100,7 +100,11 @@ export function planSend(opts: {
     tx,
     spent,
     inputs: sel.inputs,
-    destination: opts.destination,
+    // The canonical lowercase encoding, not the caller's string: previewFromSigned
+    // compares this against the address decoded back out of the signed bytes, and
+    // an uppercase (bech32m-legal) or space-padded input would otherwise sign and
+    // then be discarded after the user has already typed their password.
+    destination: dest.address,
     amount: opts.amount,
     change: sel.change,
     changeAddress,

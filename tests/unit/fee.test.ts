@@ -154,6 +154,74 @@ describe('scale-16 P2MR fee math (shipped fee.ts)', () => {
     expect(withDust.amount).toBe(one.amount);
   });
 
+  it('an exact sweep is selected, not reported as INSUFFICIENT', () => {
+    // User loss: this is the "Max" button. maxSpendable hands back
+    // total - feeForP2mrTx(n, 1), so total === amount + noChangeFee exactly —
+    // which is strictly less than amount + withChangeFee. While the no-change
+    // candidate lived nested inside the with-change guard, that guard never
+    // opened and the sweep threw INSUFFICIENT, i.e. the user could not empty
+    // the wallet at all unless it happened to hold a spare coin.
+    const coins = [coin(5_000_000n, 0), coin(3_000_000n, 1)];
+    const total = 8_000_000n;
+    for (const rate of [1000, 2000, 5000]) {
+      const max = maxSpendable(coins, rate);
+      expect(max.inputs, `rate ${rate}`).toHaveLength(2);
+      const sel = selectCoins(coins, max.amount, rate);
+      expect(sel.inputs, `rate ${rate}`).toHaveLength(2);
+      expect(sel.outputCount, `rate ${rate}`).toBe(1);
+      expect(sel.change, `rate ${rate}`).toBe(0n);
+      expect(sel.fee, `rate ${rate}`).toBe(max.fee);
+      expect(sel.fee, `rate ${rate}`).toBe(feeForP2mrTx(2, 1, rate));
+      expect(max.amount + sel.fee, `rate ${rate}`).toBe(total);
+    }
+  });
+
+  it('does not pull in a second coin just to open a change output', () => {
+    // The same nesting bug, one step earlier: when a single coin covers the
+    // amount plus the one-output fee but not the two-output fee, adding a
+    // 275 vB input costs far more than the few sats of change it would create.
+    const rate = 1000;
+    const amount = 9_000_000n;
+    const noChange = feeForP2mrTx(1, 1, rate); // 329
+    const withChange = feeForP2mrTx(1, 2, rate); // 372
+    expect(noChange).toBeLessThan(withChange);
+    const sel = selectCoins([coin(amount + noChange + 10n, 0), coin(500_000n, 1)], amount, rate);
+    expect(sel.inputs).toHaveLength(1);
+    expect(sel.outputCount).toBe(1);
+    expect(sel.change).toBe(0n);
+    expect(sel.fee).toBe(noChange + 10n);
+  });
+
+  it('the 1000 sat/kvB relay floor is pinned, and every fee entry point enforces it', () => {
+    // The floor is the only thing standing between the user and a transaction
+    // no node will forward: a wallet that quotes 0 sat/kvB looks like it sent
+    // the payment and never did. Pin the constant itself — a floor of 0 must
+    // fail here and not only in some downstream assertion.
+    expect(MIN_RELAY_SAT_PER_KVB).toBe(1000);
+    const utxos = [coin(100_000_000n)];
+    for (const rate of [0, 1, 999]) {
+      for (const call of [
+        () => feeForWeight(5940, rate),
+        () => feeForP2mrTx(1, 2, rate),
+        () => selectCoins(utxos, 10_000n, rate),
+        () => maxSpendable(utxos, rate),
+      ]) {
+        expect(call, `rate ${rate}`).toThrow(WalletError);
+        expect(call, `rate ${rate}`).toThrow(/relay floor/);
+        let code = 'NO_THROW';
+        try {
+          call();
+        } catch (e) {
+          code = e instanceof WalletError ? e.code : 'NOT_A_WALLET_ERROR';
+        }
+        expect(code, `rate ${rate}`).toBe('BAD_FEE_RATE');
+      }
+    }
+    // …and the floor itself is still a usable rate.
+    expect(feeForWeight(5940, MIN_RELAY_SAT_PER_KVB)).toBe(372n);
+    expect(selectCoins(utxos, 10_000n, MIN_RELAY_SAT_PER_KVB).fee).toBe(372n);
+  });
+
   it('spends confirmed coins before mempool coins', () => {
     // User loss: building on an unconfirmed parent means the child dies with
     // it if the parent is replaced or evicted.

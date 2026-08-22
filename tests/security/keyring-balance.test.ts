@@ -12,9 +12,13 @@ import { GAP_LIMIT, type AddressActivity } from '../../src/core/wallet/gap.js';
 import type { ExplorerUtxo } from '../../src/core/explorer/utxo.js';
 import type { HistoryItem } from '../../src/core/explorer/history.js';
 import addressUsed from '../fixtures/explorer/address-used.json' with { type: 'json' };
+import vectors from '../vectors/golden.json' with { type: 'json' };
 
 const MNEMONIC = 'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about';
 const PASSWORD = 'testnet-ok';
+const DEST = vectors.entries[1]!.addresses.testnet;
+/** The three rates the popup can actually send (src/ui/types.ts FEE_PRESETS). */
+const UI_FEE_PRESETS = [1000, 2000, 5000] as const;
 
 function ring(store = new MemoryWalletStorage(), now?: { t: number }) {
   return new Keyring(store, {
@@ -199,6 +203,77 @@ describe('wallet balance comes from /utxos, never from the address record', () =
 
     const empty = await k.maxSpendable({ fetchUtxos: async () => [] });
     expect(empty.amountSats).toBe('0');
+  });
+
+  it('the Max amount survives the round trip back through prepareSend, at every UI preset', async () => {
+    // User loss: "Max" was unusable on any wallet without a spare coin. An
+    // exact sweep leaves total === amount + one-output fee, which is strictly
+    // below amount + two-output fee, so the selector's guard never opened and
+    // the popup answered "Not enough balance to cover the amount and fee" to a
+    // number it had just produced itself. Asserting amount + fee === total is
+    // not enough — only feeding it back through prepareSend catches this.
+    for (const rate of UI_FEE_PRESETS) {
+      const k = ring();
+      await k.importMnemonic(MNEMONIC, PASSWORD);
+      const external = (await k.receiveAddress()).address;
+      const internal = k.addressAt('internal', 0).address;
+      // Distinct outpoints across both chains: a multi-coin wallet, which is
+      // exactly the shape where the optimal prefix is every coin.
+      const rows = [
+        { address: external, value: 5_000_000n, vout: 0 },
+        { address: external, value: 3_000_000n, vout: 1 },
+        { address: internal, value: 250_000n, vout: 2 },
+      ];
+      const total = rows.reduce((n, r) => n + r.value, 0n);
+      const fetchUtxos = async (a: string) =>
+        rows.filter((r) => r.address === a).map((r) => utxo(a, r.value, r.vout, 300_000));
+
+      const max = await k.maxSpendable({ fetchUtxos, feeRateSatPerKvB: rate });
+      expect(max.inputs, `rate ${rate}`).toBe(rows.length);
+      expect(BigInt(max.amountSats) + BigInt(max.fee), `rate ${rate}`).toBe(total);
+
+      const plan = await k.prepareSend({
+        destination: DEST,
+        amountSats: BigInt(max.amountSats),
+        fetchUtxos,
+        feeRateSatPerKvB: rate,
+      });
+      expect(plan.change, `rate ${rate}`).toBe('0');
+      expect(plan.inputs, `rate ${rate}`).toBe(rows.length);
+      expect(plan.fee, `rate ${rate}`).toBe(max.fee);
+      expect(plan.feeRateSatPerKvB, `rate ${rate}`).toBe(rate);
+      expect(BigInt(plan.amount) + BigInt(plan.fee), `rate ${rate}`).toBe(total);
+
+      // …and it signs: one output, the whole balance, nothing left behind.
+      const sent = await k.confirmSend({
+        destination: DEST,
+        amountSats: BigInt(max.amountSats),
+        password: PASSWORD,
+        fetchUtxos,
+        feeRateSatPerKvB: rate,
+        broadcast: async () => {
+          throw new WalletError('EXPLORER_UNAVAILABLE', 'no broadcast route');
+        },
+      });
+      expect(sent.decoded.outputs, `rate ${rate}`).toHaveLength(1);
+      expect(sent.decoded.outputs[0]!.address, `rate ${rate}`).toBe(DEST);
+      expect(sent.decoded.outputs[0]!.value, `rate ${rate}`).toBe(max.amountSats);
+      expect(sent.change, `rate ${rate}`).toBe('0');
+      expect(sent.inputs, `rate ${rate}`).toHaveLength(rows.length);
+    }
+  });
+
+  it('a single-coin wallet can still be emptied', async () => {
+    // The commonest sweep of all, and the one with no spare coin by definition.
+    const k = ring();
+    await k.importMnemonic(MNEMONIC, PASSWORD);
+    const address = (await k.receiveAddress()).address;
+    const fetchUtxos = async (a: string) => (a === address ? [utxo(a, 1_000_000n, 0, 300_000)] : []);
+    const max = await k.maxSpendable({ fetchUtxos });
+    const plan = await k.prepareSend({ destination: DEST, amountSats: BigInt(max.amountSats), fetchUtxos });
+    expect(plan.change).toBe('0');
+    expect(plan.inputs).toBe(1);
+    expect(BigInt(plan.amount) + BigInt(plan.fee)).toBe(1_000_000n);
   });
 
   it('an empty wallet reports 0 rather than throwing', async () => {

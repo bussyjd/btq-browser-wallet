@@ -13,6 +13,7 @@ import {
   type Tx,
 } from '../../src/core/tx/serialize.js';
 import { bytesToHex, hexToBytes } from '../../src/core/util/hex.js';
+import { readCompactSize } from '../../src/core/util/bytes.js';
 import { encodeAddress, scriptForAddress } from '../../src/core/script/address.js';
 import vectors from '../vectors/golden.json' with { type: 'json' };
 
@@ -117,6 +118,65 @@ describe('raw transaction parser', () => {
     expect(() => parseTx(extra)).toThrow(/trailing bytes/);
     expect(() => parseTx(new Uint8Array(4))).toThrow(/too short/);
     expect(reserializesIdentically(new Uint8Array(40))).toBe(false);
+  });
+
+  it('rejects a non-canonical compact size', () => {
+    // 0xfd 0x01 0x00 is a three-byte encoding of 1. A consensus-serialisation
+    // decoder has to be canonical, because the approval screen is built by
+    // decoding the exact bytes about to be broadcast: a Tx that re-serialises
+    // to different bytes than it was handed is a Tx the user did not approve.
+    const raw = serializeWithWitness(shapes[2]!.tx); // 1-in 1-out, no witness
+    expect(raw[4]).toBe(0x01); // the input count, in its canonical one-byte form
+    const fat = new Uint8Array(raw.length + 2);
+    fat.set(raw.subarray(0, 4), 0);
+    fat.set([0xfd, 0x01, 0x00], 4);
+    fat.set(raw.subarray(5), 7);
+    expect(() => parseTx(fat)).toThrow(TxParseError);
+    expect(() => parseTx(fat)).toThrow(/non-canonical/);
+    expect(reserializesIdentically(fat)).toBe(false);
+    // The canonical original still parses, so the check is not just "throws".
+    expect(parseTx(raw)).toEqual(shapes[2]!.tx);
+  });
+
+  it('compact size accepts only the shortest encoding of a value', () => {
+    expect(readCompactSize(Uint8Array.from([0xfc]), 0)).toEqual({ value: 0xfc, offset: 1 });
+    expect(readCompactSize(Uint8Array.from([0xfd, 0xfd, 0x00]), 0)).toEqual({ value: 0xfd, offset: 3 });
+    expect(readCompactSize(Uint8Array.from([0xfe, 0x00, 0x00, 0x01, 0x00]), 0)).toEqual({
+      value: 0x10000,
+      offset: 5,
+    });
+    expect(readCompactSize(Uint8Array.from([0xff, 0, 0, 0, 0, 1, 0, 0, 0]), 0)).toEqual({
+      value: 0x1_0000_0000,
+      offset: 9,
+    });
+    for (const bad of [
+      [0xfd, 0x01, 0x00], // 1 in the three-byte form
+      [0xfd, 0xfc, 0x00], // 252 in the three-byte form
+      [0xfe, 0xff, 0xff, 0x00, 0x00], // 65535 in the five-byte form
+      [0xff, 0x00, 0x00, 0x01, 0x00, 0, 0, 0, 0], // 65536 in the nine-byte form
+    ]) {
+      expect(() => readCompactSize(Uint8Array.from(bad), 0), bad.join(' ')).toThrow(/non-canonical/);
+    }
+    // Still refused for being unrepresentable, not for being non-canonical.
+    expect(() => readCompactSize(Uint8Array.from([0xff, 0, 0, 0, 0, 0, 0, 0, 0xff]), 0)).toThrow(/too large/);
+  });
+
+  it('every rejection is a TxParseError, non-hex input included', () => {
+    // The parser's error contract has to hold for the input class a caller is
+    // likeliest to pass by accident; hexToBytes' plain Error escaping it made
+    // "catch TxParseError" an incomplete guard at every call site.
+    for (const bad of ['zz', 'abc', '0xgg', 'ff'.repeat(4) + 'g']) {
+      expect(() => parseTx(bad), bad).toThrow(TxParseError);
+      expect(() => decodeTxPreview(bad), bad).toThrow(TxParseError);
+    }
+    let thrown: unknown;
+    try {
+      parseTx('zz');
+    } catch (e) {
+      thrown = e;
+    }
+    expect(thrown).toBeInstanceOf(TxParseError);
+    expect((thrown as Error).name).toBe('TxParseError');
   });
 
   it('rejects a non-empty scriptSig on a P2MR spend', () => {

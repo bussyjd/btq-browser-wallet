@@ -75,6 +75,10 @@ export function selectCoins(
     selected.push(u);
     total += u.value;
 
+    // The two candidates are independent: a one-output sweep is cheaper than a
+    // two-output send, so an exact sweep (total === amount + noChangeFee) must
+    // never be gated behind the with-change guard — that is what made "Max"
+    // unusable whenever the wallet had no spare coin.
     const withChangeFee = feeForP2mrTx(selected.length, 2, satPerKvB);
     if (total >= amount + withChangeFee) {
       const change = total - amount - withChangeFee;
@@ -87,16 +91,16 @@ export function selectCoins(
           weight: estimateP2mrTxWeight(selected.length, 2),
         };
       }
-      const noChangeFee = feeForP2mrTx(selected.length, 1, satPerKvB);
-      if (total >= amount + noChangeFee) {
-        return {
-          inputs: selected,
-          fee: total - amount, // leftover below dust folded into the fee
-          change: 0n,
-          outputCount: 1,
-          weight: estimateP2mrTxWeight(selected.length, 1),
-        };
-      }
+    }
+    const noChangeFee = feeForP2mrTx(selected.length, 1, satPerKvB);
+    if (total >= amount + noChangeFee) {
+      return {
+        inputs: selected,
+        fee: total - amount, // change below dust (or none at all) goes to the fee
+        change: 0n,
+        outputCount: 1,
+        weight: estimateP2mrTxWeight(selected.length, 1),
+      };
     }
   }
 

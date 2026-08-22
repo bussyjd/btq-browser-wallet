@@ -9,6 +9,7 @@ import { scriptForAddress } from '../../src/core/script/address.js';
 import { tapLeafHash } from '../../src/core/script/p2mr.js';
 import { p2mrSighash, txid as txidOf } from '../../src/core/tx/sighash.js';
 import { parseTx } from '../../src/core/tx/parse.js';
+import { MIN_RELAY_SAT_PER_KVB } from '../../src/core/tx/fee.js';
 import { BroadcastError, WalletError } from '../../src/core/wallet/errors.js';
 import type { ExplorerUtxo } from '../../src/core/explorer/utxo.js';
 
@@ -315,6 +316,70 @@ describe('send RPC — fund-move paths', () => {
     const activity = await k.listActivity();
     expect(activity[0]!.txid).toBe(signed.txid);
     expect(activity[0]!.txid).not.toBe(fake);
+  });
+
+  it('an uppercase or space-padded destination is normalised, not signed and then discarded', async () => {
+    // User loss: bech32m legally accepts an all-uppercase address, and a paste
+    // brings whitespace with it. planSend used to echo the raw string while
+    // previewFromSigned compared it against the address decoded out of the
+    // signed bytes (always lowercase), so the send was signed and then thrown
+    // away with "does not match the approved destination" — *after* the
+    // password, with the bytes discarded and nothing written to activity.
+    for (const raw of [DEST.toUpperCase(), `  ${DEST}  `, ` ${DEST.toUpperCase()}\n`]) {
+      const k = ring();
+      await k.importMnemonic(MNEMONIC, PASSWORD);
+      const receive = await k.receiveAddress();
+      const fetchUtxos = fundOnce(receive.address);
+
+      const prepared = await k.prepareSend({ destination: raw, amountSats: 10_000_000n, fetchUtxos });
+      // confirmSend first: this is the call that used to sign, then throw
+      // NO_COMMITMENT out of previewFromSigned with the password already spent.
+      const signed = await k.confirmSend({
+        destination: raw,
+        amountSats: 10_000_000n,
+        password: PASSWORD,
+        fetchUtxos,
+        broadcast: async (hex) => ({ txid: parseTxidOf(hex), via: 'node' }),
+      });
+      expect(prepared.destination, raw).toBe(DEST);
+      expect(signed.broadcastStatus, raw).toBe('pending');
+      expect(signed.destination, raw).toBe(DEST);
+      // The bytes really pay that address — decoded back out of the hex.
+      expect(signed.decoded.outputs[0]!.address, raw).toBe(DEST);
+      const activity = await k.listActivity();
+      expect(activity[0]!.destination, raw).toBe(DEST);
+      expect(activity[0]!.status, raw).toBe('pending');
+    }
+  });
+
+  it('prepareSend refuses a below-floor fee rate with BAD_FEE_RATE, before any lookup', async () => {
+    // The relay floor is the only thing between the user and a transaction no
+    // node forwards: a wallet that quotes 0 sat/kvB looks like it paid and did
+    // not. Pinned here as well as in the fee unit, on the RPC the popup calls.
+    expect(MIN_RELAY_SAT_PER_KVB).toBe(1000);
+    const k = ring();
+    await k.importMnemonic(MNEMONIC, PASSWORD);
+    const receive = await k.receiveAddress();
+    for (const rate of [0, 1, 999]) {
+      let looked = false;
+      const attempt = k.prepareSend({
+        destination: DEST,
+        amountSats: 10_000_000n,
+        feeRateSatPerKvB: rate,
+        fetchUtxos: async (a) => {
+          looked = true;
+          return fundOnce(receive.address)(a);
+        },
+      });
+      await expect(attempt, `rate ${rate}`).rejects.toThrow(/relay floor/);
+      try {
+        await attempt;
+      } catch (e) {
+        expect((e as WalletError).code, `rate ${rate}`).toBe('BAD_FEE_RATE');
+      }
+      expect(looked, `rate ${rate}`).toBe(false);
+    }
+    expect(await k.listActivity()).toHaveLength(0);
   });
 
   it('a fee rate below the relay floor is refused before anything is signed', async () => {

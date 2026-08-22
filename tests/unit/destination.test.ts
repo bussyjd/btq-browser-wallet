@@ -20,6 +20,24 @@ describe('destination validation', () => {
     expect(assertDestination(` ${OK} `, 'testnet').merkleRoot).toHaveLength(32);
   });
 
+  it('returns the canonical lowercase encoding, never the caller\'s string', () => {
+    // User loss: bech32m legally accepts an all-uppercase address, and a paste
+    // picks up stray whitespace. planSend carries this field into the plan, and
+    // previewFromSigned compares it against the address decoded back out of the
+    // signed bytes — which encodeAddress always emits lowercase. Echoing the raw
+    // string means the send is signed and *then* thrown away with "does not
+    // match the approved destination", after the password has been typed.
+    expect(OK).toBe(OK.toLowerCase());
+    expect(assertDestination(OK, 'testnet').address).toBe(OK);
+    expect(assertDestination(OK.toUpperCase(), 'testnet').address).toBe(OK);
+    expect(assertDestination(`  ${OK}\n`, 'testnet').address).toBe(OK);
+    expect(assertDestination(` ${OK.toUpperCase()} `, 'testnet').address).toBe(OK);
+    // The merkle root is the same either way — only the string differs.
+    expect(assertDestination(OK.toUpperCase(), 'testnet').merkleRoot).toEqual(
+      assertDestination(OK, 'testnet').merkleRoot,
+    );
+  });
+
   it('rejects a mainnet address as WRONG_NETWORK', () => {
     // User loss: a qbtc destination would be paid on the wrong chain and the
     // coins would be unrecoverable.

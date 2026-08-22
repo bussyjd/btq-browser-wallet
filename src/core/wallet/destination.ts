@@ -1,4 +1,4 @@
-import { decodeAddress, HRP, type BtqNetwork, type DecodedAddress } from '../script/address.js';
+import { decodeAddress, encodeAddress, HRP, type BtqNetwork, type DecodedAddress } from '../script/address.js';
 import { WalletError } from './errors.js';
 
 /** btq-core's separate legacy Dilithium bech32 namespace (chainparams.cpp). */
@@ -18,13 +18,26 @@ function hrpOf(address: string): string | null {
   return address.slice(0, sep).toLowerCase();
 }
 
+export interface CheckedDestination extends DecodedAddress {
+  /**
+   * The canonical bech32m encoding of `merkleRoot` — lowercase, untrimmed
+   * whitespace gone. bech32m legally accepts an all-uppercase address and the
+   * user can paste one with a stray space, but `encodeAddress` only ever emits
+   * the lowercase form. Carrying the raw string instead means the plan and the
+   * address decoded back out of the signed bytes disagree, and the send is
+   * thrown away *after* the password. Everything downstream — plan, preview,
+   * activity — uses this field, never the caller's input.
+   */
+  address: string;
+}
+
 /**
  * Testnet P2MR only. Every rejection carries a sentence the user can act on —
  * raw bech32 library text ("Invalid checksum for …") is never passed through,
  * because someone reading that cannot tell whether to re-copy the address or
  * ask the payee for a different one.
  */
-export function assertDestination(address: string, network: BtqNetwork = 'testnet'): DecodedAddress {
+export function assertDestination(address: string, network: BtqNetwork = 'testnet'): CheckedDestination {
   const trimmed = address.trim();
   if (!trimmed) {
     throw new WalletError('BAD_ADDRESS', 'Enter a destination address — BTQ testnet addresses start with tbtq1z.');
@@ -58,8 +71,9 @@ export function assertDestination(address: string, network: BtqNetwork = 'testne
     );
   }
 
+  let decoded: DecodedAddress;
   try {
-    return decodeAddress(trimmed, network);
+    decoded = decodeAddress(trimmed, network);
   } catch (e) {
     const msg = e instanceof Error ? e.message : '';
     if (msg.includes('wrong network')) {
@@ -74,4 +88,7 @@ export function assertDestination(address: string, network: BtqNetwork = 'testne
       'That address failed its checksum — a character is wrong. Copy it again and re-paste.',
     );
   }
+  // Re-encode rather than echo: this is the one string the rest of the send
+  // path is allowed to carry.
+  return { ...decoded, address: encodeAddress(decoded.merkleRoot, decoded.network) };
 }
