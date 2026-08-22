@@ -13,7 +13,9 @@ export const WALLET_METHODS = [
   'wallet.lock',
   'wallet.receive',
   'wallet.scan',
+  'wallet.tip',
   'wallet.wipe',
+  'wallet.maxSpendable',
   'wallet.prepareSend',
   'wallet.confirmSend',
   'wallet.history',
@@ -27,8 +29,6 @@ export const WALLET_METHODS = [
   'wallet.setBackend',
   'wallet.testBackend',
 ] as const;
-
-export type WalletMethod = (typeof WALLET_METHODS)[number];
 
 export const WALLET_METHOD_SET: ReadonlySet<string> = new Set(WALLET_METHODS);
 

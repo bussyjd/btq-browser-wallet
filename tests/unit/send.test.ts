@@ -97,7 +97,32 @@ describe('send builder (shipped planSend/signPlan)', () => {
         changeAddress: e0.addresses.testnet,
       }),
     ).toThrow(/dust/i);
-    expect(dustThreshold()).toBeGreaterThan(1n);
+    expect(dustThreshold()).toBe(270n);
+  });
+
+  it('rejects a legacy base58 Dilithium destination with an explanation', () => {
+    // User loss: those outputs exist on-chain, so a user can genuinely be
+    // handed one; a bare "invalid address" leaves them re-pasting a good string.
+    expect(() =>
+      planSend({
+        utxos: [utxo(100_000_000n)],
+        destination: 'nSoU4Y55XduxKtGYQWaqpZ6yZEVV3Ancsu',
+        amount: 50_000_000n,
+        changeAddress: e0.addresses.testnet,
+      }),
+    ).toThrow(/tbtq1z/);
+  });
+
+  it('the plan carries the vsize and weight the approval screen shows', () => {
+    const plan = planSend({
+      utxos: [utxo(100_000_000n)],
+      destination: e1.addresses.testnet,
+      amount: 50_000_000n,
+      changeAddress: e0.addresses.testnet,
+    });
+    expect(plan.weight).toBe(estimateP2mrTxWeight(1, 2));
+    expect(plan.vsize).toBe(Math.ceil(plan.weight / 16));
+    expect(plan.feeRateSatPerKvB).toBe(1000);
   });
 
   it('rejects an amount greater than the wallet balance before signing', () => {
@@ -127,19 +152,26 @@ describe('send builder (shipped planSend/signPlan)', () => {
     expect(() => assertCanSignLeaf(leaf, control, program)).toThrow(/commit/);
   });
 
-  it('signPlan will not sign an injected leaf that fails commitsToProgram', () => {
+  it('signPlan refuses a UTXO whose script the wallet key does not pay', () => {
+    // Attacker gain: a hostile explorer that hands us someone else's outpoint
+    // with our address attached would otherwise get a signature over a script
+    // we do not control — signing is the one thing we never do blind.
     const plan = planSend({
       utxos: [utxo(100_000_000n)],
       destination: e1.addresses.testnet,
       amount: 50_000_000n,
       changeAddress: e0.addresses.testnet,
     });
-    const leaf = singleKeyLeafScript(new Uint8Array(1312).fill(9));
-    expect(() =>
-      signPlan(plan, (u) => deriveKeySeed(master, u.chain, u.index), {
-        leaf,
-        control: singleLeafControlBlock(),
-      }),
-    ).toThrow(/commit/);
+    // Same shape, different 32-byte program: OP_2 <32 bytes>.
+    const foreign = new Uint8Array(plan.inputs[0]!.script);
+    foreign[10] = foreign[10]! ^ 0xff;
+    plan.inputs[0]!.script = foreign;
+    expect(() => signPlan(plan, (u) => deriveKeySeed(master, u.chain, u.index))).toThrow(/commit|does not match/i);
+  });
+
+  it('signPlan has no path that signs a caller-supplied leaf', () => {
+    // The production signer must not carry a test-only branch: a leaf we did
+    // not build is a leaf we cannot prove pays only us.
+    expect(signPlan.length).toBe(2);
   });
 });

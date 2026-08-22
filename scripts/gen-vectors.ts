@@ -1,11 +1,15 @@
 /**
- * Regenerate golden vectors and (optionally) cross-check them against a live
- * btq-core regtest node. These vectors are the wallet's contract with
- * consensus: if any value drifts, addresses or signatures have changed and the
- * wallet is no longer compatible.
+ * Regenerate the golden vectors from src/core. These vectors are the wallet's
+ * contract with consensus: if any value drifts, addresses or signatures have
+ * changed and the wallet is no longer compatible.
  *
- *   npx tsx scripts/gen-vectors.ts            # regenerate from our own code
- *   BTQ_REGTEST=1 npx tsx scripts/gen-vectors.ts   # also verify against a node
+ *   npx tsx scripts/gen-vectors.ts                   # regenerate from our own code
+ *
+ * This script does NOT talk to a node. The cross-check against a live btq-core
+ * regtest node lives in tests/integration (`BTQ_REGTEST=1 npx vitest run
+ * tests/integration`); run it green *before* committing regenerated vectors.
+ * tests/unit/consensus-fixture.test.ts additionally reproduces a real testnet
+ * transaction recorded in tests/fixtures/explorer/tx.json, with no node needed.
  */
 import { writeFileSync } from 'node:fs';
 import { keyPairFromSeed, signTransactionHash } from '../src/core/crypto/mldsa.js';

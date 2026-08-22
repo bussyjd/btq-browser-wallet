@@ -17,15 +17,12 @@ import { sha256 } from '@noble/hashes/sha256';
 import { concatBytes, outpoint, u32le, u64le, withLength, serializeStripped, type Tx, type TxOutput } from './serialize.js';
 import { SIGHASH_ALL } from '../crypto/mldsa.js';
 import { bytesToHex, reverseBytes } from '../util/hex.js';
+// Tag semantics live in the module that owns P2MR leaves; one definition only.
+import { taggedHash } from '../script/p2mr.js';
 
 const KEY_VERSION = 0x00;
 const EPOCH = 0x00;
 const NO_CODESEPARATOR = 0xffffffff;
-
-function taggedHash(tag: string, msg: Uint8Array): Uint8Array {
-  const t = sha256(new TextEncoder().encode(tag));
-  return sha256(concatBytes(t, t, msg));
-}
 
 /** The previous outputs being spent, in input order. */
 export interface SpentOutput { value: bigint; script: Uint8Array }

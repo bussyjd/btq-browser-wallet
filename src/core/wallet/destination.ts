@@ -1,30 +1,77 @@
-import { decodeAddress, type BtqNetwork, type DecodedAddress } from '../script/address.js';
+import { decodeAddress, HRP, type BtqNetwork, type DecodedAddress } from '../script/address.js';
 import { WalletError } from './errors.js';
 
+/** btq-core's separate legacy Dilithium bech32 namespace (chainparams.cpp). */
 const LEGACY_DILITHIUM_HRP = new Set(['tdbt', 'dbtc', 'sdbt', 'rdbt']);
+/** Bitcoin's own HRPs — a pasted BTC address is the likeliest wrong-chain mistake. */
+const BITCOIN_HRP = new Set(['bc', 'tb', 'bcrt']);
+/**
+ * Legacy Dilithium P2PKH (`76a914…88bb`) still exists on the live chain and
+ * renders as base58: `n…`/`m…` on testnet, `X…` on mainnet. It is historical
+ * and not relayed; this wallet pays P2MR only.
+ */
+const LEGACY_BASE58 = /^[mnX2][1-9A-HJ-NP-Za-km-z]{24,34}$/;
 
-function hrpOf(address: string): string {
-  const sep = address.indexOf('1');
-  if (sep < 1) throw new WalletError('BAD_ADDRESS', 'Not a BTQ address.');
+function hrpOf(address: string): string | null {
+  const sep = address.lastIndexOf('1');
+  if (sep < 1) return null;
   return address.slice(0, sep).toLowerCase();
 }
 
-/** Testnet P2MR only. Rejects mainnet `qbtc` and the legacy Dilithium namespace. */
+/**
+ * Testnet P2MR only. Every rejection carries a sentence the user can act on —
+ * raw bech32 library text ("Invalid checksum for …") is never passed through,
+ * because someone reading that cannot tell whether to re-copy the address or
+ * ask the payee for a different one.
+ */
 export function assertDestination(address: string, network: BtqNetwork = 'testnet'): DecodedAddress {
-  const hrp = hrpOf(address);
+  const trimmed = address.trim();
+  if (!trimmed) {
+    throw new WalletError('BAD_ADDRESS', 'Enter a destination address — BTQ testnet addresses start with tbtq1z.');
+  }
+  if (LEGACY_BASE58.test(trimmed)) {
+    throw new WalletError(
+      'LEGACY_DILITHIUM',
+      'That is a legacy Dilithium address (base58, n… or X…). Those outputs still exist on-chain but are not a supported destination — ask for a tbtq1z… P2MR address.',
+    );
+  }
+  const hrp = hrpOf(trimmed);
+  if (hrp === null) {
+    throw new WalletError('BAD_ADDRESS', 'That is not a BTQ address. Testnet addresses start with tbtq1z.');
+  }
   if (LEGACY_DILITHIUM_HRP.has(hrp)) {
     throw new WalletError(
       'LEGACY_DILITHIUM',
       'Legacy Dilithium addresses (tdbt…) are not supported. Use a tbtq1z… P2MR address.',
     );
   }
+  if (BITCOIN_HRP.has(hrp)) {
+    throw new WalletError(
+      'WRONG_NETWORK',
+      'That is a Bitcoin address, not a BTQ one. BTQ testnet addresses start with tbtq1z.',
+    );
+  }
+  if (!Object.values(HRP).includes(hrp)) {
+    throw new WalletError(
+      'WRONG_NETWORK',
+      `Unknown address prefix "${hrp}". BTQ testnet addresses start with tbtq1z.`,
+    );
+  }
+
   try {
-    return decodeAddress(address, network);
+    return decodeAddress(trimmed, network);
   } catch (e) {
-    const msg = e instanceof Error ? e.message : 'Not a BTQ address.';
+    const msg = e instanceof Error ? e.message : '';
     if (msg.includes('wrong network')) {
       throw new WalletError('WRONG_NETWORK', 'That address is not testnet. Testnet addresses start with tbtq1z.');
     }
-    throw new WalletError('BAD_ADDRESS', msg);
+    if (/witness version|byte program|P2MR address/i.test(msg)) {
+      throw new WalletError('BAD_ADDRESS', 'Only P2MR addresses (tbtq1z…) can be paid from this wallet.');
+    }
+    // Anything else out of the bech32m decoder means the string has a typo.
+    throw new WalletError(
+      'BAD_ADDRESS',
+      'That address failed its checksum — a character is wrong. Copy it again and re-paste.',
+    );
   }
 }

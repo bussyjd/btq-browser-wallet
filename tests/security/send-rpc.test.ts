@@ -1,19 +1,45 @@
 import { describe, it, expect } from 'vitest';
 import vectors from '../vectors/golden.json' with { type: 'json' };
-import { Keyring } from '../../src/core/wallet/keyring.js';
+import { Keyring, PENDING_RESERVE_MS } from '../../src/core/wallet/keyring.js';
 import { dispatch } from '../../src/core/rpc/dispatch.js';
 import { WALLET_METHODS } from '../../src/core/rpc/protocol.js';
 import { MemoryWalletStorage, TEST_ENCRYPT } from '../helpers/memory-store.js';
-import { hexToBytes } from '../../src/core/util/hex.js';
-import { TX_SIGNATURE_BYTES, SIGHASH_ALL } from '../../src/core/crypto/mldsa.js';
+import { PUBLIC_KEY_BYTES, TX_SIGNATURE_BYTES, SIGHASH_ALL, verifyTransactionHash } from '../../src/core/crypto/mldsa.js';
+import { scriptForAddress } from '../../src/core/script/address.js';
+import { tapLeafHash } from '../../src/core/script/p2mr.js';
+import { p2mrSighash, txid as txidOf } from '../../src/core/tx/sighash.js';
+import { parseTx } from '../../src/core/tx/parse.js';
+import { BroadcastError, WalletError } from '../../src/core/wallet/errors.js';
 import type { ExplorerUtxo } from '../../src/core/explorer/utxo.js';
 
 const MNEMONIC = 'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about';
 const PASSWORD = 'testnet-ok';
 const DEST = vectors.entries[1]!.addresses.testnet;
+const COIN = 100_000_000n;
 
 function ring() {
   return new Keyring(new MemoryWalletStorage(), { encrypt: TEST_ENCRYPT, network: 'testnet' });
+}
+
+/** The txid a node would echo back for these bytes. */
+function parseTxidOf(hex: string): string {
+  return txidOf(parseTx(hex));
+}
+
+/** One confirmed 1 tBTQ coin on the wallet's own receive address. */
+function fundOnce(address: string, txid = 'ab'.repeat(32), vout = 0) {
+  return async (queried: string): Promise<ExplorerUtxo[]> => {
+    if (queried !== address) return [];
+    return [
+      {
+        txid,
+        vout,
+        value: COIN,
+        script: scriptForAddress(queried, 'testnet'),
+        blockHeight: 300_000,
+      },
+    ];
+  };
 }
 
 describe('send RPC — fund-move paths', () => {
@@ -32,13 +58,12 @@ describe('send RPC — fund-move paths', () => {
     const k = ring();
     await k.importMnemonic(MNEMONIC, PASSWORD);
     k.lock();
-    const fetchUtxos = async (): Promise<ExplorerUtxo[]> => [];
     await expect(
       k.confirmSend({
         destination: DEST,
         amountSats: 50_000_000n,
         password: PASSWORD,
-        fetchUtxos,
+        fetchUtxos: async () => [],
         broadcast: async () => ({ txid: '00'.repeat(32) }),
       }),
     ).rejects.toThrow(/locked/i);
@@ -58,46 +83,215 @@ describe('send RPC — fund-move paths', () => {
     ).rejects.toThrow('Incorrect password.');
   });
 
-  it('confirmSend signs 2421-byte SIGHASH_ALL using owned UTXO values, not a separate balance field', async () => {
+  it('the signed witness verifies against the sighash over the real UTXO value', async () => {
+    // Attacker gain / user loss: a signature that does not commit to the exact
+    // input value and destination is either invalid (the payment never lands)
+    // or, worse, replayable against a different amount.
     const k = ring();
     await k.importMnemonic(MNEMONIC, PASSWORD);
     const receive = await k.receiveAddress();
-    const script = hexToBytes(
-      // derive matching script by preparing a 1-coin utxo at the receive script
-      vectors.entries[0]!.scriptPubKey,
-    );
-    // The abandon mnemonic is NOT the golden seed — gatherUtxos uses the wallet's own script.
-    const mine = await k.gatherUtxos(async (address) => {
-      if (address !== receive.address) return [];
-      const { scriptForAddress } = await import('../../src/core/script/address.js');
-      const s = scriptForAddress(address, 'testnet');
-      return [{ txid: 'ab'.repeat(32), vout: 0, value: 100_000_000n, script: s }];
-    });
-    expect(mine[0]!.value).toBe(100_000_000n);
-    expect(mine[0]!.script).not.toEqual(script);
+    const fetchUtxos = fundOnce(receive.address);
 
     const signed = await k.confirmSend({
       destination: DEST,
       amountSats: 10_000_000n,
       password: PASSWORD,
-      fetchUtxos: async (address) => {
-        if (address !== receive.address) return [];
-        const { scriptForAddress } = await import('../../src/core/script/address.js');
-        return [{ txid: 'ab'.repeat(32), vout: 0, value: 100_000_000n, script: scriptForAddress(address, 'testnet') }];
-      },
+      fetchUtxos,
       broadcast: async () => {
-        throw new Error('no route');
+        throw new BroadcastError('no route', 'explorer', true);
       },
     });
-    expect(signed.hex.length).toBeGreaterThan(100);
+
+    const tx = parseTx(signed.hex);
+    expect(tx.inputs).toHaveLength(1);
+    const witness = tx.inputs[0]!.witness!;
+    expect(witness).toHaveLength(3);
+    const [signature, leaf, control] = witness as [Uint8Array, Uint8Array, Uint8Array];
+    expect(signature.length).toBe(TX_SIGNATURE_BYTES);
+    expect(signature[TX_SIGNATURE_BYTES - 1]).toBe(SIGHASH_ALL);
+    expect(control).toEqual(new Uint8Array([0xc1]));
+
+    const publicKey = leaf.subarray(3, 3 + PUBLIC_KEY_BYTES);
+    const script = scriptForAddress(receive.address, 'testnet');
+    const spent = [{ value: COIN, script }];
+    const sighash = p2mrSighash(tx, 0, spent, tapLeafHash(leaf));
+    expect(verifyTransactionHash(publicKey, sighash, signature)).toBe(true);
+
+    // One satoshi difference in the spent value is a different sighash: this is
+    // what "the signature commits to the input amount" actually means.
+    const tampered = p2mrSighash(tx, 0, [{ value: COIN + 1n, script }], tapLeafHash(leaf));
+    expect(verifyTransactionHash(publicKey, tampered, signature)).toBe(false);
+
+    // And a changed output value must invalidate it too.
+    const movedFunds = parseTx(signed.hex);
+    movedFunds.outputs[0]!.value += 1n;
+    const otherSighash = p2mrSighash(movedFunds, 0, spent, tapLeafHash(leaf));
+    expect(verifyTransactionHash(publicKey, otherSighash, signature)).toBe(false);
+
+    expect(signed.inputs[0]!.value).toBe(COIN.toString());
     expect(signed.amount).toBe('10000000');
     expect(signed.broadcastStatus).toBe('signed');
-    const { hexToBytes: h2b } = await import('../../src/core/util/hex.js');
-    const raw = h2b(signed.hex);
-    // Witness signature is the first push after marker; cheaper: decode via confirm result inputs.
-    expect(signed.inputs[0]!.value).toBe('100000000');
-    expect(raw.length).toBeGreaterThan(TX_SIGNATURE_BYTES);
-    expect(SIGHASH_ALL).toBe(0x01);
+  });
+
+  it('the preview the user approves is decoded from the bytes we broadcast', async () => {
+    // User loss: showing plan fields instead of decoded bytes means a builder
+    // bug pays a different address than the one on the confirmation screen.
+    const k = ring();
+    await k.importMnemonic(MNEMONIC, PASSWORD);
+    const receive = await k.receiveAddress();
+    const signed = await k.confirmSend({
+      destination: DEST,
+      amountSats: 10_000_000n,
+      password: PASSWORD,
+      fetchUtxos: fundOnce(receive.address),
+      broadcast: async () => ({ txid: '00'.repeat(32) }),
+    });
+    expect(signed.decoded.outputs[0]!.address).toBe(DEST);
+    expect(signed.decoded.outputs[0]!.value).toBe('10000000');
+    // The change row shows a real address of ours, not an empty string.
+    expect(signed.outputs[1]!.address.startsWith('tbtq1z')).toBe(true);
+    expect(signed.decoded.vsize).toBe(signed.vsize);
+  });
+
+  it('a node rejection surfaces its reject-reason instead of being swallowed', async () => {
+    // User loss: without the reason, "min relay fee not met" is indistinguishable
+    // from "sent" — the user believes a payee was paid and may pay twice.
+    const k = ring();
+    await k.importMnemonic(MNEMONIC, PASSWORD);
+    const receive = await k.receiveAddress();
+    const result = await k.confirmSend({
+      destination: DEST,
+      amountSats: 10_000_000n,
+      password: PASSWORD,
+      fetchUtxos: fundOnce(receive.address),
+      broadcast: async () => {
+        throw new BroadcastError('min relay fee not met', 'node');
+      },
+    });
+    expect(result.broadcastStatus).toBe('signed');
+    expect(result.broadcastError).toBe('min relay fee not met');
+    expect(result.broadcastVia).toBe('node');
+    const activity = await k.listActivity();
+    expect(activity[0]!.broadcastError).toBe('min relay fee not met');
+    expect(activity[0]!.status).toBe('signed');
+    // The bytes are never lost, whatever the backend said.
+    expect(activity[0]!.hex).toBe(result.hex);
+  });
+
+  it('a failed broadcast is reported as signed in history, never as pending', async () => {
+    // User loss: a "pending" row for a transaction that was never broadcast is
+    // a payment the user thinks they made.
+    const k = ring();
+    await k.importMnemonic(MNEMONIC, PASSWORD);
+    const receive = await k.receiveAddress();
+    await k.confirmSend({
+      destination: DEST,
+      amountSats: 10_000_000n,
+      password: PASSWORD,
+      fetchUtxos: fundOnce(receive.address),
+      broadcast: async () => {
+        throw new BroadcastError('no broadcast route', 'explorer', true);
+      },
+    });
+    const history = await k.listHistory(async () => []);
+    expect(history).toHaveLength(1);
+    expect(history[0]!.status).toBe('signed');
+  });
+
+  it('a successful broadcast records which route accepted it', async () => {
+    const k = ring();
+    await k.importMnemonic(MNEMONIC, PASSWORD);
+    const receive = await k.receiveAddress();
+    const result = await k.confirmSend({
+      destination: DEST,
+      amountSats: 10_000_000n,
+      password: PASSWORD,
+      fetchUtxos: fundOnce(receive.address),
+      broadcast: async (hex) => ({ txid: parseTxidOf(hex), via: 'node' }),
+    });
+    expect(result.broadcastStatus).toBe('pending');
+    expect(result.broadcastError).toBeNull();
+    expect(result.broadcastVia).toBe('node');
+  });
+
+  it('a second send cannot re-select the coins an in-flight send already spends', async () => {
+    // User loss: re-selecting them builds an RBF replacement of a payment
+    // already in flight, so the first payee silently gets nothing.
+    const k = ring();
+    await k.importMnemonic(MNEMONIC, PASSWORD);
+    const receive = await k.receiveAddress();
+    const fetchUtxos = fundOnce(receive.address);
+    const first = await k.confirmSend({
+      destination: DEST,
+      amountSats: 10_000_000n,
+      password: PASSWORD,
+      fetchUtxos,
+      broadcast: async (hex) => ({ txid: parseTxidOf(hex), via: 'node' }),
+    });
+    expect(first.broadcastStatus).toBe('pending');
+    await expect(
+      k.confirmSend({
+        destination: DEST,
+        amountSats: 10_000_000n,
+        password: PASSWORD,
+        fetchUtxos,
+        broadcast: async (hex) => ({ txid: parseTxidOf(hex), via: 'node' }),
+      }),
+    ).rejects.toThrow(/No coins to spend|Not enough balance/);
+  });
+
+  it('a send that was never broadcast does not lock its coins forever', async () => {
+    // The mirror of the test above: 'signed' means nothing is in flight, so the
+    // user must be able to retry at a higher fee.
+    const k = ring();
+    await k.importMnemonic(MNEMONIC, PASSWORD);
+    const receive = await k.receiveAddress();
+    const fetchUtxos = fundOnce(receive.address);
+    await k.confirmSend({
+      destination: DEST,
+      amountSats: 10_000_000n,
+      password: PASSWORD,
+      fetchUtxos,
+      broadcast: async () => {
+        throw new BroadcastError('no broadcast route', 'explorer', true);
+      },
+    });
+    const retry = await k.confirmSend({
+      destination: DEST,
+      amountSats: 10_000_000n,
+      password: PASSWORD,
+      fetchUtxos,
+      feeRateSatPerKvB: 2000,
+      broadcast: async () => {
+        throw new BroadcastError('no broadcast route', 'explorer', true);
+      },
+    });
+    expect(retry.inputs).toHaveLength(1);
+  });
+
+  it('a stale pending reservation expires so dropped coins are not stranded', async () => {
+    // User loss: if a broadcast transaction is dropped by the network, coins
+    // reserved for it would otherwise be unspendable for the life of the wallet.
+    const clock = { t: 1_000_000 };
+    const k = new Keyring(new MemoryWalletStorage(), {
+      encrypt: TEST_ENCRYPT,
+      network: 'testnet',
+      now: () => clock.t,
+      lockAfterMs: 0, // auto-lock is not what this test is about
+    });
+    await k.importMnemonic(MNEMONIC, PASSWORD);
+    const receive = await k.receiveAddress();
+    const fetchUtxos = fundOnce(receive.address);
+    await k.confirmSend({
+      destination: DEST,
+      amountSats: 10_000_000n,
+      password: PASSWORD,
+      fetchUtxos,
+      broadcast: async (hex) => ({ txid: parseTxidOf(hex), via: 'node' }),
+    });
+    await expect(k.gatherUtxos(fetchUtxos)).resolves.toHaveLength(0);
+    clock.t += PENDING_RESERVE_MS + 1;
+    await expect(k.gatherUtxos(fetchUtxos)).resolves.toHaveLength(1);
   });
 
   it('a hostile explorer cannot replace the signed txid after broadcast', async () => {
@@ -111,18 +305,36 @@ describe('send RPC — fund-move paths', () => {
       destination: DEST,
       amountSats: 10_000_000n,
       password: PASSWORD,
-      fetchUtxos: async (address) => {
-        if (address !== receive.address) return [];
-        const { scriptForAddress } = await import('../../src/core/script/address.js');
-        return [{ txid: 'ab'.repeat(32), vout: 0, value: 100_000_000n, script: scriptForAddress(address, 'testnet') }];
-      },
+      fetchUtxos: fundOnce(receive.address),
       broadcast: async () => ({ txid: fake }),
     });
     expect(signed.txid).not.toBe(fake);
     expect(signed.txid).toMatch(/^[0-9a-f]{64}$/);
     expect(signed.broadcastStatus).toBe('signed');
+    expect(signed.broadcastError).toMatch(/different transaction id/);
     const activity = await k.listActivity();
     expect(activity[0]!.txid).toBe(signed.txid);
     expect(activity[0]!.txid).not.toBe(fake);
+  });
+
+  it('a fee rate below the relay floor is refused before anything is signed', async () => {
+    const k = ring();
+    await k.importMnemonic(MNEMONIC, PASSWORD);
+    const receive = await k.receiveAddress();
+    const attempt = k.confirmSend({
+      destination: DEST,
+      amountSats: 10_000_000n,
+      password: PASSWORD,
+      feeRateSatPerKvB: 500,
+      fetchUtxos: fundOnce(receive.address),
+      broadcast: async () => ({ txid: '00'.repeat(32) }),
+    });
+    await expect(attempt).rejects.toThrow(/relay floor/);
+    try {
+      await attempt;
+    } catch (e) {
+      expect((e as WalletError).code).toBe('BAD_FEE_RATE');
+    }
+    expect(await k.listActivity()).toHaveLength(0);
   });
 });

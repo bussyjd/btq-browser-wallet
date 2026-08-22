@@ -14,6 +14,9 @@
  */
 import { sha256 } from '@noble/hashes/sha256';
 import { PUBLIC_KEY_BYTES } from '../crypto/mldsa.js';
+import { compactSize, compareBytes, concatBytes } from '../util/bytes.js';
+
+export { compactSize };
 
 export const OP_CHECKSIGDILITHIUM = 0xbb;
 export const OP_PUSHDATA2 = 0x4d;
@@ -25,20 +28,13 @@ export const CONTROL_BYTE = 0xc1;
 /** 1 (OP_PUSHDATA2) + 2 (LE length) + 1312 (pubkey) + 1 (opcode). */
 export const LEAF_SCRIPT_BYTES = 1 + 2 + PUBLIC_KEY_BYTES + 1;
 
-function taggedHash(tag: string, msg: Uint8Array): Uint8Array {
+/**
+ * BIP340 tagged hash: sha256(sha256(tag) || sha256(tag) || msg). This module
+ * owns tag semantics for the whole wallet; sighash.ts imports it from here.
+ */
+export function taggedHash(tag: string, msg: Uint8Array): Uint8Array {
   const t = sha256(new TextEncoder().encode(tag));
-  const buf = new Uint8Array(t.length * 2 + msg.length);
-  buf.set(t, 0);
-  buf.set(t, t.length);
-  buf.set(msg, t.length * 2);
-  return sha256(buf);
-}
-
-/** Bitcoin compact-size encoding (only the sizes a leaf script can reach). */
-export function compactSize(n: number): Uint8Array {
-  if (n < 0xfd) return new Uint8Array([n]);
-  if (n <= 0xffff) return new Uint8Array([0xfd, n & 0xff, (n >> 8) & 0xff]);
-  return new Uint8Array([0xfe, n & 0xff, (n >> 8) & 0xff, (n >> 16) & 0xff, (n >>> 24) & 0xff]);
+  return sha256(concatBytes(t, t, msg));
 }
 
 /** The single-key Dilithium leaf: OP_PUSHDATA2 <pubkey> OP_CHECKSIGDILITHIUM. */
@@ -58,10 +54,7 @@ export function singleKeyLeafScript(publicKey: Uint8Array): Uint8Array {
 /** TapLeaf hash: tagged_hash("TapLeaf", leaf_version || compact_size(len) || script). */
 export function tapLeafHash(leafScript: Uint8Array, leafVersion = LEAF_VERSION): Uint8Array {
   const size = compactSize(leafScript.length);
-  const msg = new Uint8Array(1 + size.length + leafScript.length);
-  msg[0] = leafVersion;
-  msg.set(size, 1);
-  msg.set(leafScript, 1 + size.length);
+  const msg = concatBytes(new Uint8Array([leafVersion]), size, leafScript);
   return taggedHash('TapLeaf', msg);
 }
 
@@ -99,15 +92,7 @@ export function commitsToProgram(leafScript: Uint8Array, controlBlock: Uint8Arra
   for (let i = 1; i + 32 <= controlBlock.length; i += 32) {
     const sibling = controlBlock.subarray(i, i + 32);
     const [a, b] = compareBytes(node, sibling) <= 0 ? [node, sibling] : [sibling, node];
-    const pair = new Uint8Array(64);
-    pair.set(a, 0); pair.set(b, 32);
-    node = taggedHash('TapBranch', pair);
+    node = taggedHash('TapBranch', concatBytes(a, b));
   }
   return compareBytes(node, program) === 0;
-}
-
-function compareBytes(a: Uint8Array, b: Uint8Array): number {
-  if (a.length !== b.length) return a.length - b.length;
-  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return a[i]! - b[i]!;
-  return 0;
 }

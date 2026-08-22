@@ -1,5 +1,8 @@
 /** Bitcoin-format transaction serialization (BTQ inherits it unchanged). */
 import { hexToBytes, reverseBytes } from '../util/hex.js';
+import { compactSize, concatBytes } from '../util/bytes.js';
+
+export { concatBytes };
 export interface TxInput {
   txid: string;          // big-endian display order, as in RPC output
   vout: number;
@@ -19,13 +22,6 @@ export interface Tx {
 
 export const DEFAULT_SEQUENCE = 0xfffffffd; // opt in to RBF
 
-export function concatBytes(...parts: Uint8Array[]): Uint8Array {
-  const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
-  let o = 0;
-  for (const p of parts) { out.set(p, o); o += p.length; }
-  return out;
-}
-
 export function u32le(n: number): Uint8Array {
   if (!Number.isInteger(n) || n < 0 || n > 0xffffffff) {
     throw new Error('value does not fit in uint32');
@@ -38,12 +34,8 @@ export function u64le(n: bigint): Uint8Array {
   }
   const b = new Uint8Array(8); new DataView(b.buffer).setBigUint64(0, n, true); return b;
 }
-export function varint(n: number): Uint8Array {
-  if (n < 0xfd) return new Uint8Array([n]);
-  if (n <= 0xffff) return concatBytes(new Uint8Array([0xfd]), new Uint8Array([n & 0xff, (n >> 8) & 0xff]));
-  if (n <= 0xffffffff) return concatBytes(new Uint8Array([0xfe]), u32le(n));
-  throw new Error('varint too large');
-}
+/** Compact size — the same encoding tapleaf hashing uses (util/bytes.ts). */
+export const varint = compactSize;
 export function withLength(b: Uint8Array): Uint8Array {
   return concatBytes(varint(b.length), b);
 }

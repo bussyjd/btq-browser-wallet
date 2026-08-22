@@ -1,11 +1,23 @@
 import { WalletError } from '../wallet/errors.js';
-import type { Keyring } from '../wallet/keyring.js';
+import type { Broadcast, ChainTip, FetchHistory, FetchUtxos, Keyring } from '../wallet/keyring.js';
 import type { AddressLookup } from '../wallet/gap.js';
-import type { ExplorerUtxo } from '../explorer/utxo.js';
-import type { HistoryItem } from '../explorer/history.js';
 import { PAGE_METHOD_SET } from '../connect/permissions.js';
 import { WALLET_METHOD_SET, type RpcRequest } from './protocol.js';
 import type { BackendPublic } from '../network/backend.js';
+
+export interface BackendInput {
+  explorerBase?: string;
+  nodeUrl?: string;
+  nodeUser?: string;
+  nodePassword?: string;
+}
+
+export interface BackendProbe {
+  explorer: string;
+  explorerTip?: number;
+  node?: { chain: string; blocks: number; bestblockhash?: string };
+  warning?: string;
+}
 
 export interface DispatchContext {
   /** True when the sender is a web tab/page, not an extension page. */
@@ -13,36 +25,56 @@ export interface DispatchContext {
   /** Exact page origin from the runtime sender — never from params. */
   pageOrigin?: string;
   lookup?: AddressLookup;
-  fetchUtxos?: (address: string) => Promise<ExplorerUtxo[]>;
-  fetchHistory?: (address: string) => Promise<HistoryItem[]>;
-  broadcast?: (hex: string) => Promise<{ txid: string }>;
+  fetchUtxos?: FetchUtxos;
+  fetchHistory?: FetchHistory;
+  /** Chain tip for confirmations; cached by the caller. Optional: null ⇒ no counts. */
+  fetchTip?: () => Promise<ChainTip>;
+  broadcast?: Broadcast;
   getBackend?: () => Promise<BackendPublic>;
-  setBackend?: (input: {
-    explorerBase?: string;
-    nodeUrl?: string;
-    nodeUser?: string;
-    nodePassword?: string;
-  }) => Promise<BackendPublic>;
-  testBackend?: (input: {
-    explorerBase?: string;
-    nodeUrl?: string;
-    nodeUser?: string;
-    nodePassword?: string;
-  }) => Promise<{ explorer: string; node?: { chain: string; blocks: number } }>;
+  setBackend?: (input: BackendInput) => Promise<BackendPublic>;
+  testBackend?: (input: BackendInput) => Promise<BackendProbe>;
 }
 
 function asRecord(v: unknown): Record<string, unknown> {
   return typeof v === 'object' && v !== null ? (v as Record<string, unknown>) : {};
 }
 
+/** A missing parameter is a caller bug, not a wrong password. */
 function str(v: unknown, name: string): string {
-  if (typeof v !== 'string') throw new WalletError('BAD_PASSWORD', `Missing ${name}.`);
+  if (typeof v !== 'string') throw new WalletError('BAD_PARAMS', `Missing ${name}.`);
   return v;
 }
 
 function sats(v: unknown): bigint {
-  if (typeof v === 'string' && /^\d+$/.test(v)) return BigInt(v);
-  throw new WalletError('DUST', 'Amount must be a satoshi integer string.');
+  if (typeof v === 'string' && /^\d{1,20}$/.test(v)) return BigInt(v);
+  throw new WalletError('BAD_PARAMS', 'Amount must be a satoshi integer string.');
+}
+
+function feeRate(v: unknown): number | undefined {
+  if (v === undefined || v === null) return undefined;
+  if (typeof v !== 'number' || !Number.isInteger(v)) {
+    throw new WalletError('BAD_FEE_RATE', 'Fee rate must be a whole number of sat/kvB.');
+  }
+  return v;
+}
+
+function backendInput(p: Record<string, unknown>): BackendInput {
+  return {
+    explorerBase: typeof p.explorerBase === 'string' ? p.explorerBase : undefined,
+    nodeUrl: typeof p.nodeUrl === 'string' ? p.nodeUrl : undefined,
+    nodeUser: typeof p.nodeUser === 'string' ? p.nodeUser : undefined,
+    nodePassword: typeof p.nodePassword === 'string' ? p.nodePassword : undefined,
+  };
+}
+
+/** The tip, or null when the backend cannot give one — never a thrown refresh. */
+async function tipOrNull(ctx: DispatchContext): Promise<ChainTip | null> {
+  if (!ctx.fetchTip) return null;
+  try {
+    return await ctx.fetchTip();
+  } catch {
+    return null;
+  }
 }
 
 export async function dispatch(keyring: Keyring, request: RpcRequest, ctx: DispatchContext): Promise<unknown> {
@@ -100,46 +132,70 @@ export async function dispatch(keyring: Keyring, request: RpcRequest, ctx: Dispa
       return keyring.receiveAddress();
     case 'wallet.scan': {
       if (!ctx.lookup) throw new WalletError('EXPLORER_UNAVAILABLE', 'Explorer is not configured.');
-      const scan = await keyring.scan(ctx.lookup);
+      const scan = await keyring.scan(ctx.lookup, ctx.fetchUtxos, await tipOrNull(ctx), {
+        full: p.full === true,
+      });
       return {
         externalNext: scan.external.nextIndex,
         internalNext: scan.internal.nextIndex,
-        usedExternal: scan.external.used.length,
-        usedInternal: scan.internal.used.length,
+        usedExternal: scan.usedExternal,
+        usedInternal: scan.usedInternal,
         lastBalanceSats: scan.totalBalanceSats.toString(),
+        confirmedBalanceSats: scan.confirmedBalanceSats.toString(),
+        tipHeight: scan.tipHeight,
+        lastScanAt: scan.lastScanAt,
       };
+    }
+    case 'wallet.tip': {
+      if (!ctx.fetchTip) throw new WalletError('EXPLORER_UNAVAILABLE', 'Explorer is not configured.');
+      return ctx.fetchTip();
     }
     case 'wallet.wipe':
       await keyring.wipe(str(p.confirmation, 'confirmation'));
       return { ok: true as const };
+    case 'wallet.maxSpendable': {
+      if (!ctx.fetchUtxos) throw new WalletError('EXPLORER_UNAVAILABLE', 'Explorer is not configured.');
+      return keyring.maxSpendable({
+        fetchUtxos: ctx.fetchUtxos,
+        feeRateSatPerKvB: feeRate(p.feeRateSatPerKvB),
+      });
+    }
     case 'wallet.prepareSend': {
       if (!ctx.fetchUtxos) throw new WalletError('EXPLORER_UNAVAILABLE', 'Explorer is not configured.');
       return keyring.prepareSend({
         destination: str(p.destination, 'destination'),
         amountSats: sats(p.amountSats),
         fetchUtxos: ctx.fetchUtxos,
-        feeRateSatPerKvB: typeof p.feeRateSatPerKvB === 'number' ? p.feeRateSatPerKvB : undefined,
+        feeRateSatPerKvB: feeRate(p.feeRateSatPerKvB),
       });
     }
     case 'wallet.confirmSend': {
-      if (!ctx.fetchUtxos || !ctx.broadcast) throw new WalletError('EXPLORER_UNAVAILABLE', 'Explorer is not configured.');
-      return keyring.confirmSend({
+      if (!ctx.fetchUtxos || !ctx.broadcast) {
+        throw new WalletError('EXPLORER_UNAVAILABLE', 'Explorer is not configured.');
+      }
+      const result = await keyring.confirmSend({
         destination: str(p.destination, 'destination'),
         amountSats: sats(p.amountSats),
         password: str(p.password, 'password'),
         fetchUtxos: ctx.fetchUtxos,
         broadcast: ctx.broadcast,
-        feeRateSatPerKvB: typeof p.feeRateSatPerKvB === 'number' ? p.feeRateSatPerKvB : undefined,
+        feeRateSatPerKvB: feeRate(p.feeRateSatPerKvB),
       });
+      // `decoded` carries Uint8Array-free plain data but is large; the popup
+      // only needs the summary fields plus the hex it may have to copy out.
+      const { decoded: _decoded, ...wire } = result;
+      return wire;
     }
     case 'wallet.history': {
       if (!ctx.fetchHistory) throw new WalletError('EXPLORER_UNAVAILABLE', 'Explorer is not configured.');
-      const items = await keyring.listHistory(ctx.fetchHistory);
+      const items = await keyring.listHistory(ctx.fetchHistory, await tipOrNull(ctx));
       return items.map((h) => ({
         txid: h.txid,
         blockHeight: h.blockHeight,
         valueChange: h.valueChange.toString(),
         status: h.status,
+        confirmations: h.confirmations ?? null,
+        ...(h.at === undefined ? {} : { at: h.at }),
       }));
     }
     case 'wallet.activity':
@@ -161,20 +217,10 @@ export async function dispatch(keyring: Keyring, request: RpcRequest, ctx: Dispa
       return ctx.getBackend();
     case 'wallet.setBackend':
       if (!ctx.setBackend) throw new WalletError('BAD_BACKEND', 'Backend settings are not available.');
-      return ctx.setBackend({
-        explorerBase: typeof p.explorerBase === 'string' ? p.explorerBase : undefined,
-        nodeUrl: typeof p.nodeUrl === 'string' ? p.nodeUrl : undefined,
-        nodeUser: typeof p.nodeUser === 'string' ? p.nodeUser : undefined,
-        nodePassword: typeof p.nodePassword === 'string' ? p.nodePassword : undefined,
-      });
+      return ctx.setBackend(backendInput(p));
     case 'wallet.testBackend':
       if (!ctx.testBackend) throw new WalletError('BAD_BACKEND', 'Backend settings are not available.');
-      return ctx.testBackend({
-        explorerBase: typeof p.explorerBase === 'string' ? p.explorerBase : undefined,
-        nodeUrl: typeof p.nodeUrl === 'string' ? p.nodeUrl : undefined,
-        nodeUser: typeof p.nodeUser === 'string' ? p.nodeUser : undefined,
-        nodePassword: typeof p.nodePassword === 'string' ? p.nodePassword : undefined,
-      });
+      return ctx.testBackend(backendInput(p));
     default:
       throw new WalletError('UNKNOWN_METHOD', `Unknown method: ${method}`);
   }
@@ -187,7 +233,7 @@ async function dispatchPage(keyring: Keyring, method: string, origin: string): P
     case 'page.getAccounts':
       return keyring.getAccounts(origin);
     case 'page.disconnect':
-      await keyring.disconnectOrigin(origin);
+      await keyring.revokeSite(origin);
       return { ok: true as const };
     default:
       throw new WalletError('FORBIDDEN', 'This method is not available to pages.');

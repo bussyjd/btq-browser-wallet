@@ -123,12 +123,11 @@ describe('keyring — paths that leak secrets or skip the vault', () => {
     await k.scan(async (address) => ({
       used: address === first.address,
       txCount: address === first.address ? 1 : 0,
-      balanceSats: address === first.address ? 50_000n : 0n,
+      reportedBalanceSats: address === first.address ? 50_000n : 0n,
     }));
     const next = await k.receiveAddress();
     expect(next.index).toBe(1);
     expect(next.address).not.toBe(first.address);
-    expect((await k.status()).lastBalanceSats).toBe('50000');
   });
 
   it('auto-lock clears the in-memory seed after the timeout', async () => {
