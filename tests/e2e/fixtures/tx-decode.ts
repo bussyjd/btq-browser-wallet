@@ -2,8 +2,8 @@
  * Raw-transaction decoding for the mock node.
  *
  * The decoder itself is `src/core/tx/parse.ts` (round-trip tested against
- * `serializeWithWitness` in tests/unit/tx-parse.test.ts, as the smoke-test spec
- * allows), but everything measured from the bytes here — the stripped and
+ * `serializeWithWitness` in tests/unit/tx-parse.test.ts, which is what makes
+ * reusing it here safe), but everything measured from the bytes here — the stripped and
  * witness serializations, the txid, the weight and the vsize — is re-derived in
  * the test tree from the wire format so a bug in the wallet's serializer cannot
  * agree with itself. `roundTripsExactly` proves the decode is lossless before a

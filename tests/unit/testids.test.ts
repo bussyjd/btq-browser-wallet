@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
  * fails somewhere deep in a browser with a timeout; this test fails in
  * milliseconds and names the missing selector.
  *
- * The list is the "Selectors contract" from the smoke-test spec, verbatim.
+ * The list is the selector contract the end-to-end suite drives, in full.
  */
 const UI = join(dirname(fileURLToPath(import.meta.url)), '../../src/ui');
 

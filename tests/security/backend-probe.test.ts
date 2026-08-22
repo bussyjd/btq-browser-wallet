@@ -152,7 +152,7 @@ describe('backend probe', () => {
     stubNetwork({ rpc: { getblockchaininfo: { chain: 'test', blocks: TIP.height }, getblockhash: TIP.hash } });
     const out = await probeBackend({
       explorerBase: EXPLORER,
-      nodeUrl: 'http://silvermesh.local:18332',
+      nodeUrl: 'http://node.example:18332',
       nodeUser: 'm0',
       nodePassword: 'node-secret-9x',
     });

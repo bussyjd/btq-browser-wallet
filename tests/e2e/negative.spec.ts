@@ -83,7 +83,7 @@ test.beforeAll(async () => {
   await waitForScan(popup);
 
   // Change must come back to this wallet's own internal chain — checked here as
-  // well as in the send journey (smoke.spec.ts 6), so a change address derived
+  // well as in the send journey in smoke.spec.ts, so a change address derived
   // from the wrong chain fails in two files rather than one.
   backend.node.expectChangeScript = scriptHexFor(
     addressFromHdSeed(mnemonicToHdSeed(MNEMONIC), 'internal', 0, 'testnet').address,
@@ -95,7 +95,7 @@ test.afterAll(async () => {
   await backend?.close();
 });
 
-test('N1 · a wrong password neither opens the vault nor signs a payment', async () => {
+test('a wrong password neither opens the vault nor signs a payment', async () => {
   await popup.getByTestId('header-lock').click();
   await expect(popup.getByTestId('unlock-pw')).toBeVisible();
   await unlock(popup, 'not-the-password');
@@ -124,7 +124,7 @@ test('N1 · a wrong password neither opens the vault nor signs a payment', async
   await popup.getByTestId('send-edit').click();
 });
 
-test('N2 · destinations and amounts the wallet refuses before it touches a node', async () => {
+test('destinations and amounts the wallet refuses before it touches a node', async () => {
   const nodeCallsBefore = backend.node.calls.length;
 
   // The mainnet twin of the same key: right wallet, wrong chain.
@@ -150,7 +150,7 @@ test('N2 · destinations and amounts the wallet refuses before it touches a node
   expect(backend.node.calls.length).toBe(nodeCallsBefore);
 });
 
-test('N3 · a backend that misbehaves never costs the wallet the signed bytes', async () => {
+test('a backend that misbehaves never costs the wallet the signed bytes', async () => {
   // 1. The node accepts the transaction but answers with a different txid.
   backend.ledger.setFault('wrong-txid');
   await review(popup, DEST, '0.1');
@@ -160,7 +160,8 @@ test('N3 · a backend that misbehaves never costs the wallet the signed bytes', 
   await expect(popup.getByTestId('result-status')).toHaveText('Signed, not broadcast');
   await expect(popup.getByTestId('result-error')).toContainText('different transaction id');
   await expect(popup.getByTestId('copy-hex')).toBeVisible();
-  // smoke.spec.ts 6 asserts the success pill reads exactly "Broadcast via node".
+  // The send journey in smoke.spec.ts asserts the success pill reads exactly
+  // "Broadcast via node".
   // This is its failure twin, so it must not read that in any casing: two
   // outcomes that differ only by a capital letter would let the success
   // assertion pass on a send that never left the extension.
@@ -194,7 +195,7 @@ test('N3 · a backend that misbehaves never costs the wallet the signed bytes', 
   await expect(popup.getByTestId('activity-row').filter({ hasText: 'Not broadcast' })).toHaveCount(2);
 });
 
-test('N4 · a broken explorer fails loudly instead of reporting an empty wallet', async () => {
+test('a broken explorer fails loudly instead of reporting an empty wallet', async () => {
   await popup.getByTestId('tab-receive').click();
 
   // A hostile row: the right address, somebody else's scriptPubKey.
@@ -232,7 +233,7 @@ test('N4 · a broken explorer fails loudly instead of reporting an empty wallet'
   await expect(popup.getByTestId('balance')).toHaveText('1');
 });
 
-test('N5 · storage holds the sealed vault and the unbroadcast bytes, nothing else', async () => {
+test('storage holds the sealed vault and the unbroadcast bytes, nothing else', async () => {
   const storage = await device.storage();
   for (const key of ['vault', 'meta', 'backend', 'activity']) {
     expect(Object.keys(storage)).toContain(key);
@@ -293,7 +294,8 @@ test('N5 · storage holds the sealed vault and the unbroadcast bytes, nothing el
   // chrome.storage.local, password included, in the clear. That is the real
   // behaviour — asserted here with a node actually configured, so that changing
   // it is a decision somebody makes rather than an assertion quietly going
-  // vacuous. (N3 removed the node, which is why the blob above holds no
+  // vacuous. (The misbehaving-backend test above removed the node, which is
+  // why the blob above holds no
   // credential at all.)
   expect((storage.backend as { node: unknown }).node).toBeNull();
   await openSettings(popup);

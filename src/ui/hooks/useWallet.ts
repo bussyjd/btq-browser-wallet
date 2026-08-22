@@ -202,8 +202,17 @@ export function useWallet() {
     }
   }, [loadSites]);
 
-  const denyConnect = useCallback(async () => {
-    await rpc('wallet.denyConnect');
+  /**
+   * Cancel one waiting request — the one the screen is showing, named.
+   *
+   * A dedicated approval window is bound to its own origin by its URL, so the
+   * worker could infer the target there. The toolbar popup is not: it renders
+   * whichever request is still live, and with two sites waiting the worker
+   * refuses to guess (settling the wrong one would reject a site the user never
+   * looked at). Sending no origin from there made Cancel settle nothing at all.
+   */
+  const denyConnect = useCallback(async (origin?: string) => {
+    await rpc('wallet.denyConnect', origin ? { origin } : undefined);
     setPendingOrigin(null);
   }, []);
 

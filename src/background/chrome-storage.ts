@@ -11,6 +11,13 @@ const VAULT_KEY = 'vault';
 const META_KEY = 'meta';
 const ORIGINS_KEY = 'origins';
 const PENDING_KEY = 'pendingConnect';
+/**
+ * The list of parked approval requests the worker mirrors for the popup
+ * (`PROMPTS_KEY` in `background/index.ts`). Nothing here writes it, but a wipe
+ * has to remove it: leaving it behind means a fresh vault opens with a stale
+ * site still asking for an address.
+ */
+const PROMPTS_KEY = 'pendingConnects';
 const ACTIVITY_KEY = 'activity';
 
 export class ChromeWalletStorage implements WalletStorage {
@@ -71,6 +78,6 @@ export class ChromeWalletStorage implements WalletStorage {
   }
 
   async clear(): Promise<void> {
-    await chrome.storage.local.remove([VAULT_KEY, META_KEY, ORIGINS_KEY, PENDING_KEY, ACTIVITY_KEY]);
+    await chrome.storage.local.remove([VAULT_KEY, META_KEY, ORIGINS_KEY, PENDING_KEY, PROMPTS_KEY, ACTIVITY_KEY]);
   }
 }

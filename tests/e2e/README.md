@@ -71,15 +71,15 @@ instead). `tests/unit/vectors.test.ts` is what pins derivation to the vectors.
 
 | Case | The thing that would otherwise go unnoticed |
 |---|---|
-| `smoke.spec.ts` 8 pays external index **7** before Device B restores | a wallet that only ever looks at index 0/1 restores the same balance from a two-address scan |
-| `connect.spec.ts` 11b frames another origin, then forges a `MessageEvent` with `source: window` and a foreign `origin` | the content relay's two guards (`event.source`, `event.origin`) are enforced in the *shipped* bundle, not only in source |
-| `negative.spec.ts` N4 turns on `bogusBalance` | the wallet must sum `/utxos` and ignore the explorer's `balance` field, which is negative on the live indexer |
-| `negative.spec.ts` N5 decodes each stranded hex and re-runs the node's checks | "the bytes are kept" is worth nothing unless the kept bytes are still the transaction the user approved |
+| `smoke.spec.ts` pays external index **7** before Device B restores | a wallet that only ever looks at index 0/1 restores the same balance from a two-address scan |
+| `connect.spec.ts` frames another origin, then forges a `MessageEvent` with `source: window` and a foreign `origin` | the content relay's two guards (`event.source`, `event.origin`) are enforced in the *shipped* bundle, not only in source |
+| `negative.spec.ts` turns on `bogusBalance` | the wallet must sum `/utxos` and ignore the explorer's `balance` field, which is negative on the live indexer |
+| `negative.spec.ts` decodes each stranded hex and re-runs the node's checks | "the bytes are kept" is worth nothing unless the kept bytes are still the transaction the user approved |
 | `negative.spec.ts` sets `expectChangeScript` too | change derived from the wrong chain now fails in two files, not one |
 
 ### One thing this suite asserts *is* stored in the clear
 
-`N5` asserts that saving a node in Settings writes `{url, user, password}` to
+`negative.spec.ts` asserts that saving a node in Settings writes `{url, user, password}` to
 `chrome.storage.local` verbatim — because it does. The RPC credential belongs to
 a server the user runs; it is not sealed in the vault and is not treated as
 wallet key material. The assertion states the real behaviour on purpose, so that
@@ -115,7 +115,7 @@ npm run demo:video                  # the above + demo/btq-wallet-demo.mp4
 |---|---|
 | `smoke.spec.ts` | create, receive, lock/unlock, fund, configure a node, send, restore from seed, bad imports |
 | `mock-node.spec.ts` | the mock node's own txid check, on transactions built in that file — no browser |
-| `connect.spec.ts` | site-connect approval, per-origin scope, revoke, and what a page can reach |
+| `connect.spec.ts` | site-connect approval, per-origin scope, revoke, cancelling one of two prompts, and what a page can reach |
 | `negative.spec.ts` | wrong password, refused destinations and amounts, misbehaving backends, storage contents |
 | `global-setup.ts` | builds `dist/` before the run (`SKIP_BUILD=1` to reuse it) |
 | `regtest.spec.ts` | tier 2 |

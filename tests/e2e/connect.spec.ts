@@ -183,7 +183,7 @@ test.afterAll(async () => {
   await backend?.close();
 });
 
-test('10 · a site asks, the user approves, and only that origin is connected', async () => {
+test('a site asks, the user approves, and only that origin is connected', async () => {
   await expect(siteA.getByTestId('dapp-out')).toHaveText('provider: window.btq detected');
   expect(await siteA.evaluate(() => (window as any).btq.isBtq)).toBe(true);
 
@@ -219,7 +219,7 @@ test('10 · a site asks, the user approves, and only that origin is connected', 
   expect(await providerRequest(siteA, 'btq_accounts')).toEqual({ result: [] });
 });
 
-test('10b · two sites race for the prompt, and each window answers only its own', async () => {
+test('two sites race for the prompt, and each window answers only its own', async () => {
   // The attack this rules out: a page that fires `btq_requestAccounts` on a
   // timer, racing the user's click on a site they do trust. Before the window
   // carried its origin, whichever request landed last owned *every* open
@@ -266,7 +266,47 @@ test('10b · two sites race for the prompt, and each window answers only its own
   expect(await providerRequest(siteB, 'btq_accounts')).toEqual({ result: [] });
 });
 
-test('11 · a page cannot reach the wallet surface, or anything in storage', async () => {
+test("the toolbar popup's Cancel settles the request it is showing", async () => {
+  // The dedicated approval window carries its origin in its URL, so the worker
+  // can tell which request a Cancel there is answering. The toolbar popup does
+  // not: it renders whichever request is still live. When it sent no origin the
+  // worker had two waiting and refused to guess — settling the wrong one would
+  // reject a site the user never looked at — so the button settled nothing and
+  // the user was left clicking a Cancel that did not cancel.
+  const pendingA = await startRequestAccounts(siteA);
+  await approvalWindowFor(originA);
+  const pendingB = await startRequestAccounts(siteB);
+  await approvalWindowFor(originB);
+
+  const toolbar = await device.popup();
+  expect(toolbar.url()).not.toContain('connect=1'); // no origin in the URL to fall back on
+  await expect(toolbar.getByTestId('connect-origin')).toBeVisible({ timeout: 30_000 });
+  const shown = ((await toolbar.getByTestId('connect-origin').textContent()) ?? '').trim();
+  expect([originA, originB]).toContain(shown);
+
+  const [denied, untouched] = shown === originA ? [pendingA, pendingB] : [pendingB, pendingA];
+  await toolbar.getByTestId('connect-deny').click();
+  await expect
+    .poll(() => denied.settled(), {
+      timeout: 15_000,
+      message: `Cancel in the toolbar popup did not settle ${shown}`,
+    })
+    .toBe(true);
+  expect(await denied.result()).toMatchObject({ code: 4001 });
+  expect(await untouched.settled(), 'cancelling one prompt must not settle the other').toBe(false);
+
+  // The other site is still waiting, and its own window still answers for it.
+  const other = shown === originA ? originB : originA;
+  const otherWindow = await approvalWindowFor(other);
+  await otherWindow.getByTestId('connect-deny').click();
+  expect(await untouched.result()).toMatchObject({ code: 4001 });
+
+  await toolbar.close();
+  expect(await providerRequest(siteA, 'btq_accounts')).toEqual({ result: [] });
+  expect(await providerRequest(siteB, 'btq_accounts')).toEqual({ result: [] });
+});
+
+test('a page cannot reach the wallet surface, or anything in storage', async () => {
   // The relay allowlist: three page.* methods and nothing else.
   for (const method of ['wallet.unlock', 'wallet.status', 'wallet.receive', 'wallet.confirmSend']) {
     const answer = await relay(siteA, method, { password: PASSWORD });
@@ -313,7 +353,7 @@ test('11 · a page cannot reach the wallet surface, or anything in storage', asy
   expect(vault.length / 2).toBeLessThan(400);
 });
 
-test('11b · another origin cannot drive this page\'s relay, forged or framed', async () => {
+test('another origin cannot drive this page\'s relay, forged or framed', async () => {
   // (a) A frame on a *different* origin, inside a page the wallet trusts. The
   //     content scripts are top-frame only (no `all_frames` in the manifest),
   //     so the frame gets no provider and no relay of its own …
@@ -393,7 +433,7 @@ test('11b · another origin cannot drive this page\'s relay, forged or framed', 
   expect(forgedSeen).not.toContain(9201);
 });
 
-test('12 · a locked wallet answers a site with nothing, and opens no window', async () => {
+test('a locked wallet answers a site with nothing, and opens no window', async () => {
   // Reconnect first, so the empty answer below can only be the lock talking.
   const pending = await startRequestAccounts(siteA);
   const approval = await approvalWindowFor(originA);

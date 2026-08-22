@@ -241,7 +241,7 @@ export function App() {
               finishConnect();
             }}
             onDeny={async () => {
-              await wallet.denyConnect();
+              await wallet.denyConnect(connectOrigin);
               finishConnect();
             }}
           />

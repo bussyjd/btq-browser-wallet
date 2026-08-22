@@ -56,13 +56,18 @@ describe('persisted extension storage', () => {
     await keyring.importMnemonic(MNEMONIC, PASSWORD);
     await storage.saveOrigins(['https://dapp.example']);
     await storage.savePendingConnect({ origin: 'https://dapp.example' });
+    // The multi-prompt mirror the service worker writes (`pendingConnects`).
+    // The single-slot `pendingConnect` above is the record older builds wrote;
+    // a wipe that only knows the legacy name leaves the live one behind.
+    fake.store.set('pendingConnects', [{ origin: 'https://dapp.example', at: 1 }]);
     await storage.saveActivity([
       { txid: 'aa'.repeat(32), status: 'signed', destination: 'x', amountSats: '1', feeSats: '1', at: 1 },
     ]);
     await keyring.wipe('DELETE');
-    for (const key of ['vault', 'meta', 'origins', 'pendingConnect', 'activity']) {
+    for (const key of ['vault', 'meta', 'origins', 'pendingConnect', 'pendingConnects', 'activity']) {
       expect(fake.store.has(key), key).toBe(false);
     }
+    expect([...fake.store.keys()]).toEqual([]);
   });
 
   it('the node RPC password lives only under `backend`, never in the vault record', async () => {

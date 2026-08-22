@@ -3,7 +3,7 @@ dist/
 *.log
 .DS_Store
 
-# Take-home brief — keep out of the public repo
+# Reference PDFs read while building; not part of the source
 *.pdf
 
 # End-to-end suite (npm run test:e2e)

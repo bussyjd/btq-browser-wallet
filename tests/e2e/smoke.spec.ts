@@ -35,8 +35,8 @@ import { videoDir } from './fixtures/video.js';
 // The same encoder the popup renders its QR with, run here over the address the
 // test derived — so the QR is proved to encode *this* address and no other.
 import { encode as encodeQr } from 'uqr';
-// The wallet's own derivation, used the way the spec asks: to compute in the
-// test what the extension must show. It never touches the extension's runtime.
+// The wallet's own derivation, used here only to compute what the extension
+// must show. It never touches the extension's runtime.
 import { addressFromHdSeed } from '../../src/core/wallet/derive.js';
 import { mnemonicToHdSeed } from '../../src/core/crypto/mnemonic.js';
 import { publicKeyFromSeed } from '../../src/core/crypto/mldsa.js';
@@ -112,7 +112,7 @@ test('the test-side hashes are pinned to btq-core-verified golden vectors', () =
   expect(toHex(digest)).toBe(PINNED_SIGHASH);
 });
 
-test('1 · create a wallet: the phrase is shown once and never stored', async () => {
+test('create a wallet: the phrase is shown once and never stored', async () => {
   popup = await deviceA.popup();
   await expect(popup.getByTestId('welcome-create')).toBeVisible();
 
@@ -140,7 +140,7 @@ test('1 · create a wallet: the phrase is shown once and never stored', async ()
   expect(vault.length / 2).toBeLessThan(400);
 });
 
-test('2 · receive: the address on screen is the one the seed derives', async () => {
+test('receive: the address on screen is the one the seed derives', async () => {
   await waitForScan(popup);
   expect(await receiveAddress(popup)).toBe(A0);
   await expect(popup.getByTestId('receive-address')).toHaveText(A0);
@@ -165,7 +165,7 @@ test('2 · receive: the address on screen is the one the seed derives', async ()
   expect(await popup.evaluate(() => navigator.clipboard.readText())).toBe(A0);
 });
 
-test('3 · lock, refuse the wrong password, unlock', async () => {
+test('lock, refuse the wrong password, unlock', async () => {
   // A second popup page shares the service worker, so the vault stays open.
   const second = await deviceA.popup();
   await expect(second.getByTestId('balance')).toBeVisible();
@@ -186,7 +186,7 @@ test('3 · lock, refuse the wrong password, unlock', async () => {
   await waitForScan(popup);
 });
 
-test('4 · balance and history come from the explorer', async () => {
+test('balance and history come from the explorer', async () => {
   backend.ledger.fund(A0, 100_000_000n);
   backend.ledger.mine(1);
   await refresh(popup);
@@ -214,7 +214,7 @@ test('4 · balance and history come from the explorer', async () => {
   await expect(popup.getByTestId('receive-path')).toHaveText("m/0'/0'/1'");
 });
 
-test('5 · Settings: point the wallet at a BTQ Core node', async () => {
+test('Settings: point the wallet at a BTQ Core node', async () => {
   await openSettings(popup);
   await expect(popup.getByTestId('explorer-url')).toHaveValue(backend.origin);
   await popup.getByTestId('node-url').fill(backend.rpcUrl);
@@ -234,7 +234,7 @@ test('5 · Settings: point the wallet at a BTQ Core node', async () => {
   await waitForScan(popup);
 });
 
-test('6 · send: the node verifies what the extension signed', async () => {
+test('send: the node verifies what the extension signed', async () => {
   // The node insists the change output pays this wallet's own internal address.
   backend.node.expectChangeScript = scriptHexFor(C0);
   const nodeCallsBefore = backend.node.calls.length;
@@ -320,7 +320,7 @@ test('6 · send: the node verifies what the extension signed', async () => {
   await expect(sentRow).toContainText(/conf/i);
 });
 
-test('8 · Device B restores the same wallet from the phrase alone', async () => {
+test('Device B restores the same wallet from the phrase alone', async () => {
   test.setTimeout(180_000);
 
   // A gap the restore has to cross. Device A only ever showed A0 and A1, so a
@@ -364,7 +364,7 @@ test('8 · Device B restores the same wallet from the phrase alone', async () =>
       page.getByTestId('activity-row').filter({ hasText: `+${formatSats(30_000_000n)} tBTQ` }),
     ).toHaveCount(1);
 
-    // 9 · remove the wallet, then import a raw btq-core HD seed.
+    // Remove the wallet, so the next test can import a raw btq-core HD seed.
     await page.getByTestId('gear').click();
     await page.getByRole('button', { name: 'Remove wallet from this device' }).click();
     await page.getByTestId('wipe-input').fill('DELETE');
@@ -383,7 +383,7 @@ test('8 · Device B restores the same wallet from the phrase alone', async () =>
   }
 });
 
-test('9 · a bad seed never seals a vault', async () => {
+test('a bad seed never seals a vault', async () => {
   test.setTimeout(180_000);
   const deviceC = await launchDevice({
     name: 'device-c',
