@@ -74,11 +74,22 @@ you coins:
 - **btq-core cannot derive them.** It hardcodes the account level to `0'`
   (`scriptpubkeyman.cpp:1252`), so the seed that restores this wallet in Core restores
   Account 1 and nothing else. Accounts above the first are this wallet's own convention.
-- **A restore finds an extra account only if it has been paid.** Every account the
-  device knows about is scanned on every refresh, and a full rescan — or the first scan
-  after an import — probes two accounts past the last one it knows and adopts any whose
-  addresses have been used. An account that never received coins leaves nothing on any
-  chain to find: add it again, in order. Write down how many you made.
+- **Restoring the account list is manual, and exact.** The seed does not record how many
+  accounts you made, and this wallet does not ask a public explorer to guess: press
+  **Add account** the same number of times, in order, and the same seed re-derives the
+  same addresses, so the coins reappear. Write down how many you made.
+
+The wallet also keeps its refresh narrow. A refresh scans the account on screen — one
+20-address gap window per chain — and the other accounts are brought up to date when you
+open the switcher or press **Rescan all addresses**; each row there shows how old its
+balance is rather than presenting a stale number as current. On a four-account wallet
+with nothing to find, that took an idle refresh from 168 explorer requests to 42.
+Speculative account probing was removed outright: it could not find an account that had
+never been paid, and the price of trying was handing a public explorer a batch of
+addresses with no on-chain relationship to each other — which links them in that
+explorer's logs before any of them is used, and shows how far along each chain the wallet
+is. (It never exposed a public key: P2MR commits to a Merkle root, so the ML-DSA key
+stays hashed until the output is spent.) See [`docs/HD_IMPORT.md`](docs/HD_IMPORT.md).
 
 **A site connection is per account.** Approving a site approves it for the account that
 is active at that moment. Switch to another account and the site is told

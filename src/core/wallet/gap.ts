@@ -15,17 +15,15 @@ import type { Chain } from '../crypto/hd.js';
 export const GAP_LIMIT = 20;
 export const GAP_MAX_INDEX = 500;
 /**
- * Accounts probed past the highest one this device knows about, during a full
- * or first-ever scan. The address gap limit's shape one level up: stop after
- * this many consecutive accounts whose external chain has never been used.
+ * There is deliberately no account-level gap limit here.
  *
- * BIP44 stops at the first empty account; two is one step of slack for a user
- * who added an account and never funded it, at a cost of ~20 derivations per
- * probed account. It is a floor and not a guarantee, and the switcher says so:
- * an account that never received coins leaves no trace on any chain, so no
- * scan of any depth can rediscover it from the phrase alone.
+ * A scan walks the chains of accounts the user has actually created and nothing
+ * else. Probing accounts this device has never heard of would mean asking a
+ * public explorer about ~20 addresses per speculative account — addresses with
+ * no on-chain relationship to anything — to recover a piece of *metadata* (how
+ * many accounts exist) that the wallet should be telling the user to write
+ * down. See the note on `Keyring.scan`.
  */
-export const ACCOUNT_GAP_LIMIT = 2;
 /** Parallel address lookups: enough to hide latency, gentle on the public API. */
 export const SCAN_CONCURRENCY = 5;
 

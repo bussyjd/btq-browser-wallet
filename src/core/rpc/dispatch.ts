@@ -139,8 +139,13 @@ export async function dispatch(keyring: Keyring, request: RpcRequest, ctx: Dispa
       return keyring.receiveAddress();
     case 'wallet.scan': {
       if (!ctx.lookup) throw new WalletError('EXPLORER_UNAVAILABLE', 'Explorer is not configured.');
+      // Default 'active': a refresh asks the explorer about the account on
+      // screen and nothing else. The switcher passes 'all' when it opens, which
+      // is the one routine moment the other accounts' balances are on screen.
+      // Anything unrecognised is the default, never the wider scan.
       const scan = await keyring.scan(ctx.lookup, ctx.fetchUtxos, await tipOrNull(ctx), {
         full: p.full === true,
+        accounts: p.accounts === 'all' ? 'all' : 'active',
       });
       return {
         externalNext: scan.external.nextIndex,

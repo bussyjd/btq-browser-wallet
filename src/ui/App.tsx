@@ -281,7 +281,17 @@ export function App() {
       <Header
         networkLabel={`Testnet${wallet.backend?.nodeUrl ? ' · node' : ''}`}
         accountName={showHeaderTools ? activeAccountName : undefined}
-        onOpenAccounts={screen === 'home' ? () => setAccountsOpen(true) : undefined}
+        onOpenAccounts={
+          screen === 'home'
+            ? () => {
+                setAccountsOpen(true);
+                // Opening the panel is what refreshes the accounts that are not
+                // active: a routine refresh scans only the account on screen,
+                // so this is the moment the other rows stop being historical.
+                void wallet.refreshAccounts();
+              }
+            : undefined
+        }
         onBack={screen === 'settings' ? () => setScreen('home') : undefined}
         onRefresh={showHeaderTools ? () => void wallet.refresh() : undefined}
         refreshing={wallet.scanning}
@@ -344,6 +354,7 @@ export function App() {
         <AccountSwitcher
           accounts={wallet.status?.accounts ?? []}
           activeAccount={wallet.status?.activeAccount ?? 0}
+          checking={wallet.accountsScanning}
           onSwitch={async (index) => {
             setSendResult(null);
             await wallet.switchAccount(index);

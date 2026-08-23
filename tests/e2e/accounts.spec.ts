@@ -94,6 +94,15 @@ async function openSwitcher(page: Page): Promise<void> {
     await page.getByTestId('account-switcher').click();
   }
   await expect(page.getByTestId('account-list')).toBeVisible();
+  // Opening the panel is what refreshes the accounts that are not active — a
+  // routine refresh scans only the account on screen. Wait for that pass to
+  // land: any RPC that comes back LOCKED closes the panel and moves the popup
+  // to the unlock screen, so a click issued while it is still in flight is a
+  // click racing an answer, not a test of anything.
+  await expect(page.locator('[data-testid^="account-age-"]').filter({ hasText: 'Checking' })).toHaveCount(
+    0,
+    { timeout: 60_000 },
+  );
 }
 
 async function closeSwitcher(page: Page): Promise<void> {
@@ -133,12 +142,14 @@ test('Add account moves the wallet to m/1’/0’/0’, and switching back retur
   await expect(popup.getByTestId('account-row-0')).toContainText('Account 1');
 
   // The honest sentence, at the point the account is created — btq-core cannot
-  // derive this account from the seed, and a restore finds it only if it has
-  // been paid.
+  // derive this account from the seed, and the wallet will not go asking a
+  // public explorer how many accounts there were: the user writes that down and
+  // presses Add account again.
   const note = popup.getByTestId('account-note');
   await expect(note).toBeVisible();
   await expect(note).toContainText('btq-core');
-  await expect(note).toContainText('received coins');
+  await expect(note).toContainText('Add account');
+  await expect(note).toContainText('Write down how many you made');
 
   await popup.getByTestId('account-add').click();
   await expectAddress(popup, A1);
@@ -147,6 +158,10 @@ test('Add account moves the wallet to m/1’/0’/0’, and switching back retur
 
   await openSwitcher(popup);
   await expect(popup.getByTestId('account-row-1')).toBeVisible();
+  // A routine refresh scans the active account only, so Account 1's balance is
+  // whatever the last pass that included it found — and the row says so rather
+  // than letting an old number read as current.
+  await expect(popup.getByTestId('account-age-0')).toBeVisible();
   await popup.getByTestId('account-row-0').click();
   await expectAddress(popup, A0);
   await expect(popup.getByTestId('account-switcher')).toContainText('Account 1');

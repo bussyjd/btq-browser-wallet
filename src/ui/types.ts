@@ -65,6 +65,13 @@ export interface AccountInfo {
   index: number;
   name: string;
   lastBalanceSats: string;
+  /**
+   * ms epoch the balance was last read from the chain; null for never, absent
+   * from a worker older than this popup. Only the active account is refreshed
+   * by a routine scan, so the switcher renders this age next to every other
+   * row rather than presenting an old number as a current one.
+   */
+  balanceAt?: number | null;
   address: string | null;
 }
 

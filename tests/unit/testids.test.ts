@@ -107,6 +107,9 @@ const REQUIRED = [
   // The sentence that says extra accounts are this wallet's own convention,
   // rendered where the account is created. tests/e2e/accounts.spec.ts reads it.
   'account-note',
+  // How old a non-active account's balance is. A routine refresh scans only the
+  // account on screen, so every other row has to date the number it shows.
+  'account-age-0',
   // Which account a site's grant is for — a connection is per (origin,
   // account), and the Settings row has to say which one it is revoking.
   'site-account',
@@ -145,6 +148,7 @@ function renderedTestIds(): Set<string> {
     else if (tpl.startsWith('tab-')) for (const t of ['receive', 'send', 'activity']) ids.add(`tab-${t}`);
     else if (tpl.startsWith('fee-')) for (const f of ['economy', 'normal', 'priority']) ids.add(`fee-${f}`);
     else if (tpl.startsWith('account-row-')) for (let i = 0; i < 20; i++) ids.add(`account-row-${i}`);
+    else if (tpl.startsWith('account-age-')) for (let i = 0; i < 20; i++) ids.add(`account-age-${i}`);
     else ids.add(tpl);
   }
   // InlineError renders `error` unless a caller overrides testId.

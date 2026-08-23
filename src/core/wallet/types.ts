@@ -5,6 +5,13 @@ export interface AccountSummary {
   index: number;
   name: string;
   lastBalanceSats: string;
+  /**
+   * ms epoch the balance above was read from the chain, or null for never.
+   * A routine refresh scans only the active account, so every other row in the
+   * switcher is showing a number from some earlier pass — the UI prints this
+   * age beside it instead of letting a stale figure read as current.
+   */
+  balanceAt: number | null;
   address: string | null;
 }
 

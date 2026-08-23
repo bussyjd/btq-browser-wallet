@@ -28,7 +28,7 @@ import { BroadcastError, WalletError, type BroadcastVia } from './errors.js';
 import { deriveKeySeed, masterFromSeed } from '../crypto/hd.js';
 import { scriptForAddress } from '../script/address.js';
 import { addressFromHdSeed, type DerivedAddress } from './derive.js';
-import { ACCOUNT_GAP_LIMIT, scanChain, type AddressLookup, type ChainScan } from './gap.js';
+import { scanChain, type AddressLookup, type ChainScan } from './gap.js';
 import {
   MAX_ACCOUNTS,
   ACCOUNT_NAME_MAX,
@@ -117,6 +117,40 @@ export interface ConfirmSendResult extends SendPreview {
 export const NO_PHRASE_MESSAGE =
   'This wallet was imported from a raw 32-byte seed. It has no recovery phrase — the seed hex you imported is its backup.';
 
+/**
+ * How wide a scan reaches. `'active'` is the routine refresh — the account the
+ * user is looking at; `'all'` is every account the user has *created*, which is
+ * what the switcher asks for when it opens and what a full rescan implies.
+ * There is no third value: a scan never reaches an account that does not exist
+ * on this device.
+ */
+export type ScanScope = 'active' | 'all';
+
+/**
+ * The per-account fields a scan is allowed to write. Deliberately a type and
+ * not `Partial<AccountRecord>`: `index`, `name` and the account's membership of
+ * the list are the user's, and a scan that could name them is a scan that can
+ * silently undo a rename. `full` records which kind of pass produced them, so
+ * the merge knows whether it may move a cursor backwards.
+ */
+interface ScanCursors {
+  full: boolean;
+  externalNext: number;
+  internalNext: number;
+  usedExternal: number;
+  usedInternal: number;
+  scannedExternal: number;
+  scannedInternal: number;
+  address: string | null;
+}
+
+/** The balance half, committed after the UTXO sweep, with its own timestamp. */
+interface ScanBalance {
+  lastBalanceSats: string;
+  confirmedBalanceSats: string;
+  balanceAt: number;
+}
+
 export class Keyring {
   private hdSeed: Uint8Array | null = null;
   /**
@@ -146,6 +180,16 @@ export class Keyring {
    * switch must not retarget a send the user already reviewed.
    */
   private activeIndex = 0;
+  /**
+   * Serialises every read-modify-write of `WalletMeta` (`updateMeta`). Storage
+   * is async, so two handlers that each load, mutate and save can interleave
+   * and the second write silently discards the first — which is how a scan in
+   * flight used to revert an account switch the user had already made, leaving
+   * the header on one account and the next send debiting another. Chaining the
+   * critical sections is what makes each one atomic; scoping the scan only made
+   * the window shorter.
+   */
+  private metaLock: Promise<unknown> = Promise.resolve();
   private readonly network: BtqNetwork;
   private readonly lockAfterMs: number;
   private readonly now: () => number;
@@ -211,6 +255,7 @@ export class Keyring {
               index: a.index,
               name: a.name,
               lastBalanceSats: a.lastBalanceSats,
+              balanceAt: a.balanceAt,
               address: a.address,
             })),
     };
@@ -331,15 +376,21 @@ export class Keyring {
 
   async receiveAddress(): Promise<DerivedAddress> {
     this.requireUnlocked();
-    const meta = await this.walletMeta();
-    const rec = activeRecord(meta);
-    const derived = this.receiveAt(rec.externalNext, rec.index);
-    if (rec.address !== derived.address) {
-      rec.address = derived.address;
-      mirrorActive(meta);
-      await this.storage.saveMeta(meta);
-    }
-    return derived;
+    // The cached address is only ever a mirror of the cursor, so the write is
+    // skipped when it already agrees — but the read and the write are still one
+    // critical section, or a concurrent switch lands between them and this
+    // caches the wrong account's address.
+    return this.withMetaLock(async () => {
+      const meta = await this.walletMeta();
+      const rec = activeRecord(meta);
+      const derived = this.receiveAt(rec.externalNext, rec.index);
+      if (rec.address !== derived.address) {
+        rec.address = derived.address;
+        mirrorActive(meta);
+        await this.storage.saveMeta(meta);
+      }
+      return derived;
+    });
   }
 
   /**
@@ -354,24 +405,24 @@ export class Keyring {
 
   async createAccount(): Promise<{ index: number; name: string; address: string }> {
     this.requireUnlocked();
-    const meta = await this.walletMeta();
-    if (meta.accounts.length >= MAX_ACCOUNTS) {
-      throw new WalletError('BAD_PARAMS', `This wallet holds at most ${MAX_ACCOUNTS} accounts.`);
-    }
-    const nextIndex = Math.max(...meta.accounts.map((a) => a.index)) + 1;
-    if (nextIndex >= MAX_ACCOUNTS) {
-      throw new WalletError('BAD_PARAMS', `This wallet holds at most ${MAX_ACCOUNTS} accounts.`);
-    }
-    const rec = emptyAccount(nextIndex);
-    rec.address = this.addressAt('external', 0, rec.index).address;
-    meta.accounts.push(rec);
-    meta.accounts.sort((a, b) => a.index - b.index);
-    meta.activeAccount = rec.index;
-    this.activeIndex = rec.index;
-    mirrorActive(meta);
-    await this.storage.saveMeta(meta);
+    const created = await this.updateMeta((meta) => {
+      if (meta.accounts.length >= MAX_ACCOUNTS) {
+        throw new WalletError('BAD_PARAMS', `This wallet holds at most ${MAX_ACCOUNTS} accounts.`);
+      }
+      const nextIndex = Math.max(...meta.accounts.map((a) => a.index)) + 1;
+      if (nextIndex >= MAX_ACCOUNTS) {
+        throw new WalletError('BAD_PARAMS', `This wallet holds at most ${MAX_ACCOUNTS} accounts.`);
+      }
+      const rec = emptyAccount(nextIndex);
+      rec.address = this.addressAt('external', 0, rec.index).address;
+      meta.accounts.push(rec);
+      meta.accounts.sort((a, b) => a.index - b.index);
+      meta.activeAccount = rec.index;
+      this.activeIndex = rec.index;
+      return { index: rec.index, name: rec.name, address: rec.address };
+    });
     this.touch();
-    return { index: rec.index, name: rec.name, address: rec.address };
+    return created;
   }
 
   async switchAccount(index: number): Promise<{ index: number; name: string; address: string }> {
@@ -379,16 +430,16 @@ export class Keyring {
     if (!Number.isInteger(index) || index < 0 || index >= MAX_ACCOUNTS) {
       throw new WalletError('BAD_PARAMS', 'Unknown account.');
     }
-    const meta = await this.walletMeta();
-    const rec = meta.accounts.find((a) => a.index === index);
-    if (!rec) throw new WalletError('BAD_PARAMS', 'Unknown account.');
-    meta.activeAccount = rec.index;
-    this.activeIndex = rec.index;
-    if (!rec.address) rec.address = this.addressAt('external', rec.externalNext, rec.index).address;
-    mirrorActive(meta);
-    await this.storage.saveMeta(meta);
+    const switched = await this.updateMeta((meta) => {
+      const rec = meta.accounts.find((a) => a.index === index);
+      if (!rec) throw new WalletError('BAD_PARAMS', 'Unknown account.');
+      meta.activeAccount = rec.index;
+      this.activeIndex = rec.index;
+      if (!rec.address) rec.address = this.addressAt('external', rec.externalNext, rec.index).address;
+      return { index: rec.index, name: rec.name, address: rec.address };
+    });
     this.touch();
-    return { index: rec.index, name: rec.name, address: rec.address };
+    return switched;
   }
 
   async renameAccount(index: number, name: string): Promise<{ index: number; name: string }> {
@@ -400,13 +451,14 @@ export class Keyring {
     if (trimmed.length === 0) {
       throw new WalletError('BAD_PARAMS', `Name must be 1–${ACCOUNT_NAME_MAX} characters.`);
     }
-    const meta = await this.walletMeta();
-    const rec = meta.accounts.find((a) => a.index === index);
-    if (!rec) throw new WalletError('BAD_PARAMS', 'Unknown account.');
-    rec.name = trimmed;
-    await this.storage.saveMeta(meta);
+    const renamed = await this.updateMeta((meta) => {
+      const rec = meta.accounts.find((a) => a.index === index);
+      if (!rec) throw new WalletError('BAD_PARAMS', 'Unknown account.');
+      rec.name = trimmed;
+      return { index: rec.index, name: rec.name };
+    });
     this.touch();
-    return { index: rec.index, name: rec.name };
+    return renamed;
   }
 
   /**
@@ -752,13 +804,12 @@ export class Keyring {
     const prev = await this.storage.loadActivity();
     await this.storage.saveActivity([item, ...prev].slice(0, 50));
     if (plan.change > 0n) {
-      const meta = await this.walletMeta();
-      const rec = meta.accounts.find((a) => a.index === plan.account);
-      if (rec) {
-        rec.internalNext = Math.max(rec.internalNext, plan.changeIndex + 1);
-        mirrorActive(meta);
-        await this.storage.saveMeta(meta);
-      }
+      await this.updateMeta((meta) => {
+        const rec = meta.accounts.find((a) => a.index === plan.account);
+        // The change cursor belongs to the account that produced the send, not
+        // to whichever one is active by the time the broadcast comes back.
+        if (rec) rec.internalNext = Math.max(rec.internalNext, plan.changeIndex + 1);
+      });
     }
     this.touch();
     return { ...preview, broadcastStatus, broadcastError, broadcastVia };
@@ -968,41 +1019,29 @@ export class Keyring {
   }
 
   /**
-   * Has this account's external chain ever been used? The BIP44 question, asked
-   * of an account this device does not know about yet.
-   *
-   * External only, and deliberately: a change address is never published, so an
-   * account with internal history and no external history cannot exist. Halving
-   * the probe halves what a restore pays for accounts that were never made.
-   */
-  private async accountIsUsed(index: number, lookup: AddressLookup): Promise<boolean> {
-    const scan = await scanChain({
-      chain: 'external',
-      addressAt: (i) => this.addressAt('external', i, index).address,
-      lookup,
-      startIndex: 0,
-      lastUsedIndex: -1,
-    });
-    return scan.used.length > 0;
-  }
-
-  /**
    * Bring the wallet up to date with the chain.
    *
-   * **Every known account is walked, not just the active one.** Restoring this
-   * wallet from its phrase re-derives account 0 and nothing else unless the
-   * scan goes looking: a wallet whose coins sit on Account 3 would otherwise
-   * come back empty and stay empty, because the switcher is built from the
-   * account list a scan of one account never grows.
+   * **A routine refresh walks the active account only.** Walking every known
+   * account on every refresh cost one gap window per chain per account — ~40
+   * address lookups each — sent to a public explorer whether or not anything
+   * had changed. Other accounts are brought up to date when the user opens the
+   * switcher (`accounts: 'all'`) and on the explicit full rescan, and until then
+   * the switcher prints each balance next to how old it is rather than passing
+   * a stale number off as current.
    *
-   * A full rescan — and the first scan a restored wallet ever runs — also
-   * probes `ACCOUNT_GAP_LIMIT` accounts past the highest one it knows, and
-   * adopts any whose external chain has been used. That is the only way a fresh
-   * device learns that accounts above the first ever existed; the seed itself
-   * does not say, and neither does btq-core, which hardcodes `0'`
-   * (`scriptpubkeyman.cpp:1252`). **An account that never received coins cannot
-   * be rediscovered this way at all** — there is nothing on any chain to find —
-   * which is why the switcher says so at the point the account is created.
+   * **Nothing here probes an account the user has not created.** An earlier
+   * build walked `ACCOUNT_GAP_LIMIT` accounts past the highest one it knew, to
+   * try to rediscover accounts after a restore. That is a category error: the
+   * account list is *metadata*, not key material, and it was being recovered by
+   * interrogating a third party. It could not work either — its own note admits
+   * an account that never received coins leaves nothing on any chain to find —
+   * and the price of the attempt was ~40 addresses of accounts that may never
+   * have existed, handed to a public explorer, where the query itself binds
+   * unused addresses of one wallet together in that explorer's logs before any
+   * of them is used, and discloses how far along each chain the wallet is. The
+   * recovery path that does work is deterministic and needs no network at all:
+   * press **Add account**, and the same seed re-derives the same addresses, so
+   * the coins reappear (`tests/security/scan-privacy.test.ts` pins it).
    *
    * The reported balance is the sum of `/utxos` over the derived addresses —
    * never the explorer's own `balance` field, which the live indexer reports as
@@ -1012,7 +1051,7 @@ export class Keyring {
     lookup: AddressLookup,
     fetchUtxos?: FetchUtxos,
     tip?: ChainTip | null,
-    opts: { full?: boolean } = {},
+    opts: { full?: boolean; accounts?: ScanScope } = {},
   ): Promise<{
     external: ChainScan;
     internal: ChainScan;
@@ -1022,86 +1061,142 @@ export class Keyring {
     confirmedBalanceSats: bigint;
     tipHeight: number | null;
     lastScanAt: number;
-    /** Accounts this pass found on chain that the device did not know about. */
-    discoveredAccounts: number[];
+    /** Accounts this pass actually queried the explorer about. */
+    scannedAccounts: number[];
   }> {
     this.requireUnlocked();
-    const meta = await this.walletMeta();
-    const rec = activeRecord(meta);
     const full = opts.full === true;
-    // A restore's very first scan is a restore scan even though the user never
-    // pressed "Rescan": it is the pass that has to find whatever the seed was
-    // carrying. After that, discovery costs ~20 derivations per probed account
-    // and is left to the explicit full rescan.
-    const discover = full || meta.lastScanAt === null;
+    // "Re-read everything" implies every account; the switcher asks for every
+    // account without paying the from-index-0 cost.
+    const scope: ScanScope = full ? 'all' : (opts.accounts ?? 'active');
+
+    // This snapshot decides *what* to scan and nothing more. Not one field of
+    // it is written back: everything the pass learns is merged into a freshly
+    // loaded record at commit time, so a switch, an "Add account" or a rename
+    // that lands while the lookups are in flight survives (see `commitScan`).
+    const before = await this.walletMeta();
+    const activeIndex = before.activeAccount;
+    const targets = before.accounts
+      .filter((a) => scope === 'all' || a.index === activeIndex)
+      .sort((a, b) => a.index - b.index);
 
     let external: ChainScan | null = null;
     let internal: ChainScan | null = null;
-    // Ascending, so a lower account is always settled before a higher one and
-    // the discovery probe below starts from a list that is fully up to date.
-    for (const record of [...meta.accounts].sort((a, b) => a.index - b.index)) {
-      const scanned = await this.scanAccount(record, lookup, full);
-      if (record.index === rec.index) {
+    const cursors = new Map<number, ScanCursors>();
+    for (const record of targets) {
+      // A copy, because `scanAccount` mutates what it is handed and the
+      // snapshot has to stay a snapshot.
+      const working: AccountRecord = { ...record };
+      const scanned = await this.scanAccount(working, lookup, full);
+      cursors.set(working.index, {
+        full,
+        externalNext: working.externalNext,
+        internalNext: working.internalNext,
+        usedExternal: working.usedExternal,
+        usedInternal: working.usedInternal,
+        scannedExternal: working.scannedExternal,
+        scannedInternal: working.scannedInternal,
+        address: working.address,
+      });
+      if (working.index === activeIndex) {
         external = scanned.external;
         internal = scanned.internal;
       }
     }
 
-    const discoveredAccounts: number[] = [];
-    if (discover) {
-      let empty = 0;
-      let next = Math.max(...meta.accounts.map((a) => a.index)) + 1;
-      while (next < MAX_ACCOUNTS && empty < ACCOUNT_GAP_LIMIT && meta.accounts.length < MAX_ACCOUNTS) {
-        if (await this.accountIsUsed(next, lookup)) {
-          const found = emptyAccount(next);
-          await this.scanAccount(found, lookup, true);
-          meta.accounts.push(found);
-          meta.accounts.sort((a, b) => a.index - b.index);
-          discoveredAccounts.push(next);
-          empty = 0;
-        } else {
-          empty += 1;
-        }
-        next += 1;
-      }
-    }
+    const lastScanAt = this.now();
+    // Cursors first, so the UTXO sweep below covers every address this walk
+    // just opened up: `gatherUtxos` reads the *stored* cursor, not this one.
+    let meta = await this.commitScan(cursors, new Map(), { tipHeight: tip?.height ?? null, lastScanAt });
 
-    meta.tipHeight = tip?.height ?? meta.tipHeight;
-    meta.lastScanAt = this.now();
-    mirrorActive(meta);
-    // Persist the new cursors first so the UTXO sweep below covers every
-    // address — including a discovered account's, which `gatherUtxos` refuses
-    // to walk until the account is in the stored list.
-    await this.storage.saveMeta(meta);
-
-    let totalBalanceSats = BigInt(rec.lastBalanceSats || '0');
-    let confirmedBalanceSats = BigInt(rec.confirmedBalanceSats || '0');
+    const settled = meta.accounts.find((a) => a.index === activeIndex);
+    let totalBalanceSats = BigInt(settled?.lastBalanceSats ?? '0');
+    let confirmedBalanceSats = BigInt(settled?.confirmedBalanceSats ?? '0');
     if (fetchUtxos) {
-      for (const record of meta.accounts) {
-        const b = await this.balances(fetchUtxos, record.index);
-        record.lastBalanceSats = b.totalSats.toString();
-        record.confirmedBalanceSats = b.confirmedSats.toString();
-        if (record.index === rec.index) {
+      const balances = new Map<number, ScanBalance>();
+      for (const index of cursors.keys()) {
+        // Nothing here creates an account, so an index that is no longer in the
+        // stored list is simply skipped rather than resurrected.
+        if (!meta.accounts.some((a) => a.index === index)) continue;
+        const b = await this.balances(fetchUtxos, index);
+        balances.set(index, {
+          lastBalanceSats: b.totalSats.toString(),
+          confirmedBalanceSats: b.confirmedSats.toString(),
+          balanceAt: this.now(),
+        });
+        if (index === activeIndex) {
           totalBalanceSats = b.totalSats;
           confirmedBalanceSats = b.confirmedSats;
         }
       }
-      mirrorActive(meta);
-      await this.storage.saveMeta(meta);
+      meta = await this.commitScan(new Map(), balances, {});
     }
 
     this.touch();
+    const rec = meta.accounts.find((a) => a.index === activeIndex);
     return {
-      external: external ?? emptyChainScan('external', rec.externalNext),
-      internal: internal ?? emptyChainScan('internal', rec.internalNext),
-      usedExternal: rec.usedExternal,
-      usedInternal: rec.usedInternal,
+      external: external ?? emptyChainScan('external', rec?.externalNext ?? 0),
+      internal: internal ?? emptyChainScan('internal', rec?.internalNext ?? 0),
+      usedExternal: rec?.usedExternal ?? 0,
+      usedInternal: rec?.usedInternal ?? 0,
       totalBalanceSats,
       confirmedBalanceSats,
       tipHeight: meta.tipHeight,
-      lastScanAt: meta.lastScanAt ?? this.now(),
-      discoveredAccounts,
+      lastScanAt,
+      scannedAccounts: [...cursors.keys()],
     };
+  }
+
+  /**
+   * Write back what a scan learned — and only what a scan learned.
+   *
+   * A scan owns facts about the chain: per-account gap cursors, used counts,
+   * the cached receive address that follows the cursor, the balance and the
+   * moment it was read, plus the tip height and the time of the pass. It owns
+   * none of the user's choices — which accounts exist, which one is active,
+   * what they are called — and none of those is assignable below, so a scan
+   * that began before a switch, an "Add account" or a rename cannot undo any of
+   * them. The record is re-read *inside the lock* and the scan's fields are laid
+   * on top of whatever the user did in the meantime; an index that is no longer
+   * in the list is skipped, because a scan never creates an account.
+   */
+  private async commitScan(
+    cursors: Map<number, ScanCursors>,
+    balances: Map<number, ScanBalance>,
+    top: { tipHeight?: number | null; lastScanAt?: number },
+  ): Promise<WalletMeta> {
+    return this.updateMeta((meta) => {
+      for (const [index, c] of cursors) {
+        const rec = meta.accounts.find((a) => a.index === index);
+        if (!rec) continue;
+        // A send that landed while the lookups were in flight has already moved
+        // the change cursor past anything this pass saw; an incremental scan
+        // must never walk a cursor backwards. A full rescan is the one pass
+        // that is authoritative about where the chain really stops.
+        const keep = (stored: number, scanned: number) => (c.full ? scanned : Math.max(stored, scanned));
+        rec.externalNext = keep(rec.externalNext, c.externalNext);
+        rec.internalNext = keep(rec.internalNext, c.internalNext);
+        rec.usedExternal = keep(rec.usedExternal, c.usedExternal);
+        rec.usedInternal = keep(rec.usedInternal, c.usedInternal);
+        rec.scannedExternal = keep(rec.scannedExternal, c.scannedExternal);
+        rec.scannedInternal = keep(rec.scannedInternal, c.scannedInternal);
+        // The cached address is the address *at* the cursor. If the merge kept
+        // a cursor this pass never reached, the address it derived belongs to a
+        // different index — leave the stored one, which `receiveAddress` will
+        // re-derive under the same lock on its next call.
+        if (rec.externalNext === c.externalNext) rec.address = c.address;
+      }
+      for (const [index, b] of balances) {
+        const rec = meta.accounts.find((a) => a.index === index);
+        if (!rec) continue;
+        rec.lastBalanceSats = b.lastBalanceSats;
+        rec.confirmedBalanceSats = b.confirmedBalanceSats;
+        rec.balanceAt = b.balanceAt;
+      }
+      if (top.tipHeight != null) meta.tipHeight = top.tipHeight;
+      if (top.lastScanAt != null) meta.lastScanAt = top.lastScanAt;
+      return meta;
+    });
   }
 
   maybeAutoLock(): void {
@@ -1144,6 +1239,53 @@ export class Keyring {
     const meta = mirrorActive(ensureAccounts(loaded ?? emptyMeta(this.network, 'bip39')));
     this.activeIndex = meta.activeAccount;
     return meta;
+  }
+
+  /**
+   * Run one critical section against `WalletMeta` with nothing else touching it
+   * in between.
+   *
+   * Every mutation of the stored metadata is a load-mutate-save across at least
+   * two awaits, and the runtime is free to run another handler in the gap. Two
+   * such sequences interleaved lose one of the two writes entirely: the loser is
+   * whichever loaded first, and its edit is gone with no error anywhere. The
+   * losses that mattered were the user's own — a switch, a new account, a rename
+   * — thrown away by a scan that had loaded before the click.
+   *
+   * The body must not do network I/O. It holds the lock for its whole duration,
+   * and an explorer call inside it would park every other meta write behind a
+   * request that can take seconds or hang: a scan does its lookups first and
+   * only then takes the lock to commit what it found.
+   */
+  private async withMetaLock<T>(body: () => Promise<T>): Promise<T> {
+    // `catch(() => undefined)` and not the raw promise: a rejected predecessor
+    // must not reject its successor, or one failed save would wedge the chain.
+    const previous = this.metaLock.then(
+      () => undefined,
+      () => undefined,
+    );
+    const mine = previous.then(body);
+    this.metaLock = mine.then(
+      () => undefined,
+      () => undefined,
+    );
+    return mine;
+  }
+
+  /**
+   * Load the metadata, apply `edit`, write it back — atomically. `edit` is
+   * synchronous by type, which is what keeps the lock short and makes it
+   * impossible to await an explorer inside it.
+   */
+  private async updateMeta<T>(edit: (meta: WalletMeta) => T): Promise<T> {
+    return this.withMetaLock(async () => {
+      const meta = await this.walletMeta();
+      const value = edit(meta);
+      mirrorActive(meta);
+      this.activeIndex = meta.activeAccount;
+      await this.storage.saveMeta(meta);
+      return value;
+    });
   }
 
   /**

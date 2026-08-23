@@ -22,6 +22,14 @@ export interface AccountRecord {
   confirmedBalanceSats: string;
   scannedExternal: number;
   scannedInternal: number;
+  /**
+   * ms epoch at which `lastBalanceSats` was last computed from the chain, or
+   * null for "never checked". Per account, because a routine refresh now scans
+   * only the active one: without this the switcher would print a number from
+   * some earlier session next to a name and let the user believe it is current.
+   * The switcher renders the age beside the balance rather than hiding it.
+   */
+  balanceAt: number | null;
   /** Cached current receive address. Public; display only. */
   address: string | null;
 }
@@ -105,6 +113,7 @@ export function emptyAccount(index: number): AccountRecord {
     confirmedBalanceSats: '0',
     scannedExternal: -1,
     scannedInternal: -1,
+    balanceAt: null,
     address: null,
   };
 }
@@ -144,6 +153,7 @@ export function ensureAccounts(meta: WalletMeta): WalletMeta {
     rec.confirmedBalanceSats = meta.confirmedBalanceSats;
     rec.scannedExternal = meta.scannedExternal;
     rec.scannedInternal = meta.scannedInternal;
+    rec.balanceAt = meta.lastScanAt;
     meta.accounts = [rec];
     meta.activeAccount = 0;
   }
@@ -216,6 +226,11 @@ export function parseAccountName(v: unknown, fallback: string): string {
   return [...name].slice(0, ACCOUNT_NAME_MAX).join('');
 }
 
+/** ms epoch, or null for "never". Anything else is not a time this UI can print. */
+function msEpoch(v: unknown): number | null {
+  return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : null;
+}
+
 function parseCachedAddress(v: unknown): string | null {
   return typeof v === 'string' && v.length >= 20 && v.length <= 128 ? v : null;
 }
@@ -235,6 +250,7 @@ function parseAccountRecord(v: unknown): AccountRecord | null {
     confirmedBalanceSats: satsString(v.confirmedBalanceSats),
     scannedExternal: counter(v.scannedExternal, -1),
     scannedInternal: counter(v.scannedInternal, -1),
+    balanceAt: msEpoch(v.balanceAt),
     address: parseCachedAddress(v.address),
   };
 }
@@ -269,6 +285,10 @@ export function parseMeta(v: unknown): WalletMeta | null {
   mirrored.confirmedBalanceSats = satsString(v.confirmedBalanceSats);
   mirrored.scannedExternal = counter(v.scannedExternal, -1);
   mirrored.scannedInternal = counter(v.scannedInternal, -1);
+  // The mirror is the active account's balance and `lastScanAt` is when the
+  // scan that produced it ran, so that is honestly its age. A meta written
+  // before this field existed still gets a truthful timestamp this way.
+  mirrored.balanceAt = msEpoch(v.lastScanAt);
   mirrored.address = parseCachedAddress(v.address);
 
   const accounts: AccountRecord[] = [];
@@ -315,7 +335,7 @@ export function parseMeta(v: unknown): WalletMeta | null {
     scannedInternal: mirrored.scannedInternal,
     tipHeight:
       typeof v.tipHeight === 'number' && Number.isInteger(v.tipHeight) && v.tipHeight >= 0 ? v.tipHeight : null,
-    lastScanAt: typeof v.lastScanAt === 'number' && Number.isFinite(v.lastScanAt) ? v.lastScanAt : null,
+    lastScanAt: msEpoch(v.lastScanAt),
     accounts,
     activeAccount,
   });

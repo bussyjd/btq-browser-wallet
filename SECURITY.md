@@ -91,11 +91,23 @@ best-effort. A vulnerability in btq-core itself belongs with
   first request. Settings lists one row per (site, account) and revokes that row; the
   page's own `disconnect` drops every account it held.
 - **Extra accounts are this wallet's convention, and cannot be re-derived by btq-core**
-  (`scriptpubkeyman.cpp:1252` hardcodes `0'`). A restore rediscovers one only by finding
-  its coins: every known account is scanned, and a full or first scan probes two accounts
-  past the last one known. An account that never received coins cannot be recovered from
-  the phrase alone — the switcher and `docs/HD_IMPORT.md` say so at the point the account
-  is created. This is a recovery limit, not a confidentiality one.
+  (`scriptpubkeyman.cpp:1252` hardcodes `0'`). How many accounts exist is *metadata*, not
+  key material: the phrase does not carry it, and this wallet does not ask a public
+  explorer to guess it. Restoring the list is manual and exact — press *Add account* the
+  same number of times, in order, and the same seed re-derives the same addresses. The
+  switcher and `docs/HD_IMPORT.md` say so at the point the account is created. This is a
+  recovery limit, not a confidentiality one.
+- **A scan never asks about an address of an account the user has not created**, and a
+  routine refresh asks only about the account on screen. Speculative account discovery was
+  removed: it could not find an account that had never been paid, and the cost of trying
+  was ~20 addresses per guessed account. Be precise about what that cost was — P2MR
+  commits to a TapLeaf Merkle root, so the ML-DSA-44 public key stays hashed until the
+  output is spent and probing an address exposes no public key. What it exposed was
+  *linkage*: a public explorer learns a batch of addresses that have no on-chain
+  relationship to one another, binding unused addresses of one wallet together in its logs
+  before any of them is used, and the query pattern discloses how many accounts exist and
+  how far along each chain. Pinned by `tests/security/scan-privacy.test.ts`, which asserts
+  a per-refresh request budget and zero requests for an account that does not exist.
 - **Connect without consent:** an unapproved origin's `requestAccounts` is held, not
   answered. Approval requires a click in the extension's own window; deny, closing that
   window, or a 5-minute timeout rejects with `USER_REJECTED` (EIP-1193 `4001`). One

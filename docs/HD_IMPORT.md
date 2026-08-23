@@ -74,22 +74,47 @@ coins:
 - **The seed does not say how many accounts there were.** An account is a derivation
   path, not a record; nothing about `m/2'/…` is written into the phrase.
 
-So a restore rediscovers extra accounts the only way anything can — by looking for
-their coins on the chain:
+So the restore is exact, and it is manual:
 
-1. Every account this device already knows about is walked on every scan, both chains,
-   with the ordinary 20-address gap limit. (Before this, only the *active* account was
-   scanned, so a restored wallet sitting on account 1 never even looked at account 2.)
-2. A **full rescan**, and the first scan a freshly imported wallet runs, additionally
-   probes `ACCOUNT_GAP_LIMIT = 2` accounts past the highest one it knows and adopts any
-   whose external chain has ever been used — the BIP44 account-discovery rule, one level
-   up from the address gap limit. Two consecutive unused accounts end the probe.
-3. **An account that never received coins cannot be found this way.** There is nothing
-   on any chain to look for. It comes back only by pressing *Add account* again, in
-   order, because `createAccount` always takes `max(index) + 1`.
+1. **Press *Add account* the same number of times, in order.** `createAccount` always
+   takes `max(index) + 1`, so the n-th press on a fresh restore is the same derivation
+   path it was the first time and the same seed re-derives the same addresses. The coins
+   reappear. `tests/security/scan-privacy.test.ts` asserts exactly this, addresses and
+   balance both, because it is the whole argument for the paragraph below.
+2. **Write down how many accounts you made.** That number is the one piece of this
+   wallet a phrase does not carry.
 
-The wallet says all of this in the account switcher itself, under *Add account*, rather
-than only here.
+### The wallet does not go looking, and that is deliberate
+
+An earlier build tried to recover the account *list* by scanning: a full rescan, and the
+first scan after an import, probed two accounts past the highest one it knew and adopted
+any whose external chain had been used. It was deleted, not put behind a flag.
+
+- **It could not do what it promised.** Its own note said so: an account that never
+  received coins leaves nothing on any chain to find. A feature that works only for the
+  accounts you would have noticed anyway is not a recovery path.
+- **The account list is metadata, not key material.** Recovering metadata by
+  interrogating the chain is a category error. Key material is what the phrase is for;
+  "how many accounts did I make" is a thing to back up, and the switcher now says so.
+- **It paid for the attempt in disclosure.** ~20 addresses per guessed account, sent to
+  one public explorer. Be precise about the harm: P2MR (BIP360) commits to a TapLeaf
+  Merkle root, so the ML-DSA-44 public key stays hashed until the output is spent, and
+  probing an address does **not** expose a public key to Shor-style key recovery. What it
+  does is *link*: it hands one third party a batch of addresses that have no on-chain
+  relationship, binding unused addresses of one wallet together in that explorer's logs
+  before any of them is used, and the query pattern discloses the derivation structure —
+  how many accounts exist, how far along each chain. While wallets hold both P2MR and
+  legacy ECDSA outputs, that address graph is what tells an attacker which UTXOs are
+  worth attacking.
+
+Measured, on a four-account wallet with nothing to find: an idle refresh cost **168**
+explorer requests before (160 gap lookups + 8 UTXO reads, 160 distinct addresses) and
+**42** after; a full rescan **208** before and **168** after. The first scan after a
+restore disclosed **40** addresses of accounts that had never been created; it now
+discloses none. A routine refresh also stopped walking every account — it scans the
+account on screen, the switcher refreshes the rest when it opens, and each row there
+carries the age of the balance it is showing rather than passing an old number off as a
+current one.
 
 The alternative considered and rejected was recording the account count inside the
 sealed vault payload. It cannot work for the case that matters: the payload on a fresh

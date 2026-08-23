@@ -332,10 +332,27 @@ a {
 }
 
 .account-row-bal {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
   font-family: var(--mono);
   font-size: 11px;
   color: var(--ink-2);
   flex: 0 0 auto;
+}
+
+/* A balance the last refresh did not re-read. Subdued *and* dated: the age
+   below it is the part that is load-bearing, the colour only stops the number
+   competing with the one account that is current. */
+.account-row-bal .is-stale {
+  color: var(--ink-3);
+}
+
+.account-row-age {
+  font-family: var(--sans);
+  font-size: 10px;
+  color: var(--ink-3);
 }
 
 .account-rename {

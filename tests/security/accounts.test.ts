@@ -10,7 +10,6 @@ import { SECRET_RESULT_KEYS } from '../../src/core/rpc/protocol.js';
 import { scriptForAddress } from '../../src/core/script/address.js';
 import { addressFromHdSeed } from '../../src/core/wallet/derive.js';
 import { ACCOUNT_NAME_MAX, emptyAccount, MAX_ACCOUNTS, parseMeta } from '../../src/core/wallet/storage.js';
-import { ACCOUNT_GAP_LIMIT } from '../../src/core/wallet/gap.js';
 import { mnemonicToHdSeed } from '../../src/core/crypto/mnemonic.js';
 import { bytesToHex, hexToBytes } from '../../src/core/util/hex.js';
 import { PUBLIC_KEY_BYTES, TX_SIGNATURE_BYTES, SIGHASH_ALL, verifyTransactionHash } from '../../src/core/crypto/mldsa.js';
@@ -498,39 +497,12 @@ describe('extra HD accounts', () => {
     expect(meta?.accounts.find((a) => a.index === 1)?.externalNext).toBe(1);
   });
 
-  it('a restore scan finds coins on an account the fresh device never heard of', async () => {
-    // User loss: this is the whole H3 failure. A device restoring the phrase
-    // knows about account 0 and nothing else — the seed does not say how many
-    // accounts existed and btq-core cannot derive them at all — so a scan that
-    // walked only the active account brought back an empty wallet and left the
-    // coins on Account 3 looking permanently gone.
-    const store = new MemoryWalletStorage();
-    const restored = ring(store);
-    await restored.importMnemonic(MNEMONIC, PASSWORD);
-    const a2 = addressFromHdSeed(HD, 'external', 0, 'testnet', 2).address;
-    const lookup = async (address: string) => ({
-      used: address === a2,
-      txCount: address === a2 ? 1 : 0,
-      reportedBalanceSats: 0n,
-    });
-
-    const scan = await restored.scan(lookup, coins({ [a2]: [utxo(a2, 12_345n)] }));
-    expect(scan.discoveredAccounts).toEqual([2]);
-
-    const status = await restored.status();
-    expect(status.accounts.map((a) => a.index)).toEqual([0, 2]);
-    expect(status.accounts.find((a) => a.index === 2)?.lastBalanceSats).toBe('12345');
-    // Found means spendable, not merely listed: the coins are reachable from
-    // the account the switcher can now reach.
-    await restored.switchAccount(2);
-    expect((await restored.balances(coins({ [a2]: [utxo(a2, 12_345n)] }))).totalSats).toBe(12_345n);
-    expect((await store.loadMeta())?.accounts.find((a) => a.index === 2)?.externalNext).toBe(1);
-  });
-
-  it('a scan updates every known account, not only the active one', async () => {
-    // User loss: the switcher showed a stale balance for every account the user
-    // was not standing on, and a payment to Account 2 while Account 1 was
-    // active was invisible until they happened to switch.
+  it('a routine refresh scans the active account only', async () => {
+    // Privacy, and the cost that carries it: walking every known account on
+    // every refresh sent one 20-address gap window per chain per account to a
+    // public explorer whether or not anything had changed — measured at 168
+    // requests for a four-account wallet with nothing to find. The other
+    // accounts move on an explicit rescan and when the switcher opens.
     const store = new MemoryWalletStorage();
     const k = ring(store);
     await k.importMnemonic(MNEMONIC, PASSWORD);
@@ -538,16 +510,28 @@ describe('extra HD accounts', () => {
     await k.switchAccount(0);
     expect((await k.status()).activeAccount).toBe(0);
 
-    await k.scan(
-      async (address) => ({
+    const seen = new Set<string>();
+    const lookup = async (address: string) => {
+      seen.add(address);
+      return {
         used: address === a1,
         txCount: address === a1 ? 1 : 0,
         reportedBalanceSats: 0n,
-      }),
-      coins({ [a1]: [utxo(a1, 7_000n)] }),
-    );
+      };
+    };
 
-    const meta = await store.loadMeta();
+    await k.scan(lookup, coins({ [a1]: [utxo(a1, 7_000n)] }));
+    // Account 1's very first address was never asked about, so its payment is
+    // not seen yet — and nothing about account 1 reached the explorer.
+    expect(seen.has(a1)).toBe(false);
+    let meta = await store.loadMeta();
+    expect(meta?.accounts.find((a) => a.index === 1)?.externalNext).toBe(0);
+    expect(meta?.accounts.find((a) => a.index === 1)?.lastBalanceSats).toBe('0');
+
+    // Opening the switcher is the pass that fills the others in.
+    await k.scan(lookup, coins({ [a1]: [utxo(a1, 7_000n)] }), null, { accounts: 'all' });
+    expect(seen.has(a1)).toBe(true);
+    meta = await store.loadMeta();
     expect(meta?.accounts.find((a) => a.index === 1)?.externalNext).toBe(1);
     expect(meta?.accounts.find((a) => a.index === 1)?.lastBalanceSats).toBe('7000');
     // …and the account nobody paid is left exactly where it was.
@@ -555,44 +539,53 @@ describe('extra HD accounts', () => {
     expect(meta?.accounts.find((a) => a.index === 0)?.lastBalanceSats).toBe('0');
   });
 
-  it('an account that never received coins is NOT rediscovered — the documented limit', async () => {
-    // Not a bug: there is nothing on any chain to find. This is pinned so the
-    // sentence the switcher and docs tell the user ("write down how many
-    // accounts you made") cannot quietly stop being true.
-    const first = ring();
-    await first.importMnemonic(MNEMONIC, PASSWORD);
-    await first.createAccount();
-    expect((await first.status()).accounts).toHaveLength(2);
-
-    const restored = ring();
-    await restored.importMnemonic(MNEMONIC, PASSWORD);
-    const scan = await restored.scan(
-      async () => ({ used: false, txCount: 0, reportedBalanceSats: 0n }),
-      async () => [],
-    );
-    expect(scan.discoveredAccounts).toEqual([]);
-    expect((await restored.status()).accounts.map((a) => a.index)).toEqual([0]);
-  });
-
-  it('discovery stops after the account gap limit, so storage cannot wedge the scan', async () => {
-    // Attacker gain: an unbounded probe is a scan that walks 20 accounts of 20
-    // addresses on every full rescan — 800 ML-DSA derivations and 800 explorer
-    // calls, from a wallet with one funded account.
-    const restored = ring();
-    await restored.importMnemonic(MNEMONIC, PASSWORD);
-    const far = addressFromHdSeed(HD, 'external', 0, 'testnet', ACCOUNT_GAP_LIMIT + 1).address;
-    const probed = new Set<string>();
-    const scan = await restored.scan(
-      async (address) => {
-        probed.add(address);
-        return { used: address === far, txCount: address === far ? 1 : 0, reportedBalanceSats: 0n };
-      },
-      async () => [],
+  it('a full rescan reaches every account the user created', async () => {
+    const store = new MemoryWalletStorage();
+    const k = ring(store);
+    await k.importMnemonic(MNEMONIC, PASSWORD);
+    const a1 = (await k.createAccount()).address;
+    await k.switchAccount(0);
+    const scan = await k.scan(
+      async (address) => ({
+        used: address === a1,
+        txCount: address === a1 ? 1 : 0,
+        reportedBalanceSats: 0n,
+      }),
+      coins({ [a1]: [utxo(a1, 7_000n)] }),
       null,
       { full: true },
     );
-    expect(scan.discoveredAccounts).toEqual([]);
-    expect(probed.has(far)).toBe(false);
+    expect(scan.scannedAccounts).toEqual([0, 1]);
+    const meta = await store.loadMeta();
+    expect(meta?.accounts.find((a) => a.index === 1)?.lastBalanceSats).toBe('7000');
+  });
+
+  it('no scan of any kind adds an account the user never created', async () => {
+    // The deleted feature, pinned shut. Speculative account discovery could not
+    // do what it promised — an account that never received coins leaves nothing
+    // on any chain — and paid for the attempt by handing a public explorer ~20
+    // addresses per guessed account. The switcher and the docs now tell the
+    // user to press Add account instead; this is what keeps that true.
+    const restored = ring();
+    await restored.importMnemonic(MNEMONIC, PASSWORD);
+    // Funded accounts 1 and 2, on chain, that this device has never heard of.
+    const funded = new Set(
+      [1, 2].map((n) => addressFromHdSeed(HD, 'external', 0, 'testnet', n).address),
+    );
+    const asked = new Set<string>();
+    const lookup = async (address: string) => {
+      asked.add(address);
+      const used = funded.has(address);
+      return { used, txCount: used ? 1 : 0, reportedBalanceSats: 0n };
+    };
+    for (const opts of [{}, { full: true }, { accounts: 'all' as const }]) {
+      const scan = await restored.scan(lookup, async () => [], null, opts);
+      expect(scan.scannedAccounts).toEqual([0]);
+      expect((await restored.status()).accounts.map((a) => a.index)).toEqual([0]);
+    }
+    // Not merely "not adopted": never asked about. The explorer was told
+    // nothing at all about an account this device does not have.
+    for (const address of funded) expect(asked.has(address)).toBe(false);
   });
 
   it('a meta a pre-accounts build round-tripped does not hand account 0 another account\'s balance', () => {
@@ -676,5 +669,116 @@ describe('extra HD accounts', () => {
     expect(meta?.accounts.some((a) => a.index === 0)).toBe(true);
     expect(meta?.accounts.find((a) => a.index === 19)?.name).toBe('Trap');
     expect(meta?.activeAccount).toBe(19);
+  });
+});
+
+/**
+ * A refresh is a long read. The user goes on using the wallet while it runs,
+ * and every choice they make in that window is a write to the same record.
+ */
+describe('a scan in flight never overwrites the user\'s own choices', () => {
+  /** A lookup that parks on its first call, so a scan can be held mid-flight. */
+  function gatedLookup() {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let parked = false;
+    const lookup = async () => {
+      if (!parked) {
+        parked = true;
+        await gate;
+      }
+      return { used: false, txCount: 0, reportedBalanceSats: 0n };
+    };
+    return { lookup, release: () => release() };
+  }
+
+  const tick = () => new Promise((r) => setTimeout(r, 20));
+
+  it('a switch that lands mid-scan stays switched — and the next send is not redirected', async () => {
+    // The failure this pins, in full: `scan` loaded the whole WalletMeta, awaited
+    // dozens of lookups, then wrote its stale snapshot back — reverting the
+    // active account. The header still said Account 2 (the popup re-reads it
+    // only on the next status), so the user's next send debited Account 1.
+    const k = ring();
+    await k.importMnemonic(MNEMONIC, PASSWORD);
+    const a0 = (await k.receiveAddress()).address;
+    await k.approveConnect(DAPP);
+    await k.createAccount();
+    await k.switchAccount(0);
+
+    const { lookup, release } = gatedLookup();
+    const scanning = k.scan(lookup, async () => []);
+    await tick();
+    await k.switchAccount(1);
+    release();
+    await scanning;
+
+    expect((await k.status()).activeAccount).toBe(1);
+    // The site approved on account 0 must still see nothing: a reverted switch
+    // silently handed it back an address the user had moved away from.
+    expect((await k.getAccounts(DAPP)).accounts).toEqual([]);
+    expect((await k.receiveAddress()).address).not.toBe(a0);
+  });
+
+  it('an account created mid-scan is still there when the scan lands', async () => {
+    const k = ring();
+    await k.importMnemonic(MNEMONIC, PASSWORD);
+    const { lookup, release } = gatedLookup();
+    const scanning = k.scan(lookup, async () => []);
+    await tick();
+    const made = await k.createAccount();
+    release();
+    await scanning;
+
+    const after = await k.status();
+    expect(after.accounts.map((a) => a.index)).toContain(made.index);
+    expect(after.activeAccount).toBe(made.index);
+  });
+
+  it('a rename that lands mid-scan is not written back over', async () => {
+    const k = ring();
+    await k.importMnemonic(MNEMONIC, PASSWORD);
+    const { lookup, release } = gatedLookup();
+    const scanning = k.scan(lookup, async () => []);
+    await tick();
+    await k.renameAccount(0, 'Payroll');
+    release();
+    await scanning;
+
+    expect((await k.status()).accounts.find((a) => a.index === 0)?.name).toBe('Payroll');
+  });
+
+  it('the scan still commits what it learned about the chain', async () => {
+    // The merge must not be a no-op: the cursors, tip and balance are the
+    // scan's own and have to land even though the user moved underneath it.
+    const store = new MemoryWalletStorage();
+    const k = ring(store);
+    await k.importMnemonic(MNEMONIC, PASSWORD);
+    const a0 = (await k.receiveAddress()).address;
+
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let parked = false;
+    const lookup = async (address: string) => {
+      if (!parked) {
+        parked = true;
+        await gate;
+      }
+      return { used: address === a0, txCount: address === a0 ? 1 : 0, reportedBalanceSats: 0n };
+    };
+
+    const scanning = k.scan(lookup, coins({ [a0]: [utxo(a0, 5_000n)] }), { height: 900_100, hash: 'ab' });
+    await tick();
+    await k.renameAccount(0, 'Payroll');
+    release();
+    await scanning;
+
+    const meta = await store.loadMeta();
+    const rec = meta?.accounts.find((a) => a.index === 0);
+    expect(rec?.name).toBe('Payroll');
+    expect(rec?.externalNext).toBe(1);
+    expect(rec?.lastBalanceSats).toBe('5000');
+    expect(rec?.balanceAt).not.toBeNull();
+    expect(meta?.tipHeight).toBe(900_100);
   });
 });

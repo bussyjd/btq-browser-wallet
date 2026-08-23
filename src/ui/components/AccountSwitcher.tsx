@@ -1,17 +1,28 @@
 import { useState } from 'react';
 import { formatSats } from '../../core/wallet/format.js';
-import { ACCOUNT_GAP_LIMIT } from '../../core/wallet/gap.js';
 import { MAX_ACCOUNTS } from '../../core/wallet/storage.js';
-import { shortAddress } from '../format.js';
+import { relativeTime, shortAddress } from '../format.js';
 import type { AccountInfo } from '../types.js';
 import { Button } from './Button.js';
 import { Field } from './Field.js';
 import { InlineError } from './InlineError.js';
 import { useAction } from '../hooks/useAction.js';
 
+/**
+ * The account list.
+ *
+ * The balances here are not all equally fresh, and the panel says so. A routine
+ * refresh scans the *active* account only — walking every account on every
+ * refresh meant ~40 explorer lookups per account whether or not anything had
+ * changed — so opening this panel is what brings the others up to date
+ * (`checking`), and until that lands each inactive row carries the age of the
+ * number it is showing. A figure with no date on it reads as current; that is
+ * the one thing a balance must never do when it is not.
+ */
 export function AccountSwitcher({
   accounts,
   activeAccount,
+  checking = false,
   onSwitch,
   onCreate,
   onRename,
@@ -19,6 +30,8 @@ export function AccountSwitcher({
 }: {
   accounts: AccountInfo[];
   activeAccount: number;
+  /** True while the open-the-panel refresh of the other accounts is in flight. */
+  checking?: boolean;
   onSwitch: (index: number) => Promise<void>;
   onCreate: () => Promise<void>;
   onRename: (index: number, name: string) => Promise<void>;
@@ -96,7 +109,24 @@ export function AccountSwitcher({
                         {a.address ? shortAddress(a.address) : 'Deriving…'}
                       </span>
                     </span>
-                    <span className="account-row-bal">{formatSats(BigInt(a.lastBalanceSats || '0'))} tBTQ</span>
+                    <span className="account-row-bal">
+                      <span className={active ? undefined : 'is-stale'}>
+                        {formatSats(BigInt(a.lastBalanceSats || '0'))} tBTQ
+                      </span>
+                      {/* The active row is the one the refresh just scanned, so
+                          it needs no date. Every other row is showing whatever
+                          the last pass that included it found, and has to say
+                          when that was. */}
+                      {active ? null : (
+                        <span className="account-row-age" data-testid={`account-age-${a.index}`}>
+                          {checking
+                            ? 'Checking…'
+                            : a.balanceAt
+                              ? `Checked ${relativeTime(a.balanceAt)}`
+                              : 'Not checked yet'}
+                        </span>
+                      )}
+                    </span>
                   </button>
                 )}
                 {active && editing !== a.index ? (
@@ -133,14 +163,14 @@ export function AccountSwitcher({
           </Button>
           {/* Said here, where the decision is made, and not only in the docs.
               Account 1 is btq-core's own path; everything below it is this
-              wallet's convention, and a restore finds those accounts only by
-              looking for coins on them. */}
+              wallet's convention, and how many there are is something only the
+              user can record — the chain does not know. */}
           <p className="small" data-testid="account-note">
             Account 1 is the only account btq-core can derive from this seed. The others are
-            this wallet's own: restoring the phrase re-adds an extra account only if it has
-            received coins — a rescan looks {ACCOUNT_GAP_LIMIT} accounts past the last one it
-            knows. An account you never used cannot be found again from the phrase alone, so
-            write down how many you made.
+            this wallet's own, and the seed does not record how many you made. Restoring is
+            exact but manual: press Add account the same number of times, in order, and the
+            same seed re-derives the same addresses, so the coins reappear. Write down how
+            many you made — this wallet will not go asking a public explorer to guess.
           </p>
         </div>
         <InlineError message={create.error ?? switchTo.error ?? rename.error} />

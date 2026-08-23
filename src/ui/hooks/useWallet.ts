@@ -49,7 +49,9 @@ export function useWallet() {
   const [scanned, setScanned] = useState(false);
   const [addressMoved, setAddressMoved] = useState(false);
   const [syncError, setSyncError] = useState<string | null>(null);
+  const [accountsScanning, setAccountsScanning] = useState(false);
   const refreshing = useRef(false);
+  const accountsRefreshing = useRef(false);
 
   const loadStatus = useCallback(async () => {
     const st = await rpc<WalletStatus>('wallet.status');
@@ -133,6 +135,32 @@ export function useWallet() {
       refreshing.current = false;
     }
   }, [loadSites, refreshHistory, loadStatus]);
+
+  /**
+   * Bring the *other* accounts up to date — the switcher opening is the moment
+   * their balances go on screen, and the only routine moment they do.
+   *
+   * `refresh` deliberately scans the active account alone: walking every known
+   * account on every refresh sent one gap window per chain per account to a
+   * public explorer whether or not anything had changed. This is the explicit,
+   * user-initiated pass that fills the rest in; while it is in flight the panel
+   * says "Checking…", and if it fails the stored balances stay on screen with
+   * their age next to them, which is the honest thing to show.
+   */
+  const refreshAccounts = useCallback(async () => {
+    if (accountsRefreshing.current) return;
+    accountsRefreshing.current = true;
+    setAccountsScanning(true);
+    try {
+      await rpc<ScanResult>('wallet.scan', { accounts: 'all' });
+      await loadStatus();
+    } catch {
+      /* the rows keep the balances they had, dated — never a blank or a zero */
+    } finally {
+      setAccountsScanning(false);
+      accountsRefreshing.current = false;
+    }
+  }, [loadStatus]);
 
   const create = useCallback(
     (password: string) => rpc<CreateReveal>('wallet.create', { password }),
@@ -318,6 +346,7 @@ export function useWallet() {
     backend,
     tip,
     scanning,
+    accountsScanning,
     scanned,
     addressMoved,
     syncError,
@@ -328,6 +357,7 @@ export function useWallet() {
     loadPending,
     loadSites,
     refresh,
+    refreshAccounts,
     refreshHistory,
     create,
     confirmSeed,
