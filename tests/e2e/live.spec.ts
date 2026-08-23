@@ -65,12 +65,21 @@ test.use({ trace: 'off' });
 const cfg = liveFromEnv();
 
 /**
- * One canvas for the whole cut. The popup pages set themselves back to the
- * toolbar geometry; Playwright scales and letterboxes each clip into this size,
- * so 360×600 popup clips and 960×640 tab clips concatenate without ffmpeg ever
- * seeing a resolution change and `stitch-demo.sh` needs no argument for it.
+ * One canvas for the whole cut, and it is the popup's own geometry.
+ *
+ * A landscape canvas letterboxes the popup: Playwright draws the page at the
+ * top-left of the video frame, so eight of the ten scenes came out as a
+ * 360-wide strip of wallet against 600 wide of dead grey. Recording at the
+ * popup's shape instead means no scene is padded at all, every clip is the same
+ * size, and `stitch-demo.sh` still needs no argument.
+ *
+ * The two scenes that are ordinary web pages — the explorer transaction and the
+ * demo dapp — render their own responsive layout at this width. The explorer's
+ * narrow layout is if anything the better one to film: the txid, the block, the
+ * size in vB and the fee are stacked and legible rather than spread across a
+ * table, and scene 6's assertions were checked against it at both widths.
  */
-const CANVAS = { width: 960, height: 640 };
+const CANVAS = { ...POPUP_VIEWPORT };
 /** A beat between gestures, so a viewer can follow the pointer. */
 const SLOW_MO = 180;
 /** The create-a-wallet scene throws its wallet away; this never guards coins. */
