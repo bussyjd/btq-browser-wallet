@@ -132,3 +132,4 @@ otherwise a flaky explorer would silently truncate the restore.
 | Valid but unused seed | imports cleanly, empty history, index 0 shown |
 | Same seed imported twice | derives the identical addresses (golden-vector guarantee) |
 | Mnemonic vs raw-seed of the same entropy | **different wallets** — BIP39 hashing sits between; the UI labels the two import modes explicitly to prevent confusion |
+| Settings → Security on a raw-seed wallet | the phrase reveal is disabled and says why. A phrase import seals its BIP39 entropy in the vault and can regenerate the words; a raw seed has none, and BIP39 hashing does not run backwards. Inventing words from the HD seed would hand the user a phrase that restores a *different* wallet — the seed hex they imported is the backup |

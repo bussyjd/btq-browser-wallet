@@ -17,14 +17,15 @@ Five-minute path: [load the extension](#load-the-extension) → [try the flows](
 
 | | |
 |---|---|
-| <img src="docs/screenshots/create-seed.png" alt="The recovery-phrase screen: twelve numbered slots, blanked for this screenshot, under a warning that closing the window discards the phrase" width="330"> | <img src="docs/screenshots/receive.png" alt="Receive tab: balance, QR code, the tbtq1z address and its derivation path" width="330"> |
-| **Create** — the phrase is shown once and never written to storage. | **Receive** — next unused address, its path, QR, copy. |
+| <img src="docs/screenshots/create-seed.png" alt="The recovery-phrase screen: twelve numbered slots, blanked for this screenshot, under a warning that closing the window discards this seed and that Settings can show the phrase again with the password" width="330"> | <img src="docs/screenshots/receive.png" alt="Receive tab: balance, QR code, the tbtq1z address and its derivation path" width="330"> |
+| **Create** — write the phrase down here; nothing is saved until you confirm. | **Receive** — next unused address, its path, QR, copy. |
 | <img src="docs/screenshots/send-review.png" alt="Send review card: destination, amount, fee in tBTQ and sat/vB, change, inputs, total debited, password field" width="330"> | <img src="docs/screenshots/connect.png" alt="Connection request screen naming the site origin and what it will and will not see" width="330"> |
 | **Send** — the review card replaces the form, so what you read is what gets signed. | **Site-connect** — exact origin, revocable, and it can never move funds. |
 
 Dark theme shown; the popup follows the OS light/dark setting. The twelve words in the
-first shot are blanked in the DOM before the capture — a wallet's own README is no place
-for a legible recovery phrase.
+first shot are covered before the capture — one bar of one fixed width per word, the same
+way the demo recording covers them, so neither the words nor their lengths survive. A
+wallet's own README is no place for a legible recovery phrase.
 
 ## Load the extension
 
@@ -44,10 +45,13 @@ Chrome 116 or newer (the provider is injected into the MAIN world, which is Chro
 
 ## Try the flows
 
-**Create.** **Create a wallet** → set a password (≥8 characters) → the 12 words appear,
-once → **I wrote it down** → type three of them back → **Seal the vault**. The vault is
-sealed with PBKDF2-SHA256 (600 000 iterations) and AES-256-GCM before anything is
-persisted; the phrase is never stored.
+**Create.** **Create a wallet** → set a password (≥8 characters) → the 12 words appear →
+**I wrote it down** → type three of them back → **Seal the vault**. Nothing is persisted
+until you confirm, so closing the popup on the word screen really does discard *that*
+seed. What is then written is one AES-256-GCM blob behind PBKDF2-SHA256 (600 000
+iterations), holding the HD seed and the BIP39 entropy it came from — the entropy is what
+lets **Settings → Security** show the phrase again later, with your password. The words
+themselves are never stored, in the clear or otherwise.
 
 **Import — both forms.** **I already have a seed** offers two, **Use a seed phrase** and
 **Use a raw seed**:
@@ -88,15 +92,26 @@ extension opens an approval window naming the exact origin; the page's promise s
 unsettled until you answer. **Connect** hands it one address; **Cancel**, closing that
 window, or five minutes of silence gets it `USER_REJECTED` (EIP-1193 code `4001`).
 **Disconnect** — or Settings → Connected sites → **Revoke** — takes it back and fires
-`accountsChanged([])`. A page can never call `wallet.*`: send, unlock and export are not
-on the relay's allowlist.
+`accountsChanged([])`. A page can never call `wallet.*`: send, unlock and the phrase
+reveal are not on the relay's allowlist, which forwards `page.requestAccounts`,
+`page.getAccounts` and `page.disconnect` and nothing else.
 
 **Settings** (the sliders icon in the header). Explorer URL, an optional BTQ Core JSON-RPC
 (URL, user, password), **Test connection** — which reports the explorer tip and the node's
 chain and height, warns when the node is behind, and refuses one whose block hash at the
 explorer's tip disagrees — **Connected sites** with **Revoke**, **Rescan all addresses**,
-**Lock now**, and **Remove wallet from this device**, which only proceeds once you type
-DELETE.
+a **Security** card, and **Remove wallet from this device**, which only proceeds once you
+type DELETE.
+
+**Security → Show recovery phrase.** The words are readable again on an unlocked wallet,
+behind a second deliberate step: the button, then a warning, then your password, then
+**Show phrase**. A wrong password shares the unlock back-off; **Hide phrase** and **Lock
+now** both take the grid off the screen. There is no copy button, and there never will be
+— a phrase on the clipboard is readable by everything else on the machine and outlives
+the screen that showed it. A wallet imported from a raw 32-byte seed has no phrase to
+show and says so instead of inventing one; so does a vault sealed before this existed.
+This is not the wallet giving anything away that the password did not already open
+([`SECURITY.md`](SECURITY.md) argues the trade in full).
 
 ## Broadcast: the truth
 
@@ -124,7 +139,7 @@ the hex yourself with `btq-cli sendrawtransaction <hex>` whenever you have a nod
 ## Run the tests
 
 ```sh
-npm test            # 344 tests: unit, security, golden vectors — no node, no network
+npm test            # 412 tests: unit, security, golden vectors — no node, no network
                     # (6 of them skip unless a regtest node is running — see below)
 npm run typecheck   # src (browser-only types) and tests/tooling (node types) separately
 npm run lint
@@ -135,8 +150,9 @@ End to end, in a real browser:
 
 ```sh
 npm run playwright:install   # once: fetches the Chromium build Playwright drives
-npm run test:e2e             # builds dist/, loads it in Chromium: 23 tests, plus the
-                             # regtest tier, which skips unless a node is running
+npm run test:e2e             # builds dist/, loads it in Chromium: 26 tests, plus the
+                             # regtest tier and the live-recording tier, which skip
+                             # unless a node — or an operator — turns them on
 npm run test:all             # the above, after npm test
 SKIP_BUILD=1 npm run test:e2e    # reuse the current dist/ while iterating
 ```
@@ -146,7 +162,9 @@ real content relay and the real MAIN-world provider run from `dist/`. The explor
 BTQ Core JSON-RPC are a deterministic mock on `127.0.0.1` whose node re-derives the BIP341
 sighash and verifies the ML-DSA-44 signature itself, so a wallet that signed the wrong
 message would still fail. Chromium is launched with DNS blackholed except loopback, so a
-stray call to the live explorer fails instead of making the run non-deterministic.
+stray call to the live explorer fails instead of making the run non-deterministic — the
+live-recording tier below is the only thing that lifts that flag, and a unit test asserts
+no other spec asks for it.
 
 Two opt-in tiers need a real `btqd` and are gated on `BTQ_REGTEST=1`:
 
@@ -177,44 +195,89 @@ CONF
   -rpcuser=m0 -rpcpassword=m0pass createwallet m0d
 ```
 
+A third opt-in tier, [`tests/e2e/live.spec.ts`](tests/e2e/live.spec.ts), is not a test of
+the wallet so much as a recording of it: it drives the built extension against the public
+explorer and a real testnet node, spending real testnet coins, and is gated on `BTQ_LIVE=1`
+plus the operator credentials described under [Video](#video). Unset, it skips with a
+reason and CI never notices it.
+
 ### What each layer proves
 
 | Layer | Runs | Proves |
 |---|---|---|
 | `tests/unit/` | always | Derivation, P2MR scripts, bech32m, BIP341 sighash (a frozen digest plus nine mutations), scale-16 weight/vsize/fee/dust, the explorer parsers against recorded live bodies, and a real on-chain transaction rebuilt byte-for-byte |
 | `tests/vectors/` | always | `golden.json`, the frozen contract with consensus — addresses, scripts and tapleaf hashes cannot drift unnoticed |
-| `tests/security/` | always | The paths that leak secrets or move funds: the vault ciphertext holds no seed, a wrong password (with back-off) opens nothing, a locked wallet cannot sign, derive or export, a page cannot reach `wallet.*` or storage, a foreign leaf script is refused, a hostile explorer cannot inject an amount or a script into the signing path, plus the connect state machine and the RPC contract |
-| `tests/e2e/` | `npm run test:e2e` | The extension as shipped: create → receive → lock/unlock → fund → node → send → restore on a second profile, site-connect approve/scope/revoke, and the negative cases — wrong password, refused destinations, a broken explorer, a node that rejects. The mock node re-verifies the signature and the sighash independently |
+| `tests/security/` | always | The paths that leak secrets or move funds: the vault ciphertext holds no seed, no entropy and no words, a wrong password (with back-off) opens nothing, a locked wallet cannot sign, derive or show a phrase, the phrase reveal needs the password and shares that back-off in both directions, a raw-seed or pre-v2 vault refuses instead of inventing words, a page cannot reach `wallet.*` or storage, a foreign leaf script is refused, a hostile explorer cannot inject an amount or a script into the signing path, plus the connect state machine and the RPC contract |
+| `tests/e2e/` | `npm run test:e2e` | The extension as shipped: create → receive → lock/unlock → reveal the phrase behind the password → fund → node → send → restore on a second profile, site-connect approve/scope/revoke, and the negative cases — wrong password, refused destinations, a broken explorer, a node that rejects, a raw-seed wallet that has no phrase. The mock node re-verifies the signature and the sighash independently |
 | `tests/integration/` | `BTQ_REGTEST=1` | btq-core itself: the node echoes our address, `scriptPubKey` and merkle root byte-for-byte, and `testmempoolaccept` accepts a transaction we signed (its real interpreter ran `OP_CHECKSIGDILITHIUM`) and rejects one signed over a tampered digest |
 
 [`tests/e2e/README.md`](tests/e2e/README.md) says exactly what is mocked, what each hostile
-case would otherwise miss, and the one thing the suite asserts *is* stored in the clear.
+case would otherwise miss, the one thing the suite asserts *is* stored in the clear, and
+the whole environment contract for the live tier.
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs all of it on every push.
 
 ## Video
 
-[`demo/btq-wallet-demo.mp4`](demo/btq-wallet-demo.mp4) is the end-to-end suite recording
-itself — the real popup, driven by the tests, nothing staged. It runs create → receive →
-lock and unlock → fund → send, then a restore from the phrase on a second profile.
+Two recordings, and they are not the same claim.
+
+**[`demo/btq-wallet-suite.mp4`](demo/btq-wallet-suite.mp4) — the end-to-end suite
+recording itself.** The real popup, driven by the tests, nothing staged: create → receive
+→ lock and unlock → read the phrase back under Settings → fund → send, then a restore from
+the phrase on a second profile. What it does *not* show is a real chain — the explorer and
+the node in it are the suite's deterministic mocks on `127.0.0.1`, and the coins are
+ledger entries. That is the price of a recording anybody can reproduce offline in thirty
+seconds.
 
 ```sh
 npm run demo:video     # RECORD_VIDEO=1 playwright test tests/e2e/smoke.spec.ts, then
-                       # scripts/stitch-demo.sh concatenates the clips (needs ffmpeg)
-RECORD_VIDEO=1 npm run test:e2e && sh scripts/stitch-demo.sh   # the whole suite, site-connect included
+                       # scripts/stitch-demo.sh → demo/btq-wallet-suite.mp4 (needs ffmpeg)
+RECORD_VIDEO=1 npm run test:e2e && sh scripts/stitch-demo.sh demo/btq-wallet-suite.mp4
+                       # the whole suite, site-connect included
 ```
 
-Playwright records video and nothing else, so the file is silent, popup-only (360×600, no
-browser chrome, no cursor) and machine-paced. Clips are written one per page under
-`demo/raw/` — git-ignored, ordered by `demo/raw/order.txt` — and only the stitched mp4 is
-committed.
+**`demo/btq-wallet-demo.mp4` — the live one, with nothing mocked.** Ten captioned scenes
+against the public explorer and a real `btqd` on the operator's machine: a wallet created
+and scanned, a funded phrase restored, a real payment signed and broadcast, the
+transaction found on
+[explorer.bitcoinquantum.com](https://explorer.bitcoinquantum.com), one real confirmation,
+the payee restoring his own wallet and finding the money, the phrase read back behind the
+password, and a site connected and revoked. Every number it dwells on is asserted first
+against a value read independently in Node, and a run that cannot prove what it is showing
+throws instead of recording it anyway.
 
-The recovery phrase is barred out of the recording for the same reason it is barred out of
-the screenshot: on all three screens that show it — the twelve-word grid, the confirmation
-fields and the import box — the words are covered before the first frame is painted, with
-one bar width for every word so the lengths do not leak either.
+```sh
+npm run demo:preflight   # will a take work? node, explorer, chain tip, Alice's coins — ~3 s, no browser
+npm run demo:live        # preflight, build, record, stitch → demo/btq-wallet-demo.mp4
+```
+
+> **That file is not in this repository yet.** The spec, the preflight and the scripts are
+> ([`tests/e2e/live.spec.ts`](tests/e2e/live.spec.ts)); the recording is not, because
+> making one needs a synced testnet node's RPC password and a funded wallet on the
+> operator's machine. Until somebody runs `npm run demo:live`, `demo/btq-wallet-suite.mp4`
+> is the only video this repository ships — and the scenes above are a description of what
+> the spec asserts, not of footage anyone has watched.
+
+Every `BTQ_DEMO_*` variable a live take reads, and every operator note about running one,
+is in [`tests/e2e/README.md`](tests/e2e/README.md) — deliberately the only copy, so there
+is no example file to drift out of date. Recording costs real testnet coins on every take.
+CI is untouched by any of it: without `BTQ_LIVE=1` the live spec skips with a reason.
+
+Playwright records video and nothing else, so both files are silent and show no cursor and
+no browser chrome. The suite is popup-only at 360×600 and machine-paced; the live one
+records a 960×640 canvas — wide enough for the explorer tab scene 6 opens — is slowed to
+something a human can follow, and carries a caption per scene. Clips are written one per
+page under `demo/raw/` — git-ignored, ordered by `demo/raw/order.txt` — and only the
+stitched mp4 is committed.
+
+The recovery phrase is barred out of both recordings for the same reason it is barred out
+of the screenshot. Three selectors cover the four surfaces that put a phrase on screen —
+the twelve-word grid (which is now the onboarding screen *and* the Settings reveal), the
+confirmation fields and the import box — and the words are covered before the first frame
+is painted, with one bar width for every word so the lengths do not leak either.
 Only the recording is masked — with `RECORD_VIDEO` unset the tests behave exactly as they
 do in CI, and either way they read the real phrase and assert against it
-([`tests/e2e/fixtures/redact.ts`](tests/e2e/fixtures/redact.ts)).
+([`tests/e2e/fixtures/redact.ts`](tests/e2e/fixtures/redact.ts)). A phrase surface that
+loses its `seed-word-N` id fails the recording run rather than quietly appearing in it.
 
 ## Protocol notes
 
@@ -237,11 +300,14 @@ The import-from-seed design, byte by byte: [`docs/HD_IMPORT.md`](docs/HD_IMPORT.
 
 ## Security model
 
-Keys decrypt **only** inside the MV3 service worker, only while unlocked. The popup, the
-content script and `window.btq` never receive the mnemonic, the HD seed or a secret key,
-and `src/core/` is pure, browser-safe and dependency-light (`@noble/*`, `@scure/*`) so it
-stays reviewable. [`SECURITY.md`](SECURITY.md) has the trust boundary, what the wallet
-refuses, and what is deliberately out of scope.
+Keys decrypt **only** inside the MV3 service worker, only while unlocked. The content
+script and `window.btq` never receive phrase or key material at all; the popup never
+receives the HD seed or a secret key, and receives the twelve words only from the two
+calls that exist to show them — onboarding, and the password-gated reveal. `src/core/` is
+pure, browser-safe and dependency-light (`@noble/*`, `@scure/*`) so it stays reviewable.
+[`SECURITY.md`](SECURITY.md) has the trust boundary, what the wallet refuses, why showing
+the phrase again is not a weaker boundary than the send screen, and what is deliberately
+out of scope.
 
 ## Layout
 
@@ -252,13 +318,16 @@ src/content/       isolated-world relay: allowlisted page methods, never key mat
 src/inpage/        window.btq provider (MAIN world, frozen surface)
 src/ui/            React popup: components/ screens/ hooks/, one screen per file
 tests/unit/        crypto, derivation, script, address, fee, sighash, explorer parsers
-tests/security/    secret leakage, locked wallet, bad seed, page RPC, connect lifecycle
-tests/e2e/         the built extension in Chromium: journeys, connect, negatives, regtest
-tests/e2e/fixtures the mock explorer and node, the independent verifiers, dapp.html
+tests/security/    secret leakage, locked wallet, bad seed, phrase reveal, page RPC, connect
+tests/e2e/         the built extension in Chromium: journeys, connect, negatives, regtest,
+                   and live.spec.ts — the recorded run against the real chain (opt-in)
+tests/e2e/fixtures the mock explorer and node, the independent verifiers, dapp.html,
+                   the recording redaction, the live chain reads and the scene pacing
 tests/integration/ cross-checks against a live btq-core node (opt-in)
 tests/vectors/     golden.json — the frozen contract with consensus
-scripts/           gen-vectors.ts · stitch-demo.sh
+scripts/           gen-vectors.ts · stitch-demo.sh · demo-preflight.ts · demo-live.sh
 docs/              REFERENCE · HD_IMPORT · BTQ_CORE_MAP · PLAN · screenshots
-demo/              btq-wallet-demo.mp4, recorded by npm run demo:video
+demo/              btq-wallet-suite.mp4, recorded by npm run demo:video; the live take
+                   npm run demo:live writes lands beside it as btq-wallet-demo.mp4
 .claude/           agent instructions: the wallet skill and a security-review reviewer
 ```

@@ -23,7 +23,25 @@ protocol constant from memory — cite the reference.
   page context, `window`, logs, error messages, stack traces, extension storage
 - Decrypted seed persisted anywhere; vault ciphertext containing plaintext bytes
 - Secrets surviving lock, service-worker restart, or a failed unlock
-- Mnemonic recoverable from any UI surface after the one-time reveal
+- **A phrase reaching a screen outside the one sanctioned shape.** The wallet deliberately
+  shows the recovery phrase again: Settings → Security, `wallet.revealPhrase`, on an
+  already-unlocked vault, after the password is re-typed. That is not a finding — the same
+  password already spends the same coins, so refusing to print the words protects nobody.
+  What *is* a finding is any of the ways it can be got wrong:
+  - reachable without the password, or with a password checked against anything other than
+    the sealed vault (a cached hash, a boolean, a compare that is not the KDF);
+  - not sharing the unlock back-off, in either direction, or resetting the counter on failure;
+  - reachable by a page — `wallet.*` on the relay allowlist, or a `page.*` alias for it;
+  - the phrase cached anywhere: on the keyring, in a module variable, in `useWallet`
+    state, in storage, in a log line, in an error message, or surviving lock;
+  - words manufactured for a wallet that has none — a raw-32-byte-seed import or a v1
+    vault must answer `NO_PHRASE`, never run words back out of an HD seed;
+  - words returned that do not re-derive this vault's own `hdSeedHex` (a phrase restoring a
+    *different* wallet is worse than no phrase at all);
+  - a copy button anywhere near a phrase — the clipboard is readable by everything else on
+    the machine and outlives the screen — or any new surface rendering `seed-word-N`
+    outside `components/SeedGrid.tsx`, because the recording redaction keys on that prefix
+    and a second renderer paints a legible phrase into a committed video.
 - Debug/telemetry paths that serialize objects holding keys
 
 **2. Unauthorized fund movement**
@@ -71,3 +89,9 @@ how interesting the bug is. Say plainly when something is fine — a clean revie
 useful result. Never fabricate a finding to look thorough, and never weaken a golden
 vector to make a test pass: if `tests/vectors/golden.json` disagrees with the code, the
 **code** is what changed.
+
+Read `SECURITY.md`'s *Out of scope* list before writing anything up. What is on it is
+known and accepted, not undiscovered — `wallet.wipe` asking for the typed word `DELETE`
+and no password is the clearest example, and it is a live asymmetry worth restating, but
+restate it as a confirmation rather than presenting it as new. Something on that list that
+has *changed* is a finding again.

@@ -1,14 +1,16 @@
 /**
  * Recording-only redaction of the recovery phrase.
  *
- * The demo video is the real suite recording itself, so every screen the tests
- * walk through is painted for real — including the three that put a phrase on
- * screen: the twelve-word grid, the three confirmation fields, and the import
- * textarea the phrase is typed back into. A wallet repository must not ship a
- * legible recovery phrase, so when `RECORD_VIDEO` is set those three surfaces
- * are covered *before the first frame is painted*: the glyphs never reach a
- * pixel, and the bars that replace them are one fixed width, so the word
- * lengths do not survive either (per-word widths would leak all twelve).
+ * Both demo videos are real recordings of the extension, so every screen the
+ * tests walk through is painted for real — including the four that put a phrase
+ * on screen: the twelve-word grid during onboarding, that same grid again in the
+ * Settings reveal, the three confirmation fields, and the import textarea the
+ * phrase is typed back into. Three selectors cover all four, because the two
+ * grids are one component. A wallet repository must not ship a legible recovery
+ * phrase, so when `RECORD_VIDEO` is set those surfaces are covered *before the
+ * first frame is painted*: the glyphs never reach a pixel, and the bars that
+ * replace them are one fixed width, so the word lengths do not survive either
+ * (per-word widths would leak all twelve).
  *
  * This changes pixels and nothing else. The DOM keeps the real words, so the
  * tests still read the phrase the wallet generated, type it back in and assert
@@ -19,7 +21,7 @@ import { expect, type BrowserContext, type Page } from '@playwright/test';
 /** True when this run is being recorded for the demo video. */
 export const RECORDING = Boolean(process.env.RECORD_VIDEO);
 
-/** The twelve-word grid on the "Write these words down" screen. */
+/** The twelve-word grid — onboarding, and the Settings → Security reveal. */
 export const SEED_WORDS = '[data-testid^="seed-word-"]';
 /** The three "Word N" challenge fields on the confirmation screen. */
 export const SEED_CHALLENGE = '[data-word]';

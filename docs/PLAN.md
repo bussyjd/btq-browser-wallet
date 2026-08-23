@@ -124,16 +124,18 @@ btq-browser-wallet/
 │  ├─ fixtures/explorer/    # bodies recorded from the live explorer
 │  └─ e2e/                  # Playwright, the built extension in Chromium
 ├─ demo/  docs/  README.md  SECURITY.md
-└─ scripts/gen-vectors.ts  scripts/stitch-demo.sh
+└─ scripts/gen-vectors.ts  stitch-demo.sh  demo-preflight.ts  demo-live.sh
 ```
 
 There is no separate `ARCHITECTURE.md`: the README's Layout section, `REFERENCE.md` and
 this document cover it, and a fourth overlapping description would rot.
 
-**Trust boundary.** The mnemonic and the HD seed exist **only** inside the service worker,
-only while unlocked. The content script and the page get a narrow allowlisted message API
-— never key material, and never a signing primitive that does not route through explicit
-user approval. [`SECURITY.md`](../SECURITY.md) is the full model.
+**Trust boundary.** The HD seed and the BIP39 entropy a v2 vault seals beside it exist
+**only** inside the service worker, only while unlocked; the phrase is regenerated from
+that entropy on request and never cached. The content script and the page get a narrow
+allowlisted message API — never key material, never a phrase, and never a signing
+primitive that does not route through explicit user approval.
+[`SECURITY.md`](../SECURITY.md) is the full model.
 
 ---
 
@@ -163,9 +165,16 @@ origin, per-site permissions with revoke, `accountsChanged`, three fee presets a
 button.
 
 **Tests, docs, demo.** The unit and security suites, a Playwright suite that drives the
-built extension in Chromium, the README, and `demo/btq-wallet-demo.mp4` recorded by that
+built extension in Chromium, the README, and `demo/btq-wallet-suite.mp4` recorded by that
 suite (`npm run demo:video`). Test counts live in the README so there is one number of
 record.
+
+**A phrase reveal, and a second recording.** Settings → Security shows the recovery phrase
+again on an unlocked wallet, behind the password — which meant a v2 vault payload carrying
+the BIP39 entropy next to the HD seed. And a live tier, `tests/e2e/live.spec.ts`, that
+records the same extension against the public explorer and a real testnet node with real
+coins (`npm run demo:live` → `demo/btq-wallet-demo.mp4`), because a recording of a mocked
+chain answers a different question from the one a reader is asking.
 
 ---
 
@@ -189,7 +198,10 @@ hostile case would otherwise miss.
 - Vault ciphertext contains no plaintext seed bytes (the serialized blob is scanned)
 - A wrong password fails with no oracle — one error, no timing signal, attempt back-off
 - A locked wallet cannot sign, export, or derive a new address
-- The seed is shown exactly once and is not recoverable from any UI surface afterwards
+- The phrase is reachable again only through Settings → Security, only on an unlocked
+  wallet, and only after the password is re-checked against the sealed vault — sharing the
+  unlock back-off both ways, refusing with `NO_PHRASE` for a raw-seed or v1 vault rather
+  than inventing words, and never returning words that do not re-derive that vault's seed
 - `chrome.storage` never holds decrypted material; a service-worker restart re-locks
 
 **Paths that move funds**
@@ -219,7 +231,10 @@ Each of these was considered and left out on purpose; none is blocked on an unkn
 - **Multiple accounts.** The keyring derives one account (`m/0'/…`) and no BTQ RPC exposes
   a second account concept, so a second account would have been UI over nothing.
 - **Encrypted vault backup file.** Recovery is the phrase or the raw seed. A second export
-  path is a second thing that can leak.
+  path is a second thing that can leak. Showing the phrase on screen behind the password
+  is not the same decision and does not reopen this one: a file is an artefact that leaves
+  the machine, gets synced, gets backed up and outlives the vault it came from, while a
+  grid of words is gone when the screen is. That is also why there is no copy button.
 - **Explorer failover and offline mode.** A failed lookup is a loud error, never a silent
   "0". Caching a stale balance behind a banner was judged worse than saying the backend is
   down.
@@ -235,7 +250,14 @@ Each of these was considered and left out on purpose; none is blocked on an unkn
 
 ## 7. What is next
 
-- A packaged release artifact; today CI uploads the unpacked `dist/`.
+- A packaged release artifact; today CI uploads the unpacked `dist/`. **Vault v2 has no
+  downgrade path**: a v2 blob handed to a pre-reveal build hits the old `o.v !== 1` gate
+  and throws `Not a BTQ vault.`, which reads as corruption rather than as "too new". The
+  funds are safe — the phrase restores them — and this is acceptable while nothing has
+  shipped, but once a release exists the decoder change has to ship one release ahead of
+  the writer change.
+- The first live take of `demo/btq-wallet-demo.mp4`. Everything but the recording is in
+  the tree; making one needs a synced testnet node's RPC password and a funded wallet.
 - An `npm audit` gate in CI, and a reproducibility claim stronger than a committed
   lockfile.
 - A "first send to this address" warning on the send screen.

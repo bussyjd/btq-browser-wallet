@@ -18,10 +18,17 @@ best-effort. A vulnerability in btq-core itself belongs with
 
 ## Trust boundary
 
-- The mnemonic and the HD seed decrypt **only** in the MV3 service worker, and **only**
-  while unlocked. Locking, an auto-lock, or a service-worker restart drops them.
-- The popup, the content script and `window.btq` never receive the mnemonic, the HD seed
-  or a secret key. Signing happens in the worker; the popup sends intent and a password.
+- The HD seed — and the BIP39 entropy it was derived from, which a v2 vault seals in the
+  same ciphertext — decrypt **only** in the MV3 service worker, and **only** while
+  unlocked. Locking, an auto-lock, or a service-worker restart drops them. The phrase is
+  regenerated from that entropy when it is asked for and let go again; it is never cached,
+  in the worker or anywhere else, because a JavaScript string cannot be zeroed.
+- The content script and `window.btq` never receive phrase or key material at all. The
+  popup receives the twelve words exactly twice — from `wallet.create` during onboarding,
+  and from `wallet.revealPhrase` once the password has been re-typed — and never receives
+  the HD seed, the entropy or a secret key. Both times the words live in one screen's
+  component state and die with the screen. Signing happens in the worker; the popup sends
+  intent and a password.
 - The provider is installed as a **MAIN-world content script** with a frozen,
   non-configurable surface — `isBtq`, `request`, `on`, `removeListener`, nothing else. It
   holds no `chrome.*` handle, so a page that compromises it gains no extension privilege.
@@ -29,15 +36,27 @@ best-effort. A vulnerability in btq-core itself belongs with
   messages whose `event.source` is this window and whose `event.origin` is this origin.
 - `chrome.storage.local` holds an AES-256-GCM vault blob (PBKDF2-SHA256, 600 000
   iterations) plus public metadata: gap cursors, activity, connected origins, backend
-  settings. Ciphertext must not contain the seed — a test scans the serialized blob.
+  settings. That blob is the only place the seed and the entropy exist at rest, and only
+  sealed: tests scan the serialized blob for the seed bytes, for the entropy hex, and for
+  the words a reveal just returned.
 
 ## What we refuse
 
 - **Wrong password:** one error, the wallet stays locked, and after 5 failures unlock and
   re-auth back off exponentially (in memory, capped at 5 minutes).
-- **Locked state:** cannot sign, export, derive, or list history.
-- **Pages:** cannot call `wallet.*` — send, unlock, confirm and export are not on the
-  relay's allowlist. Site-connect is `page.requestAccounts` / `page.getAccounts` /
+- **The phrase without the password:** `wallet.revealPhrase` needs a wallet that is
+  already unlocked **and** the password re-typed against the sealed vault. A wrong one
+  counts against the same back-off as a wrong unlock and names nothing but the password.
+  There is no copy button on that screen, or on any screen that shows a phrase. A wallet
+  imported from a raw 32-byte seed, or sealed before the reveal existed, refuses with
+  `NO_PHRASE` rather than manufacture words for a different wallet — and words that are
+  shown are checked to re-derive *this* vault's HD seed before they reach the screen.
+- **Locked state:** cannot sign, derive, list history, or show the phrase. Revealing
+  refuses a locked wallet even with the right password, and never unlocks one as a side
+  effect. There is no export method at all: the wallet will not write the seed or the
+  phrase to a file, the clipboard or anything else.
+- **Pages:** cannot call `wallet.*` — send, unlock, confirm and `revealPhrase` are not on
+  the relay's allowlist. Site-connect is `page.requestAccounts` / `page.getAccounts` /
   `page.disconnect`, matched on the **exact** origin the browser reports for the sender,
   never on an origin the page supplies.
 - **Connect without consent:** an unapproved origin's `requestAccounts` is held, not
@@ -87,10 +106,25 @@ tip height and refuses a fork.
 - Mainnet, Dilithium multisig, hardware signers, and an attacker who already runs code as
   you: a compromised OS, a malicious extension with `debugger`/`management` rights, or
   anything that can read another process's memory.
-- Phishing that convinces the user to type the phrase somewhere else. The wallet shows the
-  phrase once and never re-displays it, but it cannot defend a user against themselves.
-- The unlock back-off is in memory only; it does not survive a service-worker restart, and
-  it is not a substitute for a strong password.
+- Phishing that talks the user into revealing the phrase. This wallet used to be able to
+  answer "it cannot show you your words"; since Settings → Security grew a reveal, it
+  cannot. What it can say is that the reveal crosses no boundary the password did not
+  already cross: the same vault, under the same password, already hands over full and
+  unrevocable spend authority through the send screen. Refusing to display the words would
+  have protected the coins from nobody. The one thing that genuinely got worse is
+  portability — twelve English words can be photographed, read down a phone line or typed
+  into another machine, and a 32-byte HD seed hex is not carried off that easily. What the
+  wallet still does is **never ask for the phrase**, and never accept one outside the
+  import screen, so anything prompting you to "confirm your recovery phrase" is somebody
+  else talking.
+- The back-off shared by unlock, re-authentication and the phrase reveal is in memory
+  only; it does not survive a service-worker restart, and it is not a substitute for a
+  strong password.
+- **Removing the wallet** asks for the word `DELETE` and not for the password, so the
+  phrase reveal is now better guarded than the vault's deletion. The asymmetry is stated
+  rather than papered over: a wipe destroys one device's copy and cannot move a coin, and
+  the phrase restores the wallet afterwards — but nobody should read the reveal's password
+  gate as this project's floor when the floor next to it is a typed word.
 - The node's RPC user and password live in `chrome.storage.local` (not the seed vault):
   they are credentials to a server the user runs, not wallet key material, and the
   end-to-end suite asserts that this is what happens. Pages cannot read or set the

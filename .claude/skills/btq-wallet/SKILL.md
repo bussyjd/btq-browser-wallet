@@ -20,6 +20,9 @@ explains the import-from-seed design with diagrams.
 - Reads balance and history from the public explorer, and broadcasts through a BTQ Core
   node's JSON-RPC, because the explorer has no push route.
 - Signs inside the service worker and keeps the keys there.
+- Shows the recovery phrase again under Settings → Security, on an unlocked wallet and
+  only once the password has been re-typed. Deliberate, and not a weakening: the same
+  password already authorises spending the same coins.
 - Connects to sites the way MetaMask does: a page asks, the user approves one exact
   origin, and the grant is revocable.
 - Ships the wallet-shaped work around the protocol — fee presets, gap-limit restore,
@@ -59,7 +62,8 @@ src/core/       pure, browser-safe: no Buffer, no node:, no chrome.*, no fetch
   script/       p2mr.ts (leaf, tapleaf, scriptPubKey, commitsToProgram)  address.ts (bech32m)
   tx/           serialize · parse (raw-tx decoder) · sighash (BIP341 tapscript)
                 fee (scale-16, dust) · coinselect · builder
-  vault/        encrypt.ts (PBKDF2-SHA256 600k + AES-256-GCM)  payload.ts
+  vault/        encrypt.ts (PBKDF2-SHA256 600k + AES-256-GCM)
+                payload.ts (v1; v2 seals the BIP39 entropy beside the HD seed)
   wallet/       keyring.ts (the state machine) derive gap storage destination format errors
   explorer/     parse · schema · utxo · history · broadcast (no I/O — pure parsers)
   connect/      permissions.ts (the per-origin allowlist)
@@ -75,11 +79,17 @@ src/ui/         React popup: App.tsx router, hooks/useWallet.ts, components/, sc
                 (Welcome Onboarding CreatePassword ShowSeed ConfirmSeed ImportChoice
                 ImportMnemonic ImportRawSeed Unlock Home Settings ConnectApproval),
                 screens/home/{Receive,Send,Activity}, types.ts (RPC result shapes)
+                components/SeedGrid.tsx renders the phrase for both surfaces that show
+                one (ShowSeed, and the Settings reveal) and is the sole renderer of
+                `seed-word-N` — the video redaction keys on that prefix, so a second
+                one would paint a legible phrase into a committed recording
 ```
 
-**Trust boundary:** the mnemonic and derived seeds exist only inside the service worker,
-only while unlocked. Content scripts and pages get a narrow allowlisted message API.
-Any change that moves key material outward is a bug, however convenient.
+**Trust boundary:** the HD seed, and the BIP39 entropy a v2 vault seals beside it, exist
+only inside the service worker and only while unlocked. Content scripts and pages get a
+narrow allowlisted message API and no phrase or key material at all. The popup gets the
+words from exactly two methods, `wallet.create` and `wallet.revealPhrase`, and nothing
+else; any change that widens that is a bug, however convenient.
 
 **Connect lifecycle:** an unapproved origin's `page.requestAccounts` is held — the broker
 parks the response in a timestamped per-origin map and opens a dedicated approval window
@@ -116,10 +126,18 @@ make a test pass** — a diff there means addresses or signatures changed.
 
 ## Definition of done for each feature
 
-- **Create:** BIP39 mnemonic generated with real entropy, shown exactly once,
-  confirmation challenge, vault sealed with a password before anything is persisted.
+- **Create:** BIP39 mnemonic generated with real entropy, shown on its own screen with a
+  confirmation challenge, and the vault sealed with a password — entropy and HD seed in
+  one ciphertext — before anything is persisted.
+- **Reveal:** Settings → Security shows the phrase again on an unlocked wallet, and only
+  after the password is re-typed against the sealed vault, sharing the unlock back-off in
+  both directions. The words are regenerated from the sealed entropy per call, verified to
+  re-derive that vault's `hdSeedHex`, and never cached; a raw-seed or v1 vault answers
+  `NO_PHRASE` instead of inventing any. No copy button — not there, not anywhere.
 - **Import:** BIP39 mnemonic *and* raw 32-byte btq-core HD seed; validates checksum;
-  rejects a bad seed with a clear message.
+  rejects a bad seed with a clear message. A raw-seed wallet has no phrase, for good: the
+  words are not recoverable from an HD seed, and pretending otherwise would hand the user
+  a phrase that restores a different wallet.
 - **Receive:** derived address, QR, copy, gap-limit scan so a restored wallet finds
   used addresses.
 - **Send:** UTXOs from the explorer, coin selection, scale-16 fee, sighash, sign,

@@ -77,7 +77,9 @@ src/background/    MV3 service worker: index.ts (listener) keyring dispatch
 src/content/       isolated-world relay — allowlisted page.* only
 src/inpage/        btq-provider.js — MAIN world, frozen surface, no chrome.*
 src/ui/            App.tsx router · hooks/useWallet.ts (the only caller of rpc())
-                   components/ (Button Card Field Header Toast TabBar AddressBlock qr …)
+                   components/ (Button Card Field Header Toast TabBar AddressBlock
+                   SeedGrid qr …) — SeedGrid is the only renderer of `seed-word-N`
+                   and must stay so; the recording redaction keys on that prefix
                    screens/ (Welcome Onboarding CreatePassword ShowSeed ConfirmSeed
                    ImportChoice ImportMnemonic ImportRawSeed Unlock Home Settings
                    ConnectApproval)
@@ -87,6 +89,14 @@ src/ui/            App.tsx router · hooks/useWallet.ts (the only caller of rpc(
 The popup⇄worker RPC surface is `wallet.*`; pages reach only `page.requestAccounts`,
 `page.getAccounts`, `page.disconnect` through the relay. Add a method in
 `src/core/rpc/protocol.ts` + `dispatch.ts`, its result shape in `src/ui/types.ts`.
+
+**Phrase material crosses the worker boundary on exactly two methods** — `wallet.create`
+(onboarding) and `wallet.revealPhrase` (Settings → Security, on an unlocked wallet, after
+the password is re-typed against the sealed vault, sharing the unlock back-off). A v2
+vault seals the BIP39 entropy next to `hdSeedHex`; the words are regenerated per call,
+checked to re-derive that seed, and never cached — a raw-seed or v1 vault answers
+`NO_PHRASE` rather than invent any. A third such method would be a design change, not a
+convenience: keep the count at two.
 
 **Connect lifecycle.** An unapproved origin's `page.requestAccounts` is *held*: the broker
 (`src/background/connect.ts`) parks `sendResponse` in a map keyed by canonical origin, each
@@ -118,7 +128,9 @@ npm run build                # MV3 extension → dist/
 npm run playwright:install   # once, before the first e2e run
 npm run test:e2e             # builds dist/, drives it in real Chromium (SKIP_BUILD=1 to reuse)
 npm run test:all             # npm test, then the e2e suite
-npm run demo:video           # records tests/e2e/smoke.spec.ts → demo/btq-wallet-demo.mp4
+npm run demo:video           # records tests/e2e/smoke.spec.ts → demo/btq-wallet-suite.mp4
+npm run demo:preflight       # will a live take work? node, explorer, funds — ~3 s, no browser
+npm run demo:live            # preflight, build, record live.spec.ts, stitch → demo/btq-wallet-demo.mp4
 BTQ_REGTEST=1 npx vitest run tests/integration   # cross-check vs a regtest node (see README)
 npx tsx scripts/gen-vectors.ts                   # regenerate vectors (rule above applies)
 ```
