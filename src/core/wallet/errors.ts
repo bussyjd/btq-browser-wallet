@@ -48,6 +48,15 @@ export type WalletErrorCode =
   | 'INSUFFICIENT'
   | 'TOO_MANY_INPUTS'
   | 'NO_COMMITMENT'
+  /**
+   * The plan the review card described is not the plan that would be signed
+   * now: the handle is unknown or already spent, the active account moved under
+   * it, one of its inputs is no longer ours to spend, or it simply sat there
+   * too long. Never a password problem and never a reason to rebuild silently —
+   * the whole point is that nothing is signed until the user has read the
+   * numbers that will actually go on chain.
+   */
+  | 'PLAN_STALE'
   | 'NOT_CONNECTED'
   | 'USER_REJECTED'
   | 'REQUEST_TIMEOUT'

@@ -210,13 +210,18 @@ export async function dispatch(keyring: Keyring, request: RpcRequest, ctx: Dispa
       if (!ctx.fetchUtxos || !ctx.broadcast) {
         throw new WalletError('EXPLORER_UNAVAILABLE', 'Explorer is not configured.');
       }
+      // Two parameters, and neither of them describes the transaction. The
+      // destination, the amount, the fee rate and the chosen inputs were all
+      // fixed when `wallet.prepareSend` drew the review card; `planId` is an
+      // opaque handle into worker-side state and carries none of them. A popup
+      // — compromised, or merely showing numbers that have since moved — can
+      // therefore no longer change what is signed after the user has read it,
+      // and the worker never rebuilds a plan the user has not seen.
       const result = await keyring.confirmSend({
-        destination: str(p.destination, 'destination'),
-        amountSats: sats(p.amountSats),
+        planId: str(p.planId, 'planId'),
         password: str(p.password, 'password'),
         fetchUtxos: ctx.fetchUtxos,
         broadcast: ctx.broadcast,
-        feeRateSatPerKvB: feeRate(p.feeRateSatPerKvB),
       });
       // `decoded` carries Uint8Array-free plain data but is large; the popup
       // only needs the summary fields plus the hex it may have to copy out.

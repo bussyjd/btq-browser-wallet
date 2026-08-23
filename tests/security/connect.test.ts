@@ -118,8 +118,7 @@ describe('site-connect exact origin', () => {
     expect(afterLock).toEqual({ accounts: [] });
     await expect(
       k.confirmSend({
-        destination: 'tbtq1zqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq',
-        amountSats: 50_000_000n,
+        planId: 'no-such-plan',
         password: PASSWORD,
         fetchUtxos: async (): Promise<ExplorerUtxo[]> => [],
         broadcast: async () => ({ txid: '00'.repeat(32) }),

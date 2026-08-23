@@ -14,9 +14,10 @@ import { mnemonicToHdSeed } from '../../src/core/crypto/mnemonic.js';
 import { bytesToHex, hexToBytes } from '../../src/core/util/hex.js';
 import { PUBLIC_KEY_BYTES, TX_SIGNATURE_BYTES, SIGHASH_ALL, verifyTransactionHash } from '../../src/core/crypto/mldsa.js';
 import { tapLeafHash } from '../../src/core/script/p2mr.js';
-import { p2mrSighash } from '../../src/core/tx/sighash.js';
-import { parseTx } from '../../src/core/tx/parse.js';
+import { p2mrSighash, txid as txidOf } from '../../src/core/tx/sighash.js';
+import { decodeTxPreview, parseTx } from '../../src/core/tx/parse.js';
 import { MemoryWalletStorage, TEST_ENCRYPT } from '../helpers/memory-store.js';
+import { reviewAndSend } from '../helpers/send.js';
 import type { ExplorerUtxo } from '../../src/core/explorer/utxo.js';
 import vectors from '../vectors/golden.json' with { type: 'json' };
 
@@ -43,6 +44,36 @@ function utxo(address: string, value: bigint, txid = 'ab'.repeat(32)): ExplorerU
 
 function coins(map: Record<string, ExplorerUtxo[]>): (address: string) => Promise<ExplorerUtxo[]> {
   return async (address) => map[address] ?? [];
+}
+
+/**
+ * Storage whose origin load can be parked, so a switch can land inside
+ * `approveConnect` — between deciding which account is being granted and
+ * answering with an address.
+ */
+class GatedOriginsStore extends MemoryWalletStorage {
+  private wait: Promise<void> | null = null;
+  private releaseHold: () => void = () => undefined;
+
+  arm(): void {
+    this.wait = new Promise<void>((resolve) => {
+      this.releaseHold = resolve;
+    });
+  }
+
+  release(): void {
+    this.releaseHold();
+    this.wait = null;
+  }
+
+  override async loadOrigins() {
+    const held = this.wait;
+    if (held) {
+      this.wait = null; // park the first read only
+      await held;
+    }
+    return super.loadOrigins();
+  }
 }
 
 /** Storage whose vault load can be parked, so a switch can race confirmSend's KDF. */
@@ -203,6 +234,46 @@ describe('extra HD accounts', () => {
     expect(await k.connectedSites()).toEqual([{ origin: OTHER, account: 1 }]);
   });
 
+  it('a switch inside approveConnect cannot grant one account and answer with another', async () => {
+    // Attacker / user loss: the grant and the address it is answered with came
+    // from two separate reads of the active account, with two storage awaits
+    // between them. A switch landing in that window recorded (origin, 0) and
+    // handed the page account 1's address — an address of an account it had
+    // never been approved for — after which the grant it *did* hold answered
+    // `[]` for good. The meta lock did not close it: they were never in the
+    // same critical section.
+    const store = new GatedOriginsStore();
+    const k = ring(store);
+    await k.importMnemonic(MNEMONIC, PASSWORD);
+    const a0 = (await k.receiveAddress()).address;
+    const a1 = (await k.createAccount()).address;
+    await k.switchAccount(0);
+    expect(a1).not.toBe(a0);
+
+    store.arm();
+    const approving = k.approveConnect(DAPP);
+    await new Promise((r) => setTimeout(r, 20));
+    // The user clicks Account 1 in the header while the approval is in flight.
+    const switching = k.switchAccount(1);
+    store.release();
+
+    const granted = await approving;
+    await switching;
+
+    // One account, one answer: the address handed to the site belongs to the
+    // pair that was recorded.
+    expect(await k.connectedSites()).toEqual([{ origin: DAPP, account: 0 }]);
+    expect(granted.accounts).toEqual([a0]);
+    expect(granted.accounts).not.toContain(a1);
+    // The switch really did land — this is a race that happened, not one that
+    // was serialised away by the test.
+    expect((await k.status()).activeAccount).toBe(1);
+    // And the grant behaves: silent on account 1, live again on account 0.
+    expect((await k.getAccounts(DAPP)).accounts).toEqual([]);
+    await k.switchAccount(0);
+    expect((await k.getAccounts(DAPP)).accounts).toEqual([a0]);
+  });
+
   it('a locked wallet hands out no address and no account name', async () => {
     // Attacker gain: a locked popup on a borrowed laptop, a shoulder, or a
     // screen recording of the unlock screen would otherwise read every
@@ -349,7 +420,7 @@ describe('extra HD accounts', () => {
       [a0]: [utxo(a0, 80_000n, 'aa'.repeat(32))],
       [a1]: [utxo(a1, 50_000n, 'bb'.repeat(32))],
     });
-    const signed = await k.confirmSend({
+    const signed = await reviewAndSend(k, {
       destination: DEST,
       amountSats: 10_000n,
       password: PASSWORD,
@@ -392,10 +463,12 @@ describe('extra HD accounts', () => {
       [a1]: [utxo(a1, 80_000n, 'bb'.repeat(32))],
     });
 
+    // Reviewed on Account 0, so the plan — inputs, fee and change alike — is
+    // Account 0's before the password is typed.
+    const { planId } = await k.prepareSend({ destination: DEST, amountSats: 10_000n, fetchUtxos });
     store.arm();
     const send = k.confirmSend({
-      destination: DEST,
-      amountSats: 10_000n,
+      planId,
       password: PASSWORD,
       fetchUtxos,
       broadcast: async () => {
@@ -426,7 +499,7 @@ describe('extra HD accounts', () => {
     const restarted = ring(store);
     await restarted.unlock(PASSWORD);
     expect((await restarted.status()).activeAccount).toBe(1);
-    const signed = await restarted.confirmSend({
+    const signed = await reviewAndSend(restarted, {
       destination: DEST,
       amountSats: 10_000n,
       password: PASSWORD,
@@ -780,5 +853,129 @@ describe('a scan in flight never overwrites the user\'s own choices', () => {
     expect(rec?.lastBalanceSats).toBe('5000');
     expect(rec?.balanceAt).not.toBeNull();
     expect(meta?.tipHeight).toBe(900_100);
+  });
+});
+
+describe('a scan never hands the same change address out twice', () => {
+  /**
+   * The change cursor is the one cursor the wallet advances by itself:
+   * `confirmSend` moves `internalNext` past the address it has just paid change
+   * to. Everything else in an `AccountRecord` is a reading of the chain, and a
+   * full rescan is authoritative about those. It is not authoritative about
+   * this one, because the transaction it would have to see is in a mempool the
+   * explorer has not indexed — or, when the broadcast failed, is nowhere at
+   * all. A walk therefore reads that change address as unused and reports a
+   * lower stop, and taking it verbatim sends the *next* change straight back to
+   * the same address. Two change outputs of two transactions on one address is
+   * a permanent, public link between them, for anyone reading the chain.
+   */
+  const tick = () => new Promise((r) => setTimeout(r, 20));
+
+  /** Every address unused except `used`; the explorer knows nothing of our sends. */
+  function blindLookup(used: string[]) {
+    const seen = new Set(used);
+    return async (address: string) => ({
+      used: seen.has(address),
+      txCount: seen.has(address) ? 1 : 0,
+      reportedBalanceSats: 0n,
+    });
+  }
+
+  /** Two coins on the receive address, so a second send has something to spend. */
+  function twoCoins(a0: string) {
+    return coins({
+      [a0]: [utxo(a0, 90_000_000n, 'aa'.repeat(32)), utxo(a0, 90_000_000n, 'bb'.repeat(32))],
+    });
+  }
+
+  /** The address the change output of a signed transaction pays. */
+  function changeAddressOf(hex: string): string {
+    const outs = decodeTxPreview(hex, 'testnet').outputs;
+    expect(outs).toHaveLength(2);
+    return outs[1]!.address!;
+  }
+
+  async function send(k: Keyring, fetchUtxos: (a: string) => Promise<ExplorerUtxo[]>) {
+    return reviewAndSend(k, {
+      destination: DEST,
+      amountSats: 10_000_000n,
+      password: PASSWORD,
+      fetchUtxos,
+      broadcast: async (hex) => ({ txid: txidOf(parseTx(hex)), via: 'node' as const }),
+    });
+  }
+
+  it('a full rescan in flight over a send does not walk the change cursor back', async () => {
+    // The reported race: Settings → Rescan all addresses, close the popup, then
+    // send. The rescan keeps running in the worker and commits last.
+    const store = new MemoryWalletStorage();
+    const k = ring(store);
+    await k.importMnemonic(MNEMONIC, PASSWORD);
+    const a0 = (await k.receiveAddress()).address;
+    const fetchUtxos = twoCoins(a0);
+
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let parked = false;
+    const lookup = async (address: string) => {
+      if (!parked) {
+        parked = true;
+        await gate;
+      }
+      return { used: address === a0, txCount: address === a0 ? 1 : 0, reportedBalanceSats: 0n };
+    };
+
+    const scanning = k.scan(lookup, undefined, null, { full: true });
+    await tick();
+    const first = await send(k, fetchUtxos);
+    release();
+    await scanning;
+
+    expect((await store.loadMeta())?.accounts.find((a) => a.index === 0)?.internalNext).toBe(1);
+    // The money assertion: the next send's change goes somewhere new.
+    const second = await send(k, fetchUtxos);
+    expect(changeAddressOf(second.hex)).not.toBe(changeAddressOf(first.hex));
+    expect(changeAddressOf(first.hex)).toBe(k.addressAt('internal', 0).address);
+    expect(changeAddressOf(second.hex)).toBe(k.addressAt('internal', 1).address);
+  });
+
+  it('a full rescan the send finished before does not either', async () => {
+    // The wider door, and the one with no race in it at all: the send committed
+    // first and the rescan started afterwards, so a snapshot taken when the
+    // pass began already carries the advanced cursor. What makes the walk read
+    // low is not *when* it started but that the explorer has not indexed the
+    // transaction — a mempool it does not serve, an indexer minutes behind, or
+    // a broadcast that failed outright and left the change output nowhere.
+    const store = new MemoryWalletStorage();
+    const k = ring(store);
+    await k.importMnemonic(MNEMONIC, PASSWORD);
+    const a0 = (await k.receiveAddress()).address;
+    const fetchUtxos = twoCoins(a0);
+
+    const first = await send(k, fetchUtxos);
+    expect((await store.loadMeta())?.accounts.find((a) => a.index === 0)?.internalNext).toBe(1);
+
+    await k.scan(blindLookup([a0]), undefined, null, { full: true });
+
+    expect((await store.loadMeta())?.accounts.find((a) => a.index === 0)?.internalNext).toBe(1);
+    const second = await send(k, fetchUtxos);
+    expect(changeAddressOf(second.hex)).not.toBe(changeAddressOf(first.hex));
+  });
+
+  it('a full rescan still walks a cursor down when the chain really disagrees', async () => {
+    // The other half of the contract, and the reason `full` exists: a receive
+    // cursor that ran ahead of the chain — a bad explorer answer, a reorg — has
+    // to be correctable, or "Rescan all addresses" fixes nothing. Nothing but
+    // the chain advances this one, so there is no local knowledge to protect.
+    const store = new MemoryWalletStorage();
+    const k = ring(store);
+    await k.importMnemonic(MNEMONIC, PASSWORD);
+    const used = [0, 1, 2].map((i) => k.addressAt('external', i).address);
+
+    await k.scan(blindLookup(used));
+    expect((await store.loadMeta())?.accounts.find((a) => a.index === 0)?.externalNext).toBe(3);
+
+    await k.scan(blindLookup([]), undefined, null, { full: true });
+    expect((await store.loadMeta())?.accounts.find((a) => a.index === 0)?.externalNext).toBe(0);
   });
 });

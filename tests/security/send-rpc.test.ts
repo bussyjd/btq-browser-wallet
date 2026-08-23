@@ -4,6 +4,7 @@ import { Keyring, PENDING_RESERVE_MS } from '../../src/core/wallet/keyring.js';
 import { dispatch } from '../../src/core/rpc/dispatch.js';
 import { WALLET_METHODS } from '../../src/core/rpc/protocol.js';
 import { MemoryWalletStorage, TEST_ENCRYPT } from '../helpers/memory-store.js';
+import { reviewAndSend } from '../helpers/send.js';
 import { PUBLIC_KEY_BYTES, TX_SIGNATURE_BYTES, SIGHASH_ALL, verifyTransactionHash } from '../../src/core/crypto/mldsa.js';
 import { scriptForAddress } from '../../src/core/script/address.js';
 import { tapLeafHash } from '../../src/core/script/p2mr.js';
@@ -59,10 +60,12 @@ describe('send RPC — fund-move paths', () => {
     const k = ring();
     await k.importMnemonic(MNEMONIC, PASSWORD);
     k.lock();
+    // Locked is checked before the plan handle is even looked at, so this says
+    // "locked" and not "that plan is stale" — the user is told the one thing
+    // they can act on.
     await expect(
       k.confirmSend({
-        destination: DEST,
-        amountSats: 50_000_000n,
+        planId: 'no-such-plan',
         password: PASSWORD,
         fetchUtxos: async () => [],
         broadcast: async () => ({ txid: '00'.repeat(32) }),
@@ -73,15 +76,28 @@ describe('send RPC — fund-move paths', () => {
   it('wrong password on confirmSend does not sign', async () => {
     const k = ring();
     await k.importMnemonic(MNEMONIC, PASSWORD);
+    const receive = await k.receiveAddress();
+    const fetchUtxos = fundOnce(receive.address);
+    // A real, live plan — the password is the only thing wrong here.
+    const { planId } = await k.prepareSend({ destination: DEST, amountSats: 10_000_000n, fetchUtxos });
     await expect(
       k.confirmSend({
-        destination: DEST,
-        amountSats: 50_000_000n,
+        planId,
         password: 'wrong-pass',
-        fetchUtxos: async () => [],
+        fetchUtxos,
         broadcast: async () => ({ txid: '00'.repeat(32) }),
       }),
     ).rejects.toThrow('Incorrect password.');
+    expect(await k.listActivity()).toHaveLength(0);
+    // …and a typo does not throw the reviewed plan away: re-auth is checked
+    // before the plan is consumed, so the same card confirms on the retry.
+    const retry = await k.confirmSend({
+      planId,
+      password: PASSWORD,
+      fetchUtxos,
+      broadcast: async (hex) => ({ txid: parseTxidOf(hex), via: 'node' }),
+    });
+    expect(retry.broadcastStatus).toBe('pending');
   });
 
   it('the signed witness verifies against the sighash over the real UTXO value', async () => {
@@ -93,7 +109,7 @@ describe('send RPC — fund-move paths', () => {
     const receive = await k.receiveAddress();
     const fetchUtxos = fundOnce(receive.address);
 
-    const signed = await k.confirmSend({
+    const signed = await reviewAndSend(k, {
       destination: DEST,
       amountSats: 10_000_000n,
       password: PASSWORD,
@@ -140,7 +156,7 @@ describe('send RPC — fund-move paths', () => {
     const k = ring();
     await k.importMnemonic(MNEMONIC, PASSWORD);
     const receive = await k.receiveAddress();
-    const signed = await k.confirmSend({
+    const signed = await reviewAndSend(k, {
       destination: DEST,
       amountSats: 10_000_000n,
       password: PASSWORD,
@@ -160,7 +176,7 @@ describe('send RPC — fund-move paths', () => {
     const k = ring();
     await k.importMnemonic(MNEMONIC, PASSWORD);
     const receive = await k.receiveAddress();
-    const result = await k.confirmSend({
+    const result = await reviewAndSend(k, {
       destination: DEST,
       amountSats: 10_000_000n,
       password: PASSWORD,
@@ -185,7 +201,7 @@ describe('send RPC — fund-move paths', () => {
     const k = ring();
     await k.importMnemonic(MNEMONIC, PASSWORD);
     const receive = await k.receiveAddress();
-    await k.confirmSend({
+    await reviewAndSend(k, {
       destination: DEST,
       amountSats: 10_000_000n,
       password: PASSWORD,
@@ -203,7 +219,7 @@ describe('send RPC — fund-move paths', () => {
     const k = ring();
     await k.importMnemonic(MNEMONIC, PASSWORD);
     const receive = await k.receiveAddress();
-    const result = await k.confirmSend({
+    const result = await reviewAndSend(k, {
       destination: DEST,
       amountSats: 10_000_000n,
       password: PASSWORD,
@@ -222,7 +238,7 @@ describe('send RPC — fund-move paths', () => {
     await k.importMnemonic(MNEMONIC, PASSWORD);
     const receive = await k.receiveAddress();
     const fetchUtxos = fundOnce(receive.address);
-    const first = await k.confirmSend({
+    const first = await reviewAndSend(k, {
       destination: DEST,
       amountSats: 10_000_000n,
       password: PASSWORD,
@@ -231,7 +247,7 @@ describe('send RPC — fund-move paths', () => {
     });
     expect(first.broadcastStatus).toBe('pending');
     await expect(
-      k.confirmSend({
+      reviewAndSend(k, {
         destination: DEST,
         amountSats: 10_000_000n,
         password: PASSWORD,
@@ -248,7 +264,7 @@ describe('send RPC — fund-move paths', () => {
     await k.importMnemonic(MNEMONIC, PASSWORD);
     const receive = await k.receiveAddress();
     const fetchUtxos = fundOnce(receive.address);
-    await k.confirmSend({
+    await reviewAndSend(k, {
       destination: DEST,
       amountSats: 10_000_000n,
       password: PASSWORD,
@@ -257,7 +273,7 @@ describe('send RPC — fund-move paths', () => {
         throw new BroadcastError('no broadcast route', 'explorer', true);
       },
     });
-    const retry = await k.confirmSend({
+    const retry = await reviewAndSend(k, {
       destination: DEST,
       amountSats: 10_000_000n,
       password: PASSWORD,
@@ -283,7 +299,7 @@ describe('send RPC — fund-move paths', () => {
     await k.importMnemonic(MNEMONIC, PASSWORD);
     const receive = await k.receiveAddress();
     const fetchUtxos = fundOnce(receive.address);
-    await k.confirmSend({
+    await reviewAndSend(k, {
       destination: DEST,
       amountSats: 10_000_000n,
       password: PASSWORD,
@@ -302,7 +318,7 @@ describe('send RPC — fund-move paths', () => {
     await k.importMnemonic(MNEMONIC, PASSWORD);
     const receive = await k.receiveAddress();
     const fake = 'ff'.repeat(32);
-    const signed = await k.confirmSend({
+    const signed = await reviewAndSend(k, {
       destination: DEST,
       amountSats: 10_000_000n,
       password: PASSWORD,
@@ -332,11 +348,11 @@ describe('send RPC — fund-move paths', () => {
       const fetchUtxos = fundOnce(receive.address);
 
       const prepared = await k.prepareSend({ destination: raw, amountSats: 10_000_000n, fetchUtxos });
-      // confirmSend first: this is the call that used to sign, then throw
+      // The plan normalises once, at review, and confirmSend signs that plan —
+      // this is the call that used to build a second one and throw
       // NO_COMMITMENT out of previewFromSigned with the password already spent.
       const signed = await k.confirmSend({
-        destination: raw,
-        amountSats: 10_000_000n,
+        planId: prepared.planId,
         password: PASSWORD,
         fetchUtxos,
         broadcast: async (hex) => ({ txid: parseTxidOf(hex), via: 'node' }),
@@ -386,7 +402,7 @@ describe('send RPC — fund-move paths', () => {
     const k = ring();
     await k.importMnemonic(MNEMONIC, PASSWORD);
     const receive = await k.receiveAddress();
-    const attempt = k.confirmSend({
+    const attempt = reviewAndSend(k, {
       destination: DEST,
       amountSats: 10_000_000n,
       password: PASSWORD,

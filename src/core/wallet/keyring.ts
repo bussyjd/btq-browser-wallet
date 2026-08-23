@@ -42,6 +42,7 @@ import {
   type BackupPayload,
 } from '../vault/backup.js';
 import { bytesToHex, hexToBytes, wipeBytes } from '../util/hex.js';
+import { bytesEqual } from '../util/bytes.js';
 import { BroadcastError, WalletError, type BroadcastVia } from './errors.js';
 import { deriveKeySeed, masterFromSeed } from '../crypto/hd.js';
 import { scriptForAddress } from '../script/address.js';
@@ -89,6 +90,31 @@ export const UNLOCK_BACKOFF_MAX_MS = 5 * 60 * 1000;
  * the wallet for good.
  */
 export const PENDING_RESERVE_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * How long the plan behind a review card stays confirmable.
+ *
+ * Long enough that reading the numbers and typing a password is never a race,
+ * short enough that a card left open on a desk cannot be confirmed against a
+ * fee rate and a coin set from another hour. Expiry is a `PLAN_STALE` refusal
+ * and the Send screen re-prices immediately, so the cost of it being too short
+ * is one extra round trip and the cost of it being too long is a signature over
+ * numbers nobody has looked at recently.
+ */
+export const SEND_PLAN_TTL_MS = 2 * 60 * 1000;
+
+/**
+ * Bytes of entropy behind a plan handle. The id is not a secret in the sense a
+ * key is — the send methods are default-denied to pages, so nothing outside the
+ * popup can present one — but it is the only thing standing between a caller
+ * and "sign the plan you have cached", so it is drawn from the CSPRNG rather
+ * than counted up.
+ */
+const PLAN_ID_BYTES = 16;
+
+/** One sentence, one place: what a user is told when their plan has moved. */
+const PLAN_STALE_MESSAGE =
+  'The transaction changed since you reviewed it. Check the details and confirm again.';
 
 export interface KeyringOptions {
   network?: BtqNetwork;
@@ -155,7 +181,9 @@ export type ScanScope = 'active' | 'all';
  * not `Partial<AccountRecord>`: `index`, `name` and the account's membership of
  * the list are the user's, and a scan that could name them is a scan that can
  * silently undo a rename. `full` records which kind of pass produced them, so
- * the merge knows whether it may move a cursor backwards.
+ * the merge knows whether it may move a cursor backwards — with `internalNext`
+ * the standing exception, because the wallet moves that one itself and no
+ * explorer can vouch for it in time (see `commitScan`).
  */
 interface ScanCursors {
   full: boolean;
@@ -166,6 +194,45 @@ interface ScanCursors {
   scannedExternal: number;
   scannedInternal: number;
   address: string | null;
+}
+
+/**
+ * The plan behind one review card, and everything needed to decide whether it
+ * still describes the transaction it described when it was drawn.
+ *
+ * It never leaves this object. `prepareSend` hands out `id` and a summary; the
+ * plan itself — which outpoints are about to be spent, which key signs each of
+ * them — is worker-side state, because a popup that could name the inputs could
+ * also choose them.
+ */
+interface PendingPlan {
+  id: string;
+  plan: SendPlan & { changeIndex: number; account: number };
+  /**
+   * The account the plan debits, decided when it was built. `confirmSend`
+   * compares it against its own pin: a preview of one account confirmed while
+   * another is active is a refusal, never a retargeted debit.
+   */
+  account: number;
+  createdAt: number;
+}
+
+/**
+ * What the review card is drawn from, plus the handle that signs it. Every
+ * number here is read off the *stored* plan, so the card and the signature are
+ * two views of one object rather than two computations that happen to agree.
+ */
+export interface SendPlanSummary {
+  /** Opaque handle into worker-side state. Meaningless anywhere else. */
+  planId: string;
+  destination: string;
+  amount: string;
+  fee: string;
+  change: string;
+  inputs: number;
+  feeRateSatPerKvB: number;
+  vsize: number;
+  weight: number;
 }
 
 /** The balance half, committed after the UTXO sweep, with its own timestamp. */
@@ -203,6 +270,17 @@ export class Keyring {
    * switch must not retarget a send the user already reviewed.
    */
   private activeIndex = 0;
+  /**
+   * The plan the review card on screen is showing, if there is one.
+   *
+   * Single-slot: a wallet previews one send at a time, and a second preview
+   * replaces the first rather than leaving two confirmable plans behind. In
+   * memory only, like everything else here — a worker teardown between Review
+   * and Sign costs one `PLAN_STALE` and a re-price, which is exactly what the
+   * user should get for a card whose numbers this build can no longer vouch
+   * for.
+   */
+  private pendingPlan: PendingPlan | null = null;
   /**
    * Serialises every read-modify-write of `WalletMeta` (`updateMeta`). Storage
    * is async, so two handlers that each load, mutate and save can interleave
@@ -446,6 +524,10 @@ export class Keyring {
     this.phraseAvailable = false;
     this.payloadOrigin = null;
     this.lastActivity = 0;
+    // A locked wallet has no reviewed transaction waiting to be signed. Dropped
+    // here rather than checked at confirm time so that a plan cannot survive an
+    // auto-lock and be confirmed by whoever unlocks next.
+    this.forgetPlan();
   }
 
   async wipe(confirmation: string): Promise<void> {
@@ -462,17 +544,30 @@ export class Keyring {
     // skipped when it already agrees — but the read and the write are still one
     // critical section, or a concurrent switch lands between them and this
     // caches the wrong account's address.
-    return this.withMetaLock(async () => {
-      const meta = await this.walletMeta();
-      const rec = activeRecord(meta);
-      const derived = this.receiveAt(rec.externalNext, rec.index);
-      if (rec.address !== derived.address) {
-        rec.address = derived.address;
-        mirrorActive(meta);
-        await this.storage.saveMeta(meta);
-      }
-      return derived;
-    });
+    return this.withMetaLock(async () => (await this.activeReceive()).derived);
+  }
+
+  /**
+   * The active account's receive address, together with *which* account that
+   * was — one read, one answer.
+   *
+   * **The meta lock must already be held.** `withMetaLock` is not reentrant, so
+   * this deliberately does not take it: callers that need the address and one
+   * more fact about the same account (`approveConnect` needs to record a grant
+   * against it) take the lock once and get a single consistent answer, instead
+   * of asking "which account?" and "what is its address?" as two questions with
+   * a switch free to land in between.
+   */
+  private async activeReceive(): Promise<{ derived: DerivedAddress; account: number }> {
+    const meta = await this.walletMeta();
+    const rec = activeRecord(meta);
+    const derived = this.receiveAt(rec.externalNext, rec.index);
+    if (rec.address !== derived.address) {
+      rec.address = derived.address;
+      mirrorActive(meta);
+      await this.storage.saveMeta(meta);
+    }
+    return { derived, account: rec.index };
   }
 
   /**
@@ -503,6 +598,9 @@ export class Keyring {
       this.activeIndex = rec.index;
       return { index: rec.index, name: rec.name, address: rec.address };
     });
+    // A review card describes one account's coins. Changing which account is
+    // active is the user saying "not that one", so the plan goes with it.
+    this.forgetPlan();
     this.touch();
     return created;
   }
@@ -520,6 +618,10 @@ export class Keyring {
       if (!rec.address) rec.address = this.addressAt('external', rec.externalNext, rec.index).address;
       return { index: rec.index, name: rec.name, address: rec.address };
     });
+    // See `createAccount`. A confirmation already in flight is unaffected: it
+    // took its plan and its account pin synchronously, before it awaited the
+    // password, so this expires the card on screen and nothing else.
+    this.forgetPlan();
     this.touch();
     return switched;
   }
@@ -954,25 +1056,45 @@ export class Keyring {
     return { amountSats: best.amount.toString(), fee: best.fee.toString(), inputs: best.inputs.length };
   }
 
+  /**
+   * Build the plan the review card describes, keep it here, and hand back a
+   * handle to it.
+   *
+   * The summary is what the user reads; `planId` is what `confirmSend` signs.
+   * They are the same object, which is the whole point — this call used to
+   * return a flattened copy and throw the plan away, and `confirmSend` then
+   * built a *second* plan from a UTXO set that had moved on and signed that
+   * one. Fee, inputs and change could all differ from the card, and because
+   * this call previewed whatever account was active while `confirmSend` pinned
+   * its own, a switch between the two screens previewed one account and debited
+   * another.
+   *
+   * Only the handle crosses the worker boundary. A plan carries the outpoints
+   * that are about to be spent, and a popup that could name them could pick
+   * them; the id is a lookup into this object and is useless anywhere else.
+   */
   async prepareSend(opts: {
     destination: string;
     amountSats: bigint;
     fetchUtxos: FetchUtxos;
     feeRateSatPerKvB?: number;
-  }): Promise<{
-    destination: string;
-    amount: string;
-    fee: string;
-    change: string;
-    inputs: number;
-    feeRateSatPerKvB: number;
-    vsize: number;
-    weight: number;
-  }> {
+  }): Promise<SendPlanSummary> {
     this.requireUnlocked();
     const rate = assertFeeRate(opts.feeRateSatPerKvB ?? MIN_RELAY_SAT_PER_KVB);
+    // One review at a time. Dropped before the build, not after: if this throws
+    // (dust, insufficient, a bad address) the user is looking at an error, and
+    // the plan they were shown before it is not one they can still confirm.
+    this.forgetPlan();
     const plan = await this.buildPlan(opts.destination, opts.amountSats, opts.fetchUtxos, rate);
+    const id = bytesToHex(this.randomBytes(PLAN_ID_BYTES));
+    this.pendingPlan = {
+      id,
+      plan,
+      account: plan.account,
+      createdAt: this.now(),
+    };
     return {
+      planId: id,
       destination: plan.destination,
       amount: plan.amount.toString(),
       fee: plan.fee.toString(),
@@ -984,18 +1106,55 @@ export class Keyring {
     };
   }
 
-  /** The shared plan construction behind prepareSend and confirmSend. */
+  /** Drop the plan on the review card. Cheap, idempotent, and never throws. */
+  private forgetPlan(): void {
+    this.pendingPlan = null;
+  }
+
+  private randomBytes(n: number): Uint8Array {
+    return this.opts.randomBytes?.(n) ?? crypto.getRandomValues(new Uint8Array(n));
+  }
+
+  /**
+   * The plan is only as good as the coins under it. Between the review card and
+   * the password, a UTXO can confirm, be spent by another device sharing the
+   * seed, or be committed by an earlier send of ours — and a plan that spends a
+   * coin that has moved is either an invalid transaction or a replacement of a
+   * payment already in flight. Every stored input has to still be there, still
+   * be ours, and still be worth exactly what the fee was computed against: the
+   * sighash commits to the input value, so a changed one signs nothing valid.
+   */
+  private async revalidatePlan(held: PendingPlan, fetchUtxos: FetchUtxos): Promise<void> {
+    const live = new Map(
+      (await this.gatherUtxos(fetchUtxos, held.account)).map((u) => [outpointKey(u), u]),
+    );
+    for (const input of held.plan.inputs) {
+      const now = live.get(outpointKey(input));
+      if (
+        !now ||
+        now.value !== input.value ||
+        now.address !== input.address ||
+        !bytesEqual(now.script, input.script)
+      ) {
+        throw new WalletError('PLAN_STALE', PLAN_STALE_MESSAGE);
+      }
+    }
+  }
+
+  /**
+   * Plan construction, in one place and with exactly one caller. It reads the
+   * *persisted* active account and reports which one it built for, so the
+   * account a plan debits is a property of the plan rather than of whatever is
+   * active when it is signed.
+   */
   private async buildPlan(
     destination: string,
     amountSats: bigint,
     fetchUtxos: FetchUtxos,
     feeRateSatPerKvB: number,
-    account?: number,
   ): Promise<SendPlan & { changeIndex: number; account: number }> {
     const meta = await this.walletMeta();
-    const rec =
-      account === undefined ? activeRecord(meta) : meta.accounts.find((a) => a.index === account);
-    if (!rec) throw new WalletError('BAD_PARAMS', 'Unknown account.');
+    const rec = activeRecord(meta);
     const utxos = await this.gatherUtxos(fetchUtxos, rec.index);
     const change = this.addressAt('internal', rec.internalNext, rec.index);
     const plan = planSend({
@@ -1008,24 +1167,47 @@ export class Keyring {
     return { ...plan, changeIndex: change.index, account: rec.index };
   }
 
+  /**
+   * Sign and broadcast the plan the user reviewed — that plan, not one like it.
+   *
+   * `planId` is the handle `prepareSend` returned. There is no destination and
+   * no amount on this call: everything that ends up in the bytes was fixed when
+   * the review card was drawn, so a popup cannot change what is signed after
+   * the user has read it, and nothing here rebuilds a plan the user never saw.
+   * Anything that cannot be resolved to the reviewed plan is `PLAN_STALE` and
+   * signs nothing at all.
+   */
   async confirmSend(opts: {
-    destination: string;
-    amountSats: bigint;
+    planId: string;
     password: string;
     fetchUtxos: FetchUtxos;
     broadcast: Broadcast;
-    feeRateSatPerKvB?: number;
     now?: number;
   }): Promise<ConfirmSendResult> {
-    // Pin the account *before* reauth yields on the KDF. The header switcher
-    // stays clickable while the popup shows "Signing…"; without this pin a
-    // concurrent switch would debit a different account than the one whose
-    // UTXOs and fee the user just reviewed.
+    // Both of these are read *synchronously*, before reauth yields on the KDF.
+    // The header switcher stays clickable while the popup shows "Signing…";
+    // without the pin a concurrent switch would debit a different account than
+    // the one whose UTXOs and fee the user just reviewed, and without taking
+    // the plan in the same breath that switch would expire the plan out from
+    // under a confirmation that had already been consented to.
     const account = this.activeIndex;
+    const held = this.pendingPlan;
     await this.reauth(opts.password);
     const seed = this.requireUnlocked();
-    const rate = assertFeeRate(opts.feeRateSatPerKvB ?? MIN_RELAY_SAT_PER_KVB);
-    const plan = await this.buildPlan(opts.destination, opts.amountSats, opts.fetchUtxos, rate, account);
+    if (!held || held.id !== opts.planId) throw new WalletError('PLAN_STALE', PLAN_STALE_MESSAGE);
+    // Belt and braces on top of expiring the plan on every switch: the pinned
+    // account and the account the plan was *built* for must be the same one.
+    if (held.account !== account) throw new WalletError('PLAN_STALE', PLAN_STALE_MESSAGE);
+    // The card quoted a fee rate as well as a fee; both go stale.
+    if (this.now() - held.createdAt > SEND_PLAN_TTL_MS) {
+      this.forgetPlan();
+      throw new WalletError('PLAN_STALE', PLAN_STALE_MESSAGE);
+    }
+    // One shot. Taken before signing, so a refusal below cannot leave a handle
+    // behind that would sign the same coins twice.
+    if (this.pendingPlan?.id === held.id) this.forgetPlan();
+    await this.revalidatePlan(held, opts.fetchUtxos);
+    const plan = held.plan;
     // Sign before any network call: a broadcast failure must never cost us the
     // bytes. previewFromSigned re-decodes them and refuses on any disagreement.
     const signed = signPlan(plan, (u) => deriveKeySeed(masterFromSeed(seed), u.chain, u.index, plan.account));
@@ -1204,17 +1386,31 @@ export class Keyring {
     }
   }
 
+  /**
+   * Record the approval and answer with the address it was given for.
+   *
+   * The approval screen says "this site will see one address": the address of
+   * the account that is active as the user clicks Connect. That is the pair
+   * that is stored, so it is also the only pair this grant can ever answer —
+   * and the address handed back has to come from the *same* `AccountRecord` the
+   * grant was keyed on. It used to come from a second, separate read: the index
+   * was taken once, then the address was fetched again after two storage
+   * awaits, so a switch landing in that window recorded (origin, 0) and replied
+   * with account 1's address. The site was handed an address of an account it
+   * had never been approved for, and the grant it did hold answered `[]` from
+   * then on. One critical section closes it; two locks would not, because the
+   * hole was never inside either of them.
+   */
   async approveConnect(origin: string): Promise<{ accounts: string[] }> {
     this.requireUnlocked();
     const o = canonicalOrigin(origin);
-    // The approval screen says "this site will see one address": the address of
-    // the account that is active as the user clicks Connect. That is the pair
-    // that is stored, so it is also the only pair this grant can ever answer.
-    const account = await this.activeAccountIndex();
-    const allowed = grantSite(await this.storage.loadOrigins(), o, account);
-    await this.storage.saveOrigins(allowed);
-    await this.storage.savePendingConnect(null);
-    return { accounts: [(await this.receiveAddress()).address] };
+    return this.withMetaLock(async () => {
+      const { derived, account } = await this.activeReceive();
+      const allowed = grantSite(await this.storage.loadOrigins(), o, account);
+      await this.storage.saveOrigins(allowed);
+      await this.storage.savePendingConnect(null);
+      return { accounts: [derived.address] };
+    });
   }
 
   /**
@@ -1440,11 +1636,28 @@ export class Keyring {
         // that is authoritative about where the chain really stops.
         const keep = (stored: number, scanned: number) => (c.full ? scanned : Math.max(stored, scanned));
         rec.externalNext = keep(rec.externalNext, c.externalNext);
-        rec.internalNext = keep(rec.internalNext, c.internalNext);
         rec.usedExternal = keep(rec.usedExternal, c.usedExternal);
         rec.usedInternal = keep(rec.usedInternal, c.usedInternal);
         rec.scannedExternal = keep(rec.scannedExternal, c.scannedExternal);
         rec.scannedInternal = keep(rec.scannedInternal, c.scannedInternal);
+        // …with one exception, and it is the only cursor this wallet advances
+        // by itself. `confirmSend` moves `internalNext` past the change address
+        // it has just paid (`:confirmSend`, under the same meta lock), so that
+        // cursor runs ahead of anything an explorer can confirm: the change
+        // output is unindexed while the transaction sits in a mempool, and if
+        // the broadcast failed it is not on the chain at all. A walk therefore
+        // reads that address as unused and reports a *lower* stop — which is
+        // not "the chain says lower", it is "I did not look recently enough to
+        // know". Taking it verbatim sent the next send's change straight back
+        // to the address the previous one already paid: two change outputs of
+        // two transactions on one address, publicly and permanently linking
+        // them — a worse version of the linkage the scan scoping exists to
+        // prevent. So `internalNext` only ever rises, on a full pass as much as
+        // an incremental one. That costs nothing if it is somehow too high:
+        // `eachAddress` walks 0..internalNext *inclusive*, so no coin is hidden
+        // and the next change simply lands on a fresh index. Being too low has
+        // no such floor.
+        rec.internalNext = Math.max(rec.internalNext, c.internalNext);
         // The cached address is the address *at* the cursor. If the merge kept
         // a cursor this pass never reached, the address it derived belongs to a
         // different index — leave the stored one, which `receiveAddress` will

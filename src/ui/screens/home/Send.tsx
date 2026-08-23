@@ -8,6 +8,7 @@ import { PasswordField } from '../../components/Field.js';
 import { InlineError } from '../../components/InlineError.js';
 import { StatusPill } from '../../components/StatusPill.js';
 import { destinationHint, explorerTxUrl, satPerVb, shortTxid } from '../../format.js';
+import { errMessage, errorCode } from '../../rpc.js';
 import { useAction } from '../../hooks/useAction.js';
 import { useCopy } from '../../hooks/useCopy.js';
 import { FEE_PRESETS, type FeePresetId, type SendPreview, type SendResult } from '../../types.js';
@@ -21,12 +22,12 @@ interface Props {
   result: SendResult | null;
   onResult: (result: SendResult | null) => void;
   prepareSend: (destination: string, amountSats: string, rate: number) => Promise<SendPreview>;
-  confirmSend: (
-    destination: string,
-    amountSats: string,
-    password: string,
-    rate: number,
-  ) => Promise<SendResult>;
+  /**
+   * Sign the plan the card is showing. It takes the plan's handle and the
+   * password, and nothing that describes the payment — this screen displays a
+   * transaction the worker built and cannot compose one of its own.
+   */
+  confirmSend: (planId: string, password: string) => Promise<SendResult>;
   maxSpendable: (rate: number) => Promise<{ amountSats: string }>;
   onSent: () => Promise<void>;
   onToast: (message: string) => void;
@@ -85,17 +86,38 @@ export function Send({
     });
   }
 
+  /**
+   * The plan the card describes has moved on and the worker signed nothing.
+   * Re-price the same payment so the user reads the numbers that would really
+   * go on chain, and stay on the review step — a password box that can only
+   * fail is worse than a fee that changed. If it cannot be re-priced at all any
+   * more, go back to the form, where the amount is editable, carrying the
+   * reason with us.
+   */
+  async function reprice(stale: SendPreview): Promise<void> {
+    try {
+      setPreview(
+        await prepareSend(stale.destination, stale.amount, stale.feeRateSatPerKvB ?? rateOf(feeId)),
+      );
+    } catch (e) {
+      setPreview(null);
+      review.setError(errMessage(e));
+    }
+  }
+
   function onSign(e: FormEvent) {
     e.preventDefault();
     if (!preview) return;
     void sign.run(async () => {
       try {
-        const r = await confirmSend(
-          preview.destination,
-          preview.amount,
-          password,
-          preview.feeRateSatPerKvB ?? rateOf(feeId),
-        );
+        let r: SendResult;
+        try {
+          r = await confirmSend(preview.planId, password);
+        } catch (e) {
+          if (errorCode(e) !== 'PLAN_STALE') throw e;
+          await reprice(preview);
+          throw e;
+        }
         onResult(r);
         setPreview(null);
         setDest('');

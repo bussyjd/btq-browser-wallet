@@ -9,6 +9,7 @@ import { dispatch } from '../../src/core/rpc/dispatch.js';
 import { WALLET_METHODS } from '../../src/core/rpc/protocol.js';
 import { scriptForAddress } from '../../src/core/script/address.js';
 import { MemoryWalletStorage, TEST_ENCRYPT } from '../helpers/memory-store.js';
+import { reviewAndSend } from '../helpers/send.js';
 import type { ExplorerUtxo } from '../../src/core/explorer/utxo.js';
 import vectors from '../vectors/golden.json' with { type: 'json' };
 
@@ -200,9 +201,17 @@ describe('wallet RPC contract v2', () => {
     const k = ring();
     await k.importMnemonic(MNEMONIC, PASSWORD);
     const address = (await k.receiveAddress()).address;
+    const prepared = (await dispatch(
+      k,
+      { method: 'wallet.prepareSend', params: { destination: DEST, amountSats: '10000000' } },
+      { fromTab: false, fetchUtxos: coinsAt(address) },
+    )) as Record<string, unknown>;
+    // The handle is the whole of what the popup carries from one call to the
+    // other: opaque, and no substitute for the plan it names.
+    expect(prepared.planId).toMatch(/^[0-9a-f]{32}$/);
     const result = (await dispatch(
       k,
-      { method: 'wallet.confirmSend', params: { destination: DEST, amountSats: '10000000', password: PASSWORD } },
+      { method: 'wallet.confirmSend', params: { planId: prepared.planId, password: PASSWORD } },
       {
         fromTab: false,
         fetchUtxos: coinsAt(address),
@@ -239,7 +248,7 @@ describe('wallet RPC contract v2', () => {
     const k = ring();
     await k.importMnemonic(MNEMONIC, PASSWORD);
     const address = (await k.receiveAddress()).address;
-    await k.confirmSend({
+    await reviewAndSend(k, {
       destination: DEST,
       amountSats: 10_000_000n,
       password: PASSWORD,

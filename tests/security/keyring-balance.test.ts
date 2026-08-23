@@ -244,13 +244,12 @@ describe('wallet balance comes from /utxos, never from the address record', () =
       expect(plan.feeRateSatPerKvB, `rate ${rate}`).toBe(rate);
       expect(BigInt(plan.amount) + BigInt(plan.fee), `rate ${rate}`).toBe(total);
 
-      // …and it signs: one output, the whole balance, nothing left behind.
+      // …and it signs — the plan just previewed, not a second one built from
+      // the same arguments: one output, the whole balance, nothing left behind.
       const sent = await k.confirmSend({
-        destination: DEST,
-        amountSats: BigInt(max.amountSats),
+        planId: plan.planId,
         password: PASSWORD,
         fetchUtxos,
-        feeRateSatPerKvB: rate,
         broadcast: async () => {
           throw new WalletError('EXPLORER_UNAVAILABLE', 'no broadcast route');
         },

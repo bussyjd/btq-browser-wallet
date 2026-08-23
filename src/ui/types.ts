@@ -157,7 +157,16 @@ export interface BackupRestore {
   accounts: number[];
 }
 
+/**
+ * What the review card is drawn from, and the handle that signs exactly it.
+ *
+ * The popup holds `planId` and reads the rest; the plan behind it — the chosen
+ * outpoints above all — stays in the service worker. That asymmetry is the
+ * point: this screen can display a transaction and ask for it to be signed, but
+ * it cannot describe one.
+ */
 export interface SendPreview {
+  planId: string;
   destination: string;
   /** satoshis, decimal string */
   amount: string;

@@ -282,14 +282,15 @@ export function useWallet() {
     [],
   );
 
+  /**
+   * Sign the plan behind `planId` — the one `prepareSend` built and the review
+   * card is showing. Nothing about the transaction is passed from here: the
+   * popup names a plan, not a payment, so there is no destination or amount on
+   * this call for a stale screen (or a compromised one) to get wrong.
+   */
   const confirmSend = useCallback(
-    (destination: string, amountSats: string, password: string, feeRateSatPerKvB: number) =>
-      rpc<SendResult>('wallet.confirmSend', {
-        destination,
-        amountSats,
-        password,
-        feeRateSatPerKvB,
-      }),
+    (planId: string, password: string) =>
+      rpc<SendResult>('wallet.confirmSend', { planId, password }),
     [],
   );
 
@@ -341,26 +342,43 @@ export function useWallet() {
     );
   }, []);
 
-  const createAccount = useCallback(async () => {
-    const created = await rpc<{ index: number; name: string; address: string }>('wallet.createAccount');
+  /**
+   * Everything on screen that describes the account we are leaving: its receive
+   * address, its history, and whether its balance scan has settled.
+   *
+   * Called *before* the worker is asked to move, never after it has answered. A
+   * `chrome.runtime.sendMessage` round trip is not instant, and with the clear
+   * on the far side of it the Receive tab went on showing the previous
+   * account's address — QR code and Copy button live — while the worker was
+   * already switching. Anyone who copied in that window handed out an address
+   * of the account they had just left, and was paid into it. Clearing first
+   * costs a blank field for the length of one round trip, which is the honest
+   * thing to show for a state nobody knows yet.
+   */
+  const dropAccountView = useCallback(() => {
     setReceive(null);
     setHistory([]);
     setScanned(false);
+  }, []);
+
+  const createAccount = useCallback(async () => {
+    dropAccountView();
+    const created = await rpc<{ index: number; name: string; address: string }>(
+      'wallet.createAccount',
+    );
     await loadStatus();
     await refresh();
     return created;
-  }, [loadStatus, refresh]);
+  }, [dropAccountView, loadStatus, refresh]);
 
   const switchAccount = useCallback(
     async (index: number) => {
+      dropAccountView();
       await rpc('wallet.switchAccount', { index });
-      setReceive(null);
-      setHistory([]);
-      setScanned(false);
       await loadStatus();
       await refresh();
     },
-    [loadStatus, refresh],
+    [dropAccountView, loadStatus, refresh],
   );
 
   const renameAccount = useCallback(

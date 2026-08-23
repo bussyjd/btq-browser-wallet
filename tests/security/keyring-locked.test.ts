@@ -38,8 +38,7 @@ describe('a locked wallet refuses every path that touches the seed', () => {
       name: 'confirmSend',
       run: (k) =>
         k.confirmSend({
-          destination: DEST,
-          amountSats: 1000n,
+          planId: 'no-such-plan',
           password: PASSWORD,
           fetchUtxos: async () => [],
           broadcast: async () => ({ txid: '00'.repeat(32) }),
