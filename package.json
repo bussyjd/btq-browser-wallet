@@ -16,6 +16,8 @@
     "demo:video": "RECORD_VIDEO=1 playwright test tests/e2e/smoke.spec.ts && sh scripts/stitch-demo.sh demo/btq-wallet-suite.mp4",
     "demo:live": "sh scripts/demo-live.sh",
     "demo:preflight": "BTQ_LIVE=1 tsx scripts/demo-preflight.ts",
+    "demo:verify": "sh scripts/verify-video.sh",
+    "shots": "SHOTS=1 playwright test tests/e2e/shots.spec.ts",
     "playwright:install": "playwright install chromium",
     "dev": "vite",
     "build": "vite build",

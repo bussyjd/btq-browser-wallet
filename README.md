@@ -17,10 +17,10 @@ Five-minute path: [load the extension](#load-the-extension) → [try the flows](
 
 | | |
 |---|---|
-| <img src="docs/screenshots/create-seed.png" alt="The recovery-phrase screen: twelve numbered slots, blanked for this screenshot, under a warning to write the words down on paper and a note that Settings can show the phrase again with the password" width="330"> | <img src="docs/screenshots/receive.png" alt="Receive tab: balance, QR code, the tbtq1z address and its derivation path" width="330"> |
-| **Create** — the vault is already sealed here; write the phrase down, and read it again in Settings if you are interrupted. | **Receive** — next unused address, its path, QR, copy. |
-| <img src="docs/screenshots/send-review.png" alt="Send review card: destination, amount, fee in tBTQ and sat/vB, change, inputs, total debited, password field" width="330"> | <img src="docs/screenshots/connect.png" alt="Connection request screen naming the site origin and what it will and will not see" width="330"> |
-| **Send** — the review card replaces the form, so what you read is what gets signed. | **Site-connect** — exact origin, revocable, and it can never move funds. |
+| <img src="docs/screenshots/create-seed.png" alt="The recovery-phrase screen: twelve numbered slots, blanked for this screenshot, under a warning to write the words down on paper and a note that Settings can show the phrase again with the password" width="330"> | <img src="docs/screenshots/receive.png" alt="Receive tab: balance with the height it was checked at, then the tbtq1z address, its derivation path, a Copy address button, and a Show QR code control" width="330"> |
+| **Create** — the vault is already sealed here; write the phrase down, and read it again in Settings if you are interrupted. | **Receive** — next unused address, its path, copy; the QR opens on request. |
+| <img src="docs/screenshots/send-review.png" alt="Send review card: destination, amount, fee in tBTQ and sat/vB, change, inputs, total debited, password field" width="330"> | <img src="docs/screenshots/connect.png" alt="Connection request screen naming the site origin, the single account it will see, and what it will never see" width="330"> |
+| **Send** — the review card replaces the form, so what you read is what gets signed. | **Site-connect** — exact origin, one account only, revocable, and it can never move funds. |
 
 Dark theme shown; the popup follows the OS light/dark setting. The twelve words in the
 first shot are covered before the capture — one bar of one fixed width per word, the same
