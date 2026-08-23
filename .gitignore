@@ -11,3 +11,8 @@ test-results/
 playwright-report/
 demo/raw/
 demo/*.webm
+
+# Operator credentials for the live demo recording (never committed)
+.env
+.env.*
+!.env.example
