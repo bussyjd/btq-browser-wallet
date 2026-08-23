@@ -21,6 +21,7 @@ import {
   expectRedacted,
   installRedaction,
 } from './redact.js';
+import { installCaptions } from './scene.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 export const REPO_ROOT = resolve(HERE, '../../..');
@@ -33,13 +34,52 @@ export const POPUP_VIEWPORT = { width: 360, height: 600 };
 export const DEMO_RAW = join(REPO_ROOT, 'demo', 'raw');
 export const DEMO_ORDER = join(DEMO_RAW, 'order.txt');
 
+/**
+ * Chromium flags for a device that is allowed to reach the internet.
+ *
+ * The hermetic flag is dropped, so this list has to make up the difference: it
+ * silences everything Chrome would otherwise fetch on its own, so the only
+ * traffic on the wire during a live recording is the wallet's own.
+ */
+export const LIVE_ARGS = [
+  '--disable-background-networking',
+  '--disable-component-update',
+  '--disable-domain-reliability',
+  '--no-default-browser-check',
+  '--no-first-run',
+];
+
 export interface DeviceOptions {
   /** Used for the video directory and for readable failures. */
   name: string;
-  /** The mock explorer origin the wallet reads from (no https, no internet). */
-  explorerBase: string;
+  /**
+   * The mock explorer origin the wallet reads from (no https, no internet).
+   * Required unless `backend: 'none'`, which boots on the shipped default.
+   */
+  explorerBase?: string;
   /** Directory for recorded video, when RECORD_VIDEO is set. */
   videoDir?: string;
+  /**
+   * `'hermetic'` (the default, and what the whole mocked suite uses) resolves
+   * nothing but this machine. `'live'` lets the device reach the real explorer
+   * and a real node — only `live.spec.ts` asks for it.
+   */
+  reach?: 'hermetic' | 'live';
+  /**
+   * `'preset'` (the default) writes the mock backend into chrome.storage.local
+   * before the first popup opens. `'none'` writes no backend at all, so the
+   * wallet boots on `defaultBackend()` — the public explorer — rather than on a
+   * value the test injected.
+   */
+  backend?: 'preset' | 'none';
+  /** Milliseconds of pause between browser operations; only set when recording live. */
+  slowMo?: number;
+  /** Context viewport. Defaults to the popup's own geometry. */
+  viewport?: { width: number; height: number };
+  /** Recording canvas. Defaults to `viewport`, i.e. what the mocked suite records. */
+  videoSize?: { width: number; height: number };
+  /** Install the scene-caption overlay (see fixtures/scene.ts). Live demo only. */
+  captions?: boolean;
 }
 
 export interface Device {
@@ -55,6 +95,8 @@ export interface Device {
   storage(): Promise<Record<string, unknown>>;
   /** Call the popup's RPC surface from an extension page. */
   rpc<T = unknown>(page: Page, method: string, params?: unknown): Promise<T>;
+  /** An ordinary browser tab at the context viewport (the explorer, the dapp). */
+  tab(url: string): Promise<Page>;
   close(): Promise<void>;
 }
 
@@ -71,25 +113,42 @@ interface RpcEnvelope {
 let pageSequence = 0;
 
 export async function launchDevice(opts: DeviceOptions): Promise<Device> {
+  // Every default below reproduces the mocked suite exactly: with none of the
+  // optional fields set, `args` is the same three strings it has always been,
+  // no `slowMo` key is passed, and the recording canvas is the popup viewport.
+  const reach = opts.reach ?? 'hermetic';
+  const backendMode = opts.backend ?? 'preset';
+  const viewport = opts.viewport ?? POPUP_VIEWPORT;
+  const videoSize = opts.videoSize ?? viewport;
+  if (backendMode === 'preset' && !opts.explorerBase) {
+    throw new Error(`launchDevice(${opts.name}): explorerBase is required unless backend: 'none'`);
+  }
   const userDataDir = mkdtempSync(join(tmpdir(), `btq-e2e-${opts.name}-`));
   const args = [
     `--disable-extensions-except=${DIST}`,
     `--load-extension=${DIST}`,
     // Hermetic: nothing outside this machine can be reached, so a stray call to
     // the public explorer fails loudly instead of making the run non-deterministic.
-    '--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1, EXCLUDE localhost',
+    // `reach: 'live'` is the only thing that lifts it, and only live.spec.ts asks.
+    ...(reach === 'hermetic'
+      ? ['--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1, EXCLUDE localhost']
+      : LIVE_ARGS),
   ];
   const context = await chromium.launchPersistentContext(userDataDir, {
     channel: 'chromium',
     headless: true,
-    viewport: POPUP_VIEWPORT,
+    viewport,
     args,
-    ...(opts.videoDir ? { recordVideo: { dir: opts.videoDir, size: POPUP_VIEWPORT } } : {}),
+    ...(opts.slowMo !== undefined ? { slowMo: opts.slowMo } : {}),
+    ...(opts.videoDir ? { recordVideo: { dir: opts.videoDir, size: videoSize } } : {}),
   });
 
   // When the run is being recorded, cover the recovery phrase in every page this
   // context will ever open, before any of them paints. A no-op otherwise.
   await installRedaction(context);
+  // Scene captions are gated on the flag alone — no environment variable can
+  // turn them on for a journey that did not ask for them.
+  if (opts.captions) await installCaptions(context);
 
   // Every page opened from here on, in order — the demo video's running order.
   // The context's initial about:blank predates this listener, so it never
@@ -131,6 +190,11 @@ export async function launchDevice(opts: DeviceOptions): Promise<Device> {
       if (res.error) throw new Error(`${method}: ${res.error} (${res.code ?? 'no code'})`);
       return res.result as T;
     },
+    async tab(url: string) {
+      const page = await context.newPage();
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60_000 });
+      return page;
+    },
     async close() {
       const clips = opts.videoDir
         ? await Promise.all(
@@ -150,14 +214,26 @@ export async function launchDevice(opts: DeviceOptions): Promise<Device> {
   // Point the wallet at the mock backend before the first popup opens, and stop
   // the first-run onboarding tab from stealing focus mid-journey.
   const worker = await device.worker();
-  await worker.evaluate(async (explorerBase: string) => {
-    await chrome.storage.local.set({ backend: { explorerBase, node: null } });
-    try {
-      await chrome.storage.session.set({ onboardTabOpened: true });
-    } catch {
-      /* storage.session is not available in every channel */
-    }
-  }, opts.explorerBase);
+  if (backendMode === 'preset') {
+    await worker.evaluate(async (explorerBase: string) => {
+      await chrome.storage.local.set({ backend: { explorerBase, node: null } });
+      try {
+        await chrome.storage.session.set({ onboardTabOpened: true });
+      } catch {
+        /* storage.session is not available in every channel */
+      }
+    }, opts.explorerBase as string);
+  } else {
+    // `backend: 'none'` writes no backend, so the wallet boots on the shipped
+    // default. The onboarding tab is still suppressed — it steals focus either way.
+    await worker.evaluate(async () => {
+      try {
+        await chrome.storage.session.set({ onboardTabOpened: true });
+      } catch {
+        /* storage.session is not available in every channel */
+      }
+    });
+  }
 
   // Granted context-wide: Chrome does not honour a per-origin grant for a
   // chrome-extension:// origin, and the receive journey reads the clipboard

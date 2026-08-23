@@ -3,6 +3,7 @@
 #
 #   RECORD_VIDEO=1 npm run test:e2e     # records demo/raw/<NN-device>/*.webm
 #   sh scripts/stitch-demo.sh           # -> demo/btq-wallet-demo.mp4
+#   sh scripts/stitch-demo.sh demo/btq-wallet-suite.mp4    # ... or somewhere else
 #
 # `npm run demo:video` does both. Device directories are numbered so the
 # journeys (create/receive/send, then import, then site-connect) concatenate in
@@ -11,7 +12,14 @@ set -eu
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 RAW="$ROOT/demo/raw"
-OUT="$ROOT/demo/btq-wallet-demo.mp4"
+# Optional first argument: where to write. Two recordings share this script —
+# the mocked suite (demo/btq-wallet-suite.mp4) and the live demo — so the
+# argument-less invocation stays exactly what it always was.
+OUT=${1:-demo/btq-wallet-demo.mp4}
+case "$OUT" in
+  /*) ;;
+  *) OUT="$ROOT/$OUT" ;;
+esac
 
 if ! command -v ffmpeg >/dev/null 2>&1; then
   echo "stitch-demo: ffmpeg is not installed — install it, or record the screen by hand." >&2
@@ -46,7 +54,7 @@ if [ ! -s "$LIST" ]; then
   exit 1
 fi
 
-mkdir -p "$ROOT/demo"
+mkdir -p "$(dirname "$OUT")"
 ffmpeg -y -hide_banner -loglevel error \
   -f concat -safe 0 -i "$LIST" \
   -vf "fps=25,scale=trunc(iw/2)*2:trunc(ih/2)*2" \
