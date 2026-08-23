@@ -70,7 +70,7 @@ describe('RPC surface — what a page could try', () => {
     expect(WALLET_METHODS.includes('wallet.exportSeed' as never)).toBe(false);
   });
 
-  it('create and revealPhrase are the only responses that carry phrase material', async () => {
+  it('create, revealPhrase and revealSeedHex are the only responses that carry secret material', async () => {
     const k = keyring();
     const created = (await dispatch(k, { method: 'wallet.create', params: { password: 'testnet-ok' } }, { fromTab: false })) as {
       mnemonic: string;
@@ -108,6 +108,23 @@ describe('RPC surface — what a page could try', () => {
     expect(Object.keys(revealed)).toEqual(['words']);
     expect(revealed.words).toEqual(words);
 
+    // The third, and the one worth the most: `revealSeedHex` returns the master
+    // secret itself, not an encoding of it. Taking the ground truth from the
+    // method that is *allowed* to return it is deliberate — the scan below is
+    // then over the wallet's own live seed rather than over a value the test
+    // computed and hoped matched, and it cannot go stale if derivation changes.
+    const seedReveal = (await dispatch(
+      k,
+      { method: 'wallet.revealSeedHex', params: { password: 'testnet-ok' } },
+      { fromTab: false },
+    )) as { seedHex: string };
+    expect(Object.keys(seedReveal)).toEqual(['seedHex']);
+    const seedHex = seedReveal.seedHex.toLowerCase();
+    // Not vacuous, and it really is this phrase's seed: an empty or truncated
+    // needle would make every assertion below pass against a leaking wallet.
+    expect(seedHex).toHaveLength(128);
+    expect(seedHex).toBe(bytesToHex(mnemonicToHdSeed(created.mnemonic)).toLowerCase());
+
     // And every other method still carries none of it — the honest replacement
     // for "only once", which a re-display feature cannot claim. Whole tokens,
     // so a word that happens to be a substring of an address does not mask a
@@ -130,6 +147,27 @@ describe('RPC surface — what a page could try', () => {
       // Nothing may carry the phrase whole, in any encoding of it.
       expect(JSON.stringify(result).toLowerCase(), `${name} leaked the phrase`).not.toContain(
         words.join(' '),
+      );
+
+      // The same scan for the **HD seed hex**, which is now returned by an RPC
+      // method of its own and is the master secret every key in this wallet
+      // comes out of — worth strictly more to an attacker than the words, which
+      // only encode it. The phrase scan above would not have caught this: a
+      // 64-byte hex string tokenises into no BIP39 word at all.
+      //
+      // Joined with spaces, so a needle can only be found inside one value and
+      // never manufactured by two harmless values sitting next to each other.
+      const blob = stringValues(result).join(' ').toLowerCase();
+      expect(blob, `${name} leaked the HD seed`).not.toContain(seedHex);
+      // …and a partial leak is a leak. 32 hex characters is 128 bits: it cannot
+      // occur by accident in an address, a txid or a derivation path, so this
+      // catches a seed that is truncated, split across fields, or half-printed.
+      expect(blob, `${name} leaked half the HD seed`).not.toContain(seedHex.slice(0, 32));
+      expect(blob, `${name} leaked the tail of the HD seed`).not.toContain(seedHex.slice(-32));
+      // Key names are not the leak, but the serialization catches an encoding
+      // the value walk cannot reach — a seed inside a number array, say.
+      expect(JSON.stringify(result).toLowerCase(), `${name} leaked the HD seed`).not.toContain(
+        seedHex,
       );
       for (const secret of SECRET_RESULT_KEYS) {
         expect(collectKeys(result).includes(secret), `${name}.${secret}`).toBe(false);

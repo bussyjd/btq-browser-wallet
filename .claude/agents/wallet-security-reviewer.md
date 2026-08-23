@@ -23,25 +23,38 @@ protocol constant from memory — cite the reference.
   page context, `window`, logs, error messages, stack traces, extension storage
 - Decrypted seed persisted anywhere; vault ciphertext containing plaintext bytes
 - Secrets surviving lock, service-worker restart, or a failed unlock
-- **A phrase reaching a screen outside the one sanctioned shape.** The wallet deliberately
-  shows the recovery phrase again: Settings → Security, `wallet.revealPhrase`, on an
-  already-unlocked vault, after the password is re-typed. That is not a finding — the same
-  password already spends the same coins, so refusing to print the words protects nobody.
-  What *is* a finding is any of the ways it can be got wrong:
+- **A secret reaching a screen outside the one sanctioned shape.** There are two such
+  secrets and two such reveals, and they are held to the same standard. The wallet
+  deliberately shows the recovery phrase again: Settings → Security, `wallet.revealPhrase`,
+  on an already-unlocked vault, after the password is re-typed. It also shows the **HD seed
+  hex**, `wallet.revealSeedHex` — offered to a wallet that has no phrase, so it is never
+  left with a backup it cannot reach. Neither is a finding in itself: the same password
+  already spends the same coins, so refusing to print them protects nobody. Read every
+  bullet below as applying to *both* — the seed is the master secret the phrase encodes, so
+  a gap on the seed path is worth strictly more to an attacker than the same gap on the
+  phrase path. What *is* a finding is any of the ways either can be got wrong:
   - reachable without the password, or with a password checked against anything other than
     the sealed vault (a cached hash, a boolean, a compare that is not the KDF);
   - not sharing the unlock back-off, in either direction, or resetting the counter on failure;
   - reachable by a page — `wallet.*` on the relay allowlist, or a `page.*` alias for it;
-  - the phrase cached anywhere: on the keyring, in a module variable, in `useWallet`
-    state, in storage, in a log line, in an error message, or surviving lock;
+  - the phrase or the seed hex cached anywhere: on the keyring, in a module variable, in
+    `useWallet` state, in storage, in a log line, in an error message, or surviving lock;
   - words manufactured for a wallet that has none — a raw-32-byte-seed import must answer
     `NO_PHRASE`, never run words back out of an HD seed;
-  - words returned that do not re-derive this vault's own `hdSeedHex` (a phrase restoring a
-    *different* wallet is worse than no phrase at all);
-  - a copy button anywhere near a phrase — the clipboard is readable by everything else on
-    the machine and outlives the screen — or any new surface rendering `seed-word-N`
-    outside `components/SeedGrid.tsx`, because the recording redaction keys on that prefix
-    and a second renderer paints a legible phrase into a committed video.
+  - words, or a seed hex, returned that do not re-derive this vault's own `hdSeedHex` (a
+    backup that restores a *different* wallet is worse than no backup at all, because the
+    user trusts it);
+  - a copy button anywhere near a phrase or a seed — the clipboard is readable by
+    everything else on the machine and outlives the screen — or any new surface rendering
+    `seed-word-N` outside `components/SeedGrid.tsx`, **or `seed-hex` outside
+    `components/SeedHex.tsx`**. Both ids are the whole recording redaction
+    (`tests/e2e/fixtures/redact.ts`); a second renderer of either paints a legible master
+    secret into a committed video while every DOM-reading test still passes;
+  - a **fourth** method returning cleartext secret material. Three exist — `wallet.create`,
+    `wallet.revealPhrase`, `wallet.revealSeedHex` — and the count is the invariant, stated
+    in CLAUDE.md. `wallet.exportBackup` is not a fourth: it returns the sealed `BTQ1`
+    envelope. Any new method whose result carries a secret in the clear is a design change
+    to be argued for, not a convenience to be reviewed past.
 - Debug/telemetry paths that serialize objects holding keys
 
 **2. Unauthorized fund movement**

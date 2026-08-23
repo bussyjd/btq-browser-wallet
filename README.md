@@ -339,15 +339,18 @@ something a human can follow, and carries a caption per scene. Clips are written
 page under `demo/raw/` — git-ignored, ordered by `demo/raw/order.txt` — and only the
 stitched mp4 is committed.
 
-The recovery phrase is barred out of both recordings for the same reason it is barred out
-of the screenshot. Three selectors cover the four surfaces that put a phrase on screen —
-the twelve-word grid (which is now the onboarding screen *and* the Settings reveal), the
-confirmation fields and the import box — and the words are covered before the first frame
-is painted, with one bar width for every word so the lengths do not leak either.
+The master secrets are barred out of both recordings for the same reason they are barred
+out of the screenshot. Four selectors cover the five surfaces that put one on screen — the
+twelve-word grid (which is now the onboarding screen *and* the Settings reveal), the
+confirmation fields, the import box, and the HD-seed hex a wallet with no phrase is shown
+instead — and they are covered before the first frame is painted, with one fixed bar size
+so neither the word lengths nor the seed's line count leaks either.
 Only the recording is masked — with `RECORD_VIDEO` unset the tests behave exactly as they
 do in CI, and either way they read the real phrase and assert against it
-([`tests/e2e/fixtures/redact.ts`](tests/e2e/fixtures/redact.ts)). A phrase surface that
-loses its `seed-word-N` id fails the recording run rather than quietly appearing in it.
+([`tests/e2e/fixtures/redact.ts`](tests/e2e/fixtures/redact.ts)). The redaction list
+enumerates both ids and `expectRedacted` refuses a selector that is not on it, so a
+surface that loses its `seed-word-N` or `seed-hex` id fails the recording run rather than
+quietly appearing in it.
 
 ## Protocol notes
 

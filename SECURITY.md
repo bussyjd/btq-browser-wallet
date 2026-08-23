@@ -33,14 +33,24 @@ best-effort. A vulnerability in btq-core itself belongs with
   the entropy or a secret key. Both times the words live in one screen's component state
   and die with the screen. Signing happens in the worker; the popup sends intent and a
   password.
-- It receives the **HD seed** on one method and one only: `wallet.revealSeedHex`, behind
-  the same re-typed password, for the one wallet that has no phrase to show — a raw
-  32-byte import. Offering it a greyed-out button instead would have left a wallet whose
-  backup cannot be got at,
-  which is not a security property but a lost-coins one. It is offered *instead of* the
-  phrase control, never as well — `wallet.status.backup` names the one control the popup
-  may render — and the hex is checked against the seed the worker is actually deriving
-  from before it reaches the screen. It lives in one screen's state, like the words.
+- It receives the **HD seed** on one method: `wallet.revealSeedHex`. That makes three
+  methods in all that hand cleartext secret material to the popup — `wallet.create`,
+  `wallet.revealPhrase`, `wallet.revealSeedHex` — and what guards them is a
+  **control-level** rule, identical for all three and not a restriction on any one of
+  them: an already-unlocked vault, the password re-proved against the sealed ciphertext,
+  the shared exponential back-off on a wrong one, and no reach from a page.
+  `wallet.revealSeedHex` reuses `revealPhrase`'s own code to get that, so the two cannot
+  drift apart. The hex is checked against the seed the worker is actually deriving from
+  before it reaches the screen, and it lives in one screen's state, like the words.
+- **What the seed reveal is _not_ is a method restricted to phraseless wallets.** Settings
+  offers it *instead of* the phrase control — `wallet.status.backup` names the one control
+  the popup may render, so a wallet imported from a raw 32-byte seed is never left with a
+  greyed-out button and a backup it cannot get at, which would be a lost-coins problem
+  rather than a security property. But that choice lives in the UI, and the RPC
+  deliberately does not enforce it: `revealPhrase` already hands over words that derive the
+  very same seed, so refusing the hex to a wallet that has a phrase would cost an attacker
+  nothing and buy the user nothing. Writing it the other way round would be worse than
+  useless — a guarantee nobody implemented, which a reviewer could mistake for a control.
 - The provider is installed as a **MAIN-world content script** with a frozen,
   non-configurable surface — `isBtq`, `request`, `on`, `removeListener`, nothing else. It
   holds no `chrome.*` handle, so a page that compromises it gains no extension privilege.
@@ -59,16 +69,17 @@ best-effort. A vulnerability in btq-core itself belongs with
   5 minutes). In memory means a worker restart clears the counter — which is why the
   back-off is described as slowing a person at a keyboard and never as the bound on an
   offline attack. That bound is PBKDF2, and it does not restart.
-- **The phrase without the password:** `wallet.revealPhrase` needs a wallet that is
-  already unlocked **and** the password re-typed against the sealed vault. A wrong one
-  counts against the same back-off as a wrong unlock and names nothing but the password.
+- **Either secret without the password:** `wallet.revealPhrase` and `wallet.revealSeedHex`
+  each need a wallet that is already unlocked **and** the password re-typed against the
+  sealed vault. A wrong one counts against the same back-off as a wrong unlock and names
+  nothing but the password.
   There is no copy button on that screen, or on any screen that shows a phrase or a seed.
   A wallet imported from a raw 32-byte seed refuses with `NO_PHRASE` rather than
   manufacture words for a different wallet — and words that are shown are checked to
   re-derive *this* vault's HD seed before they reach the screen. That wallet is shown its
-  HD seed instead, under the same conditions. There are only ever these two, because the
-  vault payload holds `origin` and the sealed entropy together: a wallet that says it came
-  from a phrase can always produce one.
+  HD seed instead, under the same conditions. The popup is offered one of these two
+  controls and never neither, because the vault payload holds `origin` and the sealed
+  entropy together: a wallet that says it came from a phrase can always produce one.
 - **A vault this build cannot read:** one payload version exists, and a payload from the
   pre-2 development build is refused with `VAULT_TOO_OLD` — its own code and its own copy,
   reached only after the password has opened the ciphertext, and only once the payload has

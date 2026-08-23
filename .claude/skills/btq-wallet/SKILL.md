@@ -78,19 +78,27 @@ src/content/    relay only; allowlisted page.* methods; never sees key material
 src/inpage/     btq-provider.js — window.btq, MAIN world, frozen surface
 src/ui/         React popup: App.tsx router, hooks/useWallet.ts, components/, screens/
                 (Welcome Onboarding CreatePassword ShowSeed ConfirmSeed ImportChoice
-                ImportMnemonic ImportRawSeed Unlock Home Settings ConnectApproval),
+                ImportMnemonic ImportRawSeed ImportBackup Unlock Home Settings
+                ConnectApproval),
                 screens/home/{Receive,Send,Activity}, types.ts (RPC result shapes)
                 components/SeedGrid.tsx renders the phrase for both surfaces that show
                 one (ShowSeed, and the Settings reveal) and is the sole renderer of
-                `seed-word-N` — the video redaction keys on that prefix, so a second
-                one would paint a legible phrase into a committed recording
+                `seed-word-N`; components/SeedHex.tsx is the sole renderer of `seed-hex`,
+                the HD seed a phraseless wallet is shown instead — the video redaction
+                keys on those two ids, so a second renderer of either would paint a
+                legible master secret into a committed recording
 ```
 
 **Trust boundary:** the HD seed, and the BIP39 entropy the vault seals beside it, exist
 only inside the service worker and only while unlocked. Content scripts and pages get a
-narrow allowlisted message API and no phrase or key material at all. The popup gets the
-words from exactly two methods, `wallet.create` and `wallet.revealPhrase`, and nothing
-else; any change that widens that is a bug, however convenient.
+narrow allowlisted message API and no phrase or key material at all. **Cleartext secret
+material reaches the popup from exactly three methods** — `wallet.create` and
+`wallet.revealPhrase` carry the words, and `wallet.revealSeedHex` carries the HD seed
+itself, the master secret the phrase encodes — each on an unlocked vault, behind the
+re-typed password and the shared back-off. Count secrets, not phrases: a phrase-only
+count stays true while the surface it is meant to bound grows. `wallet.exportBackup` is
+not a fourth (it returns the sealed `BTQ1` envelope); a fourth *cleartext* one is a bug,
+however convenient.
 
 **Connect lifecycle:** an unapproved origin's `page.requestAccounts` is held — the broker
 parks the response in a timestamped per-origin map and opens a dedicated approval window
