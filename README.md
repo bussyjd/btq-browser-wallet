@@ -250,12 +250,14 @@ npm run demo:preflight   # will a take work? node, explorer, chain tip, Alice's 
 npm run demo:live        # preflight, build, record, stitch → demo/btq-wallet-demo.mp4
 ```
 
-> **That file is not in this repository yet.** The spec, the preflight and the scripts are
-> ([`tests/e2e/live.spec.ts`](tests/e2e/live.spec.ts)); the recording is not, because
-> making one needs a synced testnet node's RPC password and a funded wallet on the
-> operator's machine. Until somebody runs `npm run demo:live`, `demo/btq-wallet-suite.mp4`
-> is the only video this repository ships — and the scenes above are a description of what
-> the spec asserts, not of footage anyone has watched.
+> **Recording one yourself needs your own node.** The take in this repository was made
+> against BTQ testnet on 22 August 2026: the payment in it is
+> [`87e45bc6…b55d62`](https://explorer.bitcoinquantum.com/tx/87e45bc62b7d44d837bb0394ea4625274c97a6f3b24e9c60523c8a13b2b55d62)
+> and later takes are the same flow with fresh coins. To make your own you need a synced
+> testnet node's RPC password and a funded wallet, both supplied through a git-ignored
+> `.env.demo` — see [`tests/e2e/README.md`](tests/e2e/README.md) for the `BTQ_DEMO_*`
+> contract. `npm run demo:preflight` says whether a take would work before it opens a
+> browser.
 
 Every `BTQ_DEMO_*` variable a live take reads, and every operator note about running one,
 is in [`tests/e2e/README.md`](tests/e2e/README.md) — deliberately the only copy, so there
