@@ -53,14 +53,17 @@ iterations), holding the HD seed and the BIP39 entropy it came from — the entr
 lets **Settings → Security** show the phrase again later, with your password. The words
 themselves are never stored, in the clear or otherwise.
 
-**Import — both forms.** **I already have a seed** offers two, **Use a seed phrase** and
-**Use a raw seed**:
+**Import — three forms.** **I already have a seed** offers **Use a seed phrase**, **Use a
+backup file** and **Use a raw seed**:
 
 - a **BIP39 phrase** (12 or 24 words, checksum validated) — the same mapping this wallet
   uses when it creates one;
+- a **wallet backup file** (`.btqbackup`) plus the password that sealed it — the only one
+  of the three that restores the account list, and the only one that reaches no network;
 - a **raw 32-byte HD seed** (64 hex characters) — btq-core's `sethdseed` shape.
 
-They are different wallets from different inputs, not two spellings of one. See
+A phrase and a raw seed are different wallets from different inputs, not two spellings of
+one, and both restore Account 1 alone. See
 [`docs/HD_IMPORT.md`](docs/HD_IMPORT.md) for why BTQ has no published HD standard and what
 this wallet does about it.
 
@@ -74,10 +77,29 @@ you coins:
 - **btq-core cannot derive them.** It hardcodes the account level to `0'`
   (`scriptpubkeyman.cpp:1252`), so the seed that restores this wallet in Core restores
   Account 1 and nothing else. Accounts above the first are this wallet's own convention.
-- **Restoring the account list is manual, and exact.** The seed does not record how many
-  accounts you made, and this wallet does not ask a public explorer to guess: press
-  **Add account** the same number of times, in order, and the same seed re-derives the
-  same addresses, so the coins reappear. Write down how many you made.
+- **A phrase carries keys, not a list.** Twelve words are an encoding of entropy: they say
+  what the master secret is and nothing about what you did with it, so a phrase restores
+  **Account 1** and no more. Either keep a backup file (below), or press **Add account**
+  the same number of times, in order — the same seed re-derives the same addresses, so the
+  coins reappear, but you have to know how many there were. This wallet will not ask a
+  public explorer to guess.
+
+**Wallet backup file.** Settings → **Wallet backup file** → your password → a
+`btq-wallet-backup-YYYY-MM-DD.btqbackup` download. It is the same envelope as the vault on
+disk — `BTQ1`, PBKDF2-SHA256 at 600 000 iterations, AES-256-GCM — sealing the seed *and*
+the account list, so **Import → Use a backup file** brings your accounts back with the
+names you gave them, and asks the explorer nothing at all to do it. This is the model
+Sparrow and Electrum have used for years: the phrase is the key material, a wallet file is
+everything else.
+
+The file is a new thing in the world, and the screen says so before it exists. Anyone who
+has it *and* your password has your wallet — every key in it, and your account names with
+them. Without the password it is sealed: the plaintext is padded to a fixed length, so
+every backup this build writes is the same size and the file does not say how many accounts
+are in it, and the default name carries no address, no account name and no balance. It
+still says that a BTQ wallet exists. Keep it where you keep your recovery phrase, and save
+it again after you add or rename an account — a file holds the list you had at the moment
+you pressed the button.
 
 The wallet also keeps its refresh narrow. A refresh scans the account on screen — one
 20-address gap window per chain — and the other accounts are brought up to date when you
@@ -135,8 +157,8 @@ reveal are not on the relay's allowlist, which forwards `page.requestAccounts`,
 (URL, user, password), **Test connection** — which reports the explorer tip and the node's
 chain and height, warns when the node is behind, and refuses one whose block hash at the
 explorer's tip disagrees — **Connected sites** with **Revoke**, **Rescan all addresses**,
-a **Security** card, and **Remove wallet from this device**, which only proceeds once you
-type DELETE.
+a **Security** card, **Wallet backup file**, and **Remove wallet from this device**, which
+only proceeds once you type DELETE.
 
 **Security → Show recovery phrase.** The words are readable again on an unlocked wallet,
 behind a second deliberate step: the button, then a warning, then your password, then
@@ -242,8 +264,8 @@ reason and CI never notices it.
 |---|---|---|
 | `tests/unit/` | always | Derivation, P2MR scripts, bech32m, BIP341 sighash (a frozen digest plus nine mutations), scale-16 weight/vsize/fee/dust, the explorer parsers against recorded live bodies, and a real on-chain transaction rebuilt byte-for-byte |
 | `tests/vectors/` | always | `golden.json`, the frozen contract with consensus — addresses, scripts and tapleaf hashes cannot drift unnoticed |
-| `tests/security/` | always | The paths that leak secrets or move funds: the vault ciphertext holds no seed, no entropy and no words, a wrong password (with back-off) opens nothing, a locked wallet cannot sign, derive or show a phrase, the phrase reveal needs the password and shares that back-off in both directions, a raw-seed wallet refuses instead of inventing words, a vault from the pre-2 build is refused by name rather than as corruption, a page cannot reach `wallet.*` or storage, a foreign leaf script is refused, a hostile explorer cannot inject an amount or a script into the signing path, plus the connect state machine and the RPC contract |
-| `tests/e2e/` | `npm run test:e2e` | The extension as shipped: create → receive → lock/unlock → reveal the phrase behind the password → fund → node → send → restore on a second profile, site-connect approve/scope/revoke, and the negative cases — wrong password, refused destinations, a broken explorer, a node that rejects, a raw-seed wallet that has no phrase, a vault from an older build that is refused by name and can be removed from that same screen. The mock node re-verifies the signature and the sighash independently |
+| `tests/security/` | always | The paths that leak secrets or move funds: the vault ciphertext holds no seed, no entropy and no words, a wrong password (with back-off) opens nothing, a locked wallet cannot sign, derive or show a phrase, the phrase reveal needs the password and shares that back-off in both directions, a raw-seed wallet refuses instead of inventing words, a vault from the pre-2 build is refused by name rather than as corruption, the backup file is sealed under the same door as the reveals and carries no address, name or key in the clear while a hostile one cannot write a bidi override into an account name, a page cannot reach `wallet.*` or storage, a foreign leaf script is refused, a hostile explorer cannot inject an amount or a script into the signing path, plus the connect state machine and the RPC contract |
+| `tests/e2e/` | `npm run test:e2e` | The extension as shipped: create → receive → lock/unlock → reveal the phrase behind the password → fund → node → send → restore on a second profile, a backup file written from Settings and restored on a third profile with its account list intact and no address of any other account asked about, site-connect approve/scope/revoke, and the negative cases — wrong password, refused destinations, a broken explorer, a node that rejects, a raw-seed wallet that has no phrase, a vault from an older build that is refused by name and can be removed from that same screen. The mock node re-verifies the signature and the sighash independently |
 | `tests/integration/` | `BTQ_REGTEST=1` | btq-core itself: the node echoes our address, `scriptPubKey` and merkle root byte-for-byte, and `testmempoolaccept` accepts a transaction we signed (its real interpreter ran `OP_CHECKSIGDILITHIUM`) and rejects one signed over a tampered digest |
 
 [`tests/e2e/README.md`](tests/e2e/README.md) says exactly what is mocked, what each hostile
@@ -343,7 +365,9 @@ The import-from-seed design, byte by byte: [`docs/HD_IMPORT.md`](docs/HD_IMPORT.
 Keys decrypt **only** inside the MV3 service worker, only while unlocked. The content
 script and `window.btq` never receive phrase or key material at all; the popup never
 receives the HD seed or a secret key, and receives the twelve words only from the two
-calls that exist to show them — onboarding, and the password-gated reveal. `src/core/` is
+calls that exist to show them — onboarding, and the password-gated reveal. It does receive
+the wallet **backup file**, and that is not a third exception: what crosses is the sealed
+`BTQ1` envelope, which is why it may become a file when the phrase and the seed may not. `src/core/` is
 pure, browser-safe and dependency-light (`@noble/*`, `@scure/*`) so it stays reviewable.
 [`SECURITY.md`](SECURITY.md) has the trust boundary, what the wallet refuses, why showing
 the phrase again is not a weaker boundary than the send screen, and what is deliberately

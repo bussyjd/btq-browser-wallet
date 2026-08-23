@@ -18,8 +18,11 @@
  *     the number of accounts the user has made;
  *   - **no scan, of any kind, sends one request for one address of an account
  *     the user has not created**;
- *   - and the recovery path that replaces speculative discovery actually works:
- *     pressing "Add account" on a fresh restore re-derives the same addresses.
+ *   - and the recovery path that replaces speculative discovery actually works,
+ *     both ways round: pressing "Add account" on a fresh restore re-derives the
+ *     same addresses, and restoring from the encrypted backup file brings the
+ *     whole account list back for **zero** explorer requests — the thing
+ *     discovery was reaching for, done without reaching.
  *
  * The numbers here are measured, not estimated. Before this was scoped, an idle
  * refresh on a four-account wallet was 168 explorer requests (160 gap lookups +
@@ -217,5 +220,67 @@ describe('the recovery path that replaces discovery', () => {
     await restored.scan(spy.lookup, spy.fetchUtxos);
     expect((await restored.balances(spy.fetchUtxos)).totalSats).toBe(41_000n);
     expect((await restored.status()).lastBalanceSats).toBe('41000');
+  });
+
+  it('restoring from the backup file costs the explorer nothing at all', async () => {
+    // Zero, not "few". The account list is metadata, the file carries it, and
+    // recovering metadata therefore needs no third party at all — which is the
+    // answer to the question speculative discovery was asking badly. Deleting
+    // discovery only left the user better off if this number is a zero.
+    const source = ring();
+    await source.importMnemonic(MNEMONIC, PASSWORD);
+    for (let i = 1; i <= 3; i++) await source.createAccount();
+    await source.renameAccount(3, 'Payroll');
+    await source.switchAccount(0);
+    const { backupHex } = await source.exportBackup(PASSWORD);
+
+    const spy = new ExplorerSpy();
+    const restored = ring();
+    await restored.importBackup(backupHex, PASSWORD);
+
+    const status = await restored.status();
+    expect(status.accounts.map((a) => a.index)).toEqual([0, 1, 2, 3]);
+    expect(status.accounts.map((a) => a.name)).toContain('Payroll');
+    expect(spy.requests).toBe(0);
+    expect(spy.addresses.size).toBe(0);
+
+    // The zero above is a zero because nothing was asked, not because the spy
+    // cannot count: the ordinary refresh that follows spends the ordinary
+    // budget, and spends it on the active account's addresses alone. A restore
+    // is not an excuse for the wide scan that was deleted.
+    await restored.scan(spy.lookup, spy.fetchUtxos);
+    expect(spy.requests).toBeGreaterThan(0);
+    expect(spy.requests).toBeLessThanOrEqual(2 * GAP_LIMIT + 2);
+    const mine = windowOf(restored, 0);
+    for (const address of spy.addresses) expect(mine.has(address), address).toBe(true);
+  });
+
+  it('the file brings back an account that never received a coin — which no scan ever could', async () => {
+    // The case that decided this. Discovery's own note admitted it: an account
+    // with nothing on chain leaves nothing for any scan, at any depth, to find.
+    // A wallet that had three accounts and money in only one of them therefore
+    // could not be restored by asking the chain, however many addresses were
+    // handed over. The file restores it because it never asks.
+    const source = ring();
+    await source.importMnemonic(MNEMONIC, PASSWORD);
+    for (let i = 1; i <= 3; i++) await source.createAccount();
+    await source.renameAccount(2, 'Cold, empty, and mine');
+    await source.switchAccount(0);
+    const { backupHex } = await source.exportBackup(PASSWORD);
+
+    const spy = new ExplorerSpy(); // an explorer that has never heard of any of it
+    const restored = ring();
+    await restored.importBackup(backupHex, PASSWORD);
+    await restored.scan(spy.lookup, spy.fetchUtxos, null, { full: true, accounts: 'all' });
+
+    const status = await restored.status();
+    expect(status.accounts.map((a) => a.index)).toEqual([0, 1, 2, 3]);
+    expect(status.accounts.find((a) => a.index === 2)?.name).toBe('Cold, empty, and mine');
+    // And it is a real account, not a row: the address it derives is the one the
+    // source wallet had.
+    await restored.switchAccount(2);
+    expect((await restored.receiveAddress()).address).toBe(
+      addressFromHdSeed(HD, 'external', 0, 'testnet', 2).address,
+    );
   });
 });

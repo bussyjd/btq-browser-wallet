@@ -122,6 +122,29 @@ export interface SeedReveal {
   seedHex: string;
 }
 
+/**
+ * The result of `wallet.exportBackup` — the wallet backup file, as the sealed
+ * `BTQ1` envelope in hex plus the name to offer the download under.
+ *
+ * Not secret material, and that distinction is the whole design: the phrase and
+ * the seed are *revealed* on one screen and never written anywhere, while this
+ * is ciphertext under the password the user just re-typed, which is why it may
+ * become a file at all. It is still the whole wallet, so the popup turns it
+ * straight into a download and keeps no copy — nothing puts it in hook state.
+ */
+export interface BackupFile {
+  /** Carries no address, no account name and no balance. See `backupFileName`. */
+  fileName: string;
+  /** The sealed blob, hex-encoded: `chrome.runtime.sendMessage` is JSON. */
+  backupHex: string;
+}
+
+/** The result of `wallet.importBackup` — the account indices it put back. */
+export interface BackupRestore {
+  ok: true;
+  accounts: number[];
+}
+
 export interface SendPreview {
   destination: string;
   /** satoshis, decimal string */

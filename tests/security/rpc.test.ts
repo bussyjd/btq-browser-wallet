@@ -3,6 +3,8 @@ import { Keyring } from '../../src/core/wallet/keyring.js';
 import { dispatch } from '../../src/core/rpc/dispatch.js';
 import { isUntrustedSender } from '../../src/core/rpc/origin.js';
 import { SECRET_RESULT_KEYS, WALLET_METHODS } from '../../src/core/rpc/protocol.js';
+import { mnemonicToHdSeed } from '../../src/core/crypto/mnemonic.js';
+import { bytesToHex, hexToBytes } from '../../src/core/util/hex.js';
 import { MemoryWalletStorage, TEST_ENCRYPT } from '../helpers/memory-store.js';
 
 function keyring() {
@@ -134,6 +136,41 @@ describe('RPC surface — what a page could try', () => {
       }
     }
     expect(collectKeys(others.status).includes('words')).toBe(false);
+  });
+
+  it('wallet.exportBackup hands over the whole wallet — sealed, and with none of it readable', async () => {
+    // The one method that returns something the size of the wallet. It is the
+    // `BTQ1` envelope and not key material, and this is where that claim is
+    // checked rather than asserted: the bytes on the wire must hold no word of
+    // the phrase, no run of the seed hex and no field name from the payload.
+    // The scan is over the decoded ciphertext, not tokenised text, because a
+    // leak here would be a whole encoding and never a coincidence of letters.
+    const k = keyring();
+    const mnemonic =
+      'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about';
+    await k.importMnemonic(mnemonic, 'testnet-ok');
+    await k.createAccount();
+    const result = (await dispatch(
+      k,
+      { method: 'wallet.exportBackup', params: { password: 'testnet-ok' } },
+      { fromTab: false },
+    )) as { fileName: string; backupHex: string };
+
+    for (const secret of SECRET_RESULT_KEYS) {
+      expect(collectKeys(result).includes(secret), secret).toBe(false);
+    }
+    const seedHex = bytesToHex(mnemonicToHdSeed(mnemonic));
+    const bytes = new TextDecoder('latin1').decode(hexToBytes(result.backupHex));
+    expect(seedHex).toHaveLength(128); // the scans below are not vacuous
+    expect(bytes).not.toContain(seedHex);
+    expect(bytes).not.toContain(seedHex.slice(0, 16));
+    expect(bytes).not.toContain(mnemonic);
+    expect(bytes).not.toContain('abandon');
+    expect(bytes).not.toContain('hdSeedHex');
+    expect(bytes).not.toContain('entropyHex');
+    // …and the file name is not a place to put any of it either.
+    expect(result.fileName).not.toContain(seedHex.slice(0, 8));
+    expect(result.fileName).not.toContain('abandon');
   });
 });
 

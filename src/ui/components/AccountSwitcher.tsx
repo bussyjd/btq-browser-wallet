@@ -164,13 +164,18 @@ export function AccountSwitcher({
           {/* Said here, where the decision is made, and not only in the docs.
               Account 1 is btq-core's own path; everything below it is this
               wallet's convention, and how many there are is something only the
-              user can record — the chain does not know. */}
+              user can record — the chain does not know, and a phrase carries
+              keys, not a list. The backup file is named because it is the one
+              thing that does carry the list, and this is the moment somebody
+              first has something to lose by not having one. */}
           <p className="small" data-testid="account-note">
             Account 1 is the only account btq-core can derive from this seed. The others are
-            this wallet's own, and the seed does not record how many you made. Restoring is
-            exact but manual: press Add account the same number of times, in order, and the
-            same seed re-derives the same addresses, so the coins reappear. Write down how
-            many you made — this wallet will not go asking a public explorer to guess.
+            this wallet's own, and the seed does not record how many you made. Save a backup
+            file — Settings → Wallet backup file — and the list comes back with your keys.
+            Without one, restoring is exact but manual: press Add account the same number of
+            times, in order, and the same seed re-derives the same addresses, so the coins
+            reappear. Write down how many you made — this wallet will not go asking a public
+            explorer to guess.
           </p>
         </div>
         <InlineError message={create.error ?? switchTo.error ?? rename.error} />

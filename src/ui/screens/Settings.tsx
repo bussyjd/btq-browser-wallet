@@ -6,6 +6,7 @@ import { InlineError } from '../components/InlineError.js';
 import { SeedGrid } from '../components/SeedGrid.js';
 import { SeedHex } from '../components/SeedHex.js';
 import { useAction } from '../hooks/useAction.js';
+import { hexToBytes } from '../../core/util/hex.js';
 import type { Wallet } from '../hooks/useWallet.js';
 import type { BackupKind } from '../types.js';
 
@@ -57,6 +58,12 @@ export function Settings({
   const [revealPassword, setRevealPassword] = useState('');
   const [phrase, setPhrase] = useState<string[] | null>(null);
   const [seedHex, setSeedHex] = useState<string | null>(null);
+  // The backup-file control keeps its own password box rather than sharing
+  // `asking` with the reveals: the two are different decisions, and a single
+  // flag would mean opening one and getting the other's warning.
+  const [savingBackup, setSavingBackup] = useState(false);
+  const [backupPassword, setBackupPassword] = useState('');
+  const [savedName, setSavedName] = useState<string | null>(null);
 
   const test = useAction();
   const rescan = useAction();
@@ -65,6 +72,7 @@ export function Settings({
   const wipe = useAction();
   const revoke = useAction();
   const reveal = useAction();
+  const saveFile = useAction();
 
   // Which backup control this panel offers — the worker's answer, not a second
   // opinion formed here. Every wallet that is open has one: the phrase when the
@@ -107,6 +115,38 @@ export function Settings({
     setPhrase(null);
     setSeedHex(null);
     reveal.setError(null);
+  }
+
+  function closeBackup() {
+    setSavingBackup(false);
+    setBackupPassword('');
+    saveFile.setError(null);
+  }
+
+  /**
+   * Hand the sealed bytes to the browser as a download.
+   *
+   * A blob URL and one synthetic click — no `chrome.downloads` permission,
+   * which would let this extension read the whole download history to save a
+   * file it already has in hand. What is in `bytes` is ciphertext, so there is
+   * nothing here to wipe: the plaintext this was built from never left the
+   * service worker, which wiped it before answering. The URL is revoked on the
+   * next tick because revoking it in the same one can outrun the download the
+   * click just started.
+   */
+  function saveBackupFile(fileName: string, backupHex: string) {
+    const decoded = hexToBytes(backupHex);
+    // Copied into a Uint8Array of its own ArrayBuffer: `hexToBytes` is typed
+    // over `ArrayBufferLike`, which `BlobPart` will not take.
+    const bytes = new Uint8Array(decoded.length);
+    bytes.set(decoded);
+    const url = URL.createObjectURL(new Blob([bytes], { type: 'application/octet-stream' }));
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = fileName;
+    link.rel = 'noopener';
+    link.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 0);
   }
 
   function draft() {
@@ -447,6 +487,83 @@ export function Settings({
           </div>
         ) : null}
       </Card>
+
+      {/* The backup file. Its own card, and after Security rather than inside
+          it, because it is a different decision from either reveal: those put
+          a secret on a screen that closes, this writes an artefact that does
+          not. Rendered on the same condition the reveals are — `backup` is
+          non-null exactly when the worker has an open vault — so it is never a
+          button whose only possible outcome is an error. */}
+      {backup === null ? null : (
+        <Card>
+          <p className="section-label">Wallet backup file</p>
+          <p className="small">
+            Your recovery phrase carries your keys. It cannot carry your account list —
+            twelve words say what the master secret is and nothing about what you did with
+            it. This file carries both, sealed with the same password as your wallet.
+          </p>
+          {/* Said plainly, next to the button, and not only in the docs: this
+              is a new object in the world that did not exist a moment ago. */}
+          <p className="note note-warn" role="status" data-testid="export-backup-warning">
+            Anyone who has this file and your password has your wallet — every key in it,
+            and your account names with them. Without the password it is sealed, but it
+            still tells whoever holds it that a BTQ wallet exists. Keep it where you keep
+            your recovery phrase.
+          </p>
+          {savedName ? (
+            <p className="note note-ok" role="status" data-testid="export-backup-saved">
+              Saved as {savedName}. Save it again after you add or rename an account: the
+              file holds the account list you had at the moment you pressed the button.
+            </p>
+          ) : null}
+          {savingBackup ? (
+            <form
+              className="stack-sm mt-8"
+              onSubmit={(e) => {
+                e.preventDefault();
+                void saveFile.run(async () => {
+                  const file = await wallet.exportBackup(backupPassword);
+                  // Spent the instant it is used, exactly as the reveals do.
+                  setBackupPassword('');
+                  saveBackupFile(file.fileName, file.backupHex);
+                  setSavedName(file.fileName);
+                  setSavingBackup(false);
+                  onToast('Backup file saved');
+                });
+              }}
+            >
+              <PasswordField
+                id="export-backup-pw"
+                data-testid="export-backup-pw"
+                label="Password"
+                autoComplete="off"
+                value={backupPassword}
+                onChange={(e) => setBackupPassword(e.target.value)}
+              />
+              <Button type="submit" data-testid="export-backup-submit" disabled={saveFile.busy}>
+                {saveFile.busy ? 'Sealing…' : 'Save backup file'}
+              </Button>
+              <Button variant="secondary" onClick={closeBackup}>
+                Cancel
+              </Button>
+              <InlineError message={saveFile.error} testId="export-backup-error" />
+            </form>
+          ) : (
+            <div className="mt-8">
+              <Button
+                variant="secondary"
+                data-testid="export-backup"
+                onClick={() => {
+                  saveFile.setError(null);
+                  setSavingBackup(true);
+                }}
+              >
+                Save backup file
+              </Button>
+            </div>
+          )}
+        </Card>
+      )}
 
       <Card tone={showWipe ? 'warn' : 'default'}>
         <p className="section-label">Danger zone</p>

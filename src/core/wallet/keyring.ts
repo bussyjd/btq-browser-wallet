@@ -23,6 +23,14 @@ import {
 } from '../crypto/mnemonic.js';
 import { encryptVault, decryptVault, wipePlaintext, type EncryptOptions } from '../vault/encrypt.js';
 import { decodePayload, encodePayload, type SeedOrigin, type VaultPayload } from '../vault/payload.js';
+import {
+  BACKUP_VERSION,
+  MAX_BACKUP_BYTES,
+  backupFileName,
+  decodeBackup,
+  encodeBackup,
+  type BackupPayload,
+} from '../vault/backup.js';
 import { bytesToHex, hexToBytes, wipeBytes } from '../util/hex.js';
 import { BroadcastError, WalletError, type BroadcastVia } from './errors.js';
 import { deriveKeySeed, masterFromSeed } from '../crypto/hd.js';
@@ -567,18 +575,33 @@ export class Keyring {
    */
   async revealSeedHex(password: string): Promise<{ seedHex: string }> {
     const plain = await this.reauthPlaintext(password);
-    let stored: Uint8Array | undefined;
     try {
       const payload = decodePayload(plain);
-      // Re-checked against the seed this wallet is actually deriving from, for
-      // the same reason the phrase is re-derived before it is shown: hex that
-      // restores a *different* wallet is a backup the user trusts and loses
-      // their coins to. Plain loop compare — both sides are our own material
-      // out of one authenticated ciphertext, there is no attacker input and no
-      // oracle, and the caller already proved the password to get here.
-      const live = this.hdSeed;
-      if (!live) throw new WalletError('LOCKED', 'Wallet is locked.');
-      stored = hexToBytes(payload.hdSeedHex);
+      this.assertSealedSeedIsLive(payload.hdSeedHex);
+      return { seedHex: payload.hdSeedHex };
+    } finally {
+      wipePlaintext(plain);
+    }
+  }
+
+  /**
+   * Hold "the sealed seed" and "the seed this wallet derives from" together.
+   *
+   * Every backup this wallet hands out passes through here first — the hex on
+   * screen and the bytes in an exported file — for one reason: a backup that
+   * restores a *different* wallet is worse than no backup, because the user
+   * trusts it and loses their coins to it. It costs about a millisecond next to
+   * the 600 000-round password check that got the caller this far, so it is free.
+   *
+   * Plain loop compare, not a constant-time one, and deliberately: both sides
+   * are our own material out of one authenticated ciphertext, there is no
+   * attacker input and no oracle, and the caller already proved the password.
+   */
+  private assertSealedSeedIsLive(hdSeedHex: string): void {
+    const live = this.hdSeed;
+    if (!live) throw new WalletError('LOCKED', 'Wallet is locked.');
+    const stored = hexToBytes(hdSeedHex);
+    try {
       let same = stored.length === live.length;
       if (same) {
         for (let i = 0; i < stored.length; i++) {
@@ -588,11 +611,156 @@ export class Keyring {
       if (!same) {
         throw new WalletError('NOT_A_VAULT', 'The sealed seed is not the seed this wallet is using.');
       }
-      return { seedHex: payload.hdSeedHex };
     } finally {
-      if (stored) wipeBytes(stored);
+      wipeBytes(stored);
+    }
+  }
+
+  /**
+   * Write the wallet backup file: the account list a phrase cannot carry,
+   * sealed beside the seed under the same password.
+   *
+   * ### Why there is an export at all, when there deliberately was not
+   *
+   * The old rule was that `reveal` means "on this screen, now", and the wallet
+   * writes nothing to a file, because a file leaves the machine, gets synced,
+   * and outlives the vault it came from. That rule was about *plaintext* — the
+   * phrase and the seed are still never written anywhere. What leaves here is
+   * the `BTQ1` envelope, PBKDF2-SHA256 and AES-256-GCM, the same sealing the
+   * on-disk vault already has, so the artefact is exactly as strong as the vault
+   * it came from and the line falls where it should: cleartext never, ciphertext
+   * when the user asks for it. The warning that motivated the old rule did not
+   * stop being true; it moved to the copy beside the button.
+   *
+   * What made it necessary is upstream. Deleting speculative account discovery
+   * left the account list with no recovery path, and no phrase can be given one,
+   * so either the wallet hands the user something to keep or "write down how
+   * many accounts you made" is the whole of the backup story.
+   *
+   * ### The discipline is the reveals' discipline, unchanged
+   *
+   * Unlocked or refuse; the password re-proved against the sealed vault through
+   * `reauthPlaintext`, sharing the unlock back-off in both directions; a wrong
+   * one names nothing but the password; unreachable from a page, because
+   * `dispatch` refuses every `wallet.*` method to a tab before it looks at the
+   * name. Both plaintexts — the vault's and the backup's — are wiped on the way
+   * out, including when the seal throws.
+   *
+   * It re-seals rather than copying the bytes already on disk, and it has to:
+   * the vault payload holds key material only. The account list lives in
+   * `WalletMeta`, which is rewritten every time an account is added, renamed or
+   * switched — none of which has the password to hand.
+   */
+  async exportBackup(password: string): Promise<{ fileName: string; backupHex: string }> {
+    const plain = await this.reauthPlaintext(password);
+    let body: Uint8Array | undefined;
+    try {
+      const payload = decodePayload(plain);
+      this.assertSealedSeedIsLive(payload.hdSeedHex);
+      const meta = await this.walletMeta();
+      body = encodeBackup({
+        b: BACKUP_VERSION,
+        network: payload.network,
+        origin: payload.origin,
+        hdSeedHex: payload.hdSeedHex,
+        // Conditional spread for the reason `seal()` uses one: an explicit
+        // `undefined` survives as a key and serialises to `null`, which the
+        // decoder on the other side refuses.
+        ...(payload.entropyHex === undefined ? {} : { entropyHex: payload.entropyHex }),
+        // Index and name, and nothing else. A balance is stale the moment it is
+        // written and a cursor is re-found in one scan; the address is derived.
+        accounts: meta.accounts.map((a) => ({ index: a.index, name: a.name })),
+        activeAccount: meta.activeAccount,
+      });
+      const blob = await encryptVault(body, password, this.opts.encrypt);
+      return { fileName: backupFileName(this.now()), backupHex: bytesToHex(blob) };
+    } finally {
+      if (body) wipePlaintext(body);
       wipePlaintext(plain);
     }
+  }
+
+  /**
+   * Restore a wallet from a backup file — the third door onto a device with no
+   * vault, beside a phrase and a raw seed, and the only one that brings the
+   * account list with it.
+   *
+   * **It asks the chain nothing.** The accounts come out of the file, names and
+   * all, so the restore itself costs zero explorer requests. That is the entire
+   * point of having a file rather than a guess, and
+   * `tests/security/scan-privacy.test.ts` asserts the zero. What happens after
+   * it is the ordinary refresh of the account on screen, exactly as on any open.
+   *
+   * The file is treated as hostile input even though AES-GCM authenticated it,
+   * because on this path the person who sealed it may be the person who handed
+   * it over: `decodeBackup` bounds the indices, caps the list and strips the
+   * names through the same filter the storage layer uses.
+   *
+   * There is no unlock back-off here, and none is missing: there is no vault on
+   * this device to throttle access to, and anybody holding the file can guess
+   * against their own copy as fast as their hardware allows. PBKDF2 is what
+   * stands in that place, exactly as it does for the vault blob.
+   */
+  async importBackup(backupHex: string, password: string): Promise<{ accounts: number[] }> {
+    this.maybeAutoLock();
+    assertPassword(password);
+    if (await this.storage.loadVault()) {
+      throw new WalletError('ALREADY_EXISTS', 'A wallet already exists on this device. Remove it first.');
+    }
+    if (typeof backupHex !== 'string' || backupHex.length > MAX_BACKUP_BYTES * 2) {
+      throw notABackupFile();
+    }
+    let blob: Uint8Array;
+    try {
+      blob = hexToBytes(backupHex);
+    } catch {
+      throw notABackupFile();
+    }
+    let plain: Uint8Array;
+    try {
+      plain = await decryptVault(blob, password);
+    } catch (e) {
+      // `NOT_A_VAULT` is the envelope's own "these bytes are not ours", and on
+      // this screen the bytes are a file the user picked — so say it in terms of
+      // the thing they picked. `WRONG_PASSWORD` passes through untouched: the
+      // two failures send a user to opposite corners of the room and must never
+      // be spelled the same.
+      if (e instanceof WalletError && e.code === 'NOT_A_VAULT') throw notABackupFile();
+      throw e;
+    }
+    let backup: BackupPayload;
+    try {
+      backup = decodeBackup(plain);
+    } finally {
+      wipePlaintext(plain);
+    }
+    if (backup.network !== this.network) {
+      throw new WalletError(
+        'WRONG_NETWORK',
+        `That backup is for ${backup.network}. This wallet is ${this.network} only.`,
+      );
+    }
+    const seed = hexToBytes(backup.hdSeedHex);
+    const entropy = backup.entropyHex === undefined ? undefined : hexToBytes(backup.entropyHex);
+    // `seal` wipes both buffers on its way out, whether it succeeded or threw,
+    // and writes a fresh one-account meta; the list goes on top of it below.
+    await this.seal(seed, password, backup.origin, entropy);
+    // Derived outside the lock: `updateMeta`'s body is a critical section, and
+    // twenty ML-DSA derivations inside one would park every other meta write
+    // behind them.
+    const records = backup.accounts.map((a) => {
+      const rec = emptyAccount(a.index);
+      rec.name = a.name;
+      rec.address = this.addressAt('external', 0, a.index).address;
+      return rec;
+    });
+    const accounts = await this.updateMeta((meta) => {
+      meta.accounts = records.map((r) => ({ ...r }));
+      meta.activeAccount = backup.activeAccount;
+      this.activeIndex = meta.activeAccount;
+      return meta.accounts.map((a) => a.index);
+    });
+    return { accounts };
   }
 
   /**
@@ -1374,6 +1542,16 @@ export class Keyring {
   private clearPending(): void {
     this.pending = null;
   }
+}
+
+/**
+ * One sentence for "that file is not a backup", used by every refusal on the
+ * import path. Written once so a corrupt file, a foreign file and a file that
+ * decrypted onto the wrong shape cannot be told apart by their wording — the
+ * same reason `NOT_A_VAULT` names no field.
+ */
+function notABackupFile(): WalletError {
+  return new WalletError('NOT_A_BACKUP', 'That file is not a BTQ wallet backup.');
 }
 
 /**

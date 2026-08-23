@@ -40,9 +40,52 @@ describe('wallet RPC contract v2', () => {
       'wallet.history',
       'wallet.revealPhrase',
       'wallet.revealSeedHex',
+      'wallet.exportBackup',
+      'wallet.importBackup',
     ]) {
       expect(WALLET_METHODS.includes(m as never), m).toBe(true);
     }
+  });
+
+  it('wallet.exportBackup answers with a file name and sealed bytes, and nothing else', async () => {
+    // The popup builds a download out of exactly these two fields. A third one
+    // would be a third thing crossing the channel from an open vault, and a
+    // renamed one is a Settings button that silently stops working.
+    const k = ring();
+    await k.importMnemonic(MNEMONIC, PASSWORD);
+    await k.createAccount();
+    const result = (await dispatch(
+      k,
+      { method: 'wallet.exportBackup', params: { password: PASSWORD } },
+      { fromTab: false },
+    )) as Record<string, unknown>;
+    expect(Object.keys(result).sort()).toEqual(['backupHex', 'fileName']);
+    expect(result.fileName).toMatch(/^btq-wallet-backup-\d{4}-\d{2}-\d{2}\.btqbackup$/);
+    expect(result.backupHex).toMatch(/^[0-9a-f]+$/);
+    // Hex, not bytes: `chrome.runtime.sendMessage` serialises as JSON, and a
+    // Uint8Array crosses it as {"0":1,…} — which the popup would then have to
+    // guess the shape of.
+    expect(typeof result.backupHex).toBe('string');
+  });
+
+  it('wallet.importBackup answers with ok and the account indices it restored', async () => {
+    const source = ring();
+    await source.importMnemonic(MNEMONIC, PASSWORD);
+    await source.createAccount();
+    const { backupHex } = (await dispatch(
+      source,
+      { method: 'wallet.exportBackup', params: { password: PASSWORD } },
+      { fromTab: false },
+    )) as { backupHex: string };
+
+    const fresh = ring();
+    const restored = (await dispatch(
+      fresh,
+      { method: 'wallet.importBackup', params: { backupHex, password: PASSWORD } },
+      { fromTab: false },
+    )) as Record<string, unknown>;
+    expect(restored).toEqual({ ok: true, accounts: [0, 1] });
+    expect((await fresh.status()).accounts.map((a) => a.index)).toEqual([0, 1]);
   });
 
   it('wallet.status carries the balance, tip and scan-time fields', async () => {

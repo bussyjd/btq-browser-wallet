@@ -2,6 +2,7 @@ import { useState } from 'react';
 import type { Wallet } from '../hooks/useWallet.js';
 import { ConfirmSeed } from './ConfirmSeed.js';
 import { CreatePassword } from './CreatePassword.js';
+import { ImportBackup } from './ImportBackup.js';
 import { ImportChoice } from './ImportChoice.js';
 import { ImportMnemonic } from './ImportMnemonic.js';
 import { ImportRawSeed } from './ImportRawSeed.js';
@@ -15,6 +16,7 @@ type Step =
   | 'confirm-seed'
   | 'import-choice'
   | 'import-mnemonic'
+  | 'import-backup'
   | 'import-raw';
 
 /**
@@ -90,6 +92,7 @@ export function Onboarding({
       return (
         <ImportChoice
           onMnemonic={() => setStep('import-mnemonic')}
+          onBackupFile={() => setStep('import-backup')}
           onRaw={() => setStep('import-raw')}
           onBack={() => setStep('welcome')}
         />
@@ -101,6 +104,17 @@ export function Onboarding({
           onBack={() => setStep('import-choice')}
           onSubmit={async (text, password) => {
             await wallet.importMnemonic(text, password);
+            await onDone();
+          }}
+        />
+      );
+
+    case 'import-backup':
+      return (
+        <ImportBackup
+          onBack={() => setStep('import-choice')}
+          onSubmit={async (backupHex, password) => {
+            await wallet.importBackup(backupHex, password);
             await onDone();
           }}
         />

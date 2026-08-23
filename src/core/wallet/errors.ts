@@ -32,6 +32,14 @@ export type WalletErrorCode =
    * the wallet and import its phrase or seed again.
    */
   | 'VAULT_TOO_OLD'
+  /**
+   * The file handed to `importBackup` is not a wallet backup: too big, not the
+   * `BTQ1` envelope, or an envelope that opened onto something that is not a
+   * backup payload. Distinct from `WRONG_PASSWORD`, the only other thing that
+   * import can say, so "you picked the wrong file" never reads as "you typed
+   * the wrong password" — the two send a user to opposite corners of the room.
+   */
+  | 'NOT_A_BACKUP'
   | 'BAD_ADDRESS'
   | 'WRONG_NETWORK'
   | 'LEGACY_DILITHIUM'

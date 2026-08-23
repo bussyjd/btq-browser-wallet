@@ -3,6 +3,8 @@ import { errorCode, rpc } from '../rpc.js';
 import type {
   BackendInfo,
   BackendProbe,
+  BackupFile,
+  BackupRestore,
   ConnectedSites,
   CreateReveal,
   HistoryEntry,
@@ -36,6 +38,11 @@ export interface BackendDraft {
  * three hand the result straight back to the caller and put nothing into this
  * hook's state, so the secret lives in one screen's component state and dies
  * when it unmounts. Every other call returns addresses, amounts and hex.
+ *
+ * `exportBackup` is deliberately not a fourth: what it returns is the sealed
+ * `BTQ1` envelope, not key material, which is the whole reason it may become a
+ * file. It follows the same hand-it-back rule anyway — it is the entire wallet
+ * in one object, and one copy in one screen beats a copy that outlives it.
  */
 export function useWallet() {
   const [status, setStatus] = useState<WalletStatus | null>(null);
@@ -220,6 +227,35 @@ export function useWallet() {
     [],
   );
 
+  /**
+   * The wallet backup file, after the password is re-typed on an open vault.
+   *
+   * Handed straight back to the caller and never put in this hook's state, for
+   * the same reason the two reveals are — one screen owns it and it dies with
+   * that screen. The reason is different in kind, though, and worth being exact
+   * about: this is *not* key material. It is the `BTQ1` envelope, sealed under
+   * the password, which is precisely why it is allowed to become a file when
+   * the phrase and the seed are not. It is still the whole wallet in one
+   * object, so fewer copies of it is better than more.
+   */
+  const exportBackup = useCallback(
+    (password: string) => rpc<BackupFile>('wallet.exportBackup', { password }),
+    [],
+  );
+
+  /**
+   * Restore from a backup file, on a device with no wallet yet.
+   *
+   * The one restore that costs the explorer nothing: the accounts and their
+   * names come out of the file, so nothing here asks a third party anything.
+   * The refresh that follows is the ordinary one, over the active account.
+   */
+  const importBackup = useCallback(
+    (backupHex: string, password: string) =>
+      rpc<BackupRestore>('wallet.importBackup', { backupHex, password }),
+    [],
+  );
+
   const wipe = useCallback(async (confirmation: string) => {
     await rpc('wallet.wipe', { confirmation });
     setStatus(null);
@@ -363,10 +399,12 @@ export function useWallet() {
     confirmSeed,
     importMnemonic,
     importSeed,
+    importBackup,
     unlock,
     lock,
     revealPhrase,
     revealSeedHex,
+    exportBackup,
     wipe,
     prepareSend,
     confirmSend,

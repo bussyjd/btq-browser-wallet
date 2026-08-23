@@ -11,10 +11,17 @@
  * never has to render a control that cannot do anything; it is offered instead
  * of the phrase, never as well.
  *
- * There is still deliberately no `export*` method: the wallet writes neither
- * the seed nor the phrase to a file, a download or the clipboard. `reveal`
- * means "on this screen, now, and nowhere else", and re-using the other word
- * for it would blur exactly that.
+ * Two methods carry the wallet as a *file*, and they are not a fourth and fifth
+ * exception to the rule above — they are the other side of it.
+ * `wallet.exportBackup` returns the `BTQ1` envelope: PBKDF2-SHA256 and
+ * AES-256-GCM over the seed and the account list, sealed under the password the
+ * caller just re-typed, and `wallet.importBackup` takes one back on a device
+ * with no vault. What crosses the channel is ciphertext, so the line is where it
+ * always was and is now easier to state: cleartext key material is *revealed*,
+ * on one screen, now, and is never written anywhere; a sealed blob is
+ * *exported*, because the account list is metadata no phrase can carry and a
+ * user who cannot keep it cannot get their accounts back. Neither word may be
+ * used for the other's job.
  */
 export const WALLET_METHODS = [
   'wallet.status',
@@ -30,6 +37,8 @@ export const WALLET_METHODS = [
   'wallet.wipe',
   'wallet.revealPhrase',
   'wallet.revealSeedHex',
+  'wallet.exportBackup',
+  'wallet.importBackup',
   'wallet.maxSpendable',
   'wallet.prepareSend',
   'wallet.confirmSend',

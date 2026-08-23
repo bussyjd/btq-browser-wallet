@@ -72,17 +72,23 @@ coins:
   Core's only other door for those coins is `importdilithiumkey`, one leaf key at a
   time, and this wallet has no key export.
 - **The seed does not say how many accounts there were.** An account is a derivation
-  path, not a record; nothing about `m/2'/…` is written into the phrase.
+  path, not a record; nothing about `m/2'/…` is written into the phrase. A BIP39 phrase is
+  an encoding of *entropy*: it says what the master secret is and nothing about what was
+  done with it. There is no field to add, because there is no format to add one to.
 
-So the restore is exact, and it is manual:
+So there are two restores, and only one of them carries the list.
 
-1. **Press *Add account* the same number of times, in order.** `createAccount` always
-   takes `max(index) + 1`, so the n-th press on a fresh restore is the same derivation
-   path it was the first time and the same seed re-derives the same addresses. The coins
-   reappear. `tests/security/scan-privacy.test.ts` asserts exactly this, addresses and
-   balance both, because it is the whole argument for the paragraph below.
-2. **Write down how many accounts you made.** That number is the one piece of this
-   wallet a phrase does not carry.
+1. **From a backup file** (`docs` below, and Settings → *Wallet backup file*). The account
+   list travels sealed beside the seed, so the accounts come back with the names the user
+   gave them and the restore asks the explorer nothing at all. This is the recommended
+   path and the one the import screen names first.
+2. **From the phrase alone**, which is exact and manual. Press *Add account* the same
+   number of times, in order: `createAccount` always takes `max(index) + 1`, so the n-th
+   press on a fresh restore is the same derivation path it was the first time and the same
+   seed re-derives the same addresses. The coins reappear.
+   `tests/security/scan-privacy.test.ts` asserts exactly this, addresses and balance both,
+   because it is the whole argument for the paragraph below. Write down how many accounts
+   you made — that number is the one piece of this wallet a phrase does not carry.
 
 ### The wallet does not go looking, and that is deliberate
 
@@ -120,8 +126,59 @@ The alternative considered and rejected was recording the account count inside t
 sealed vault payload. It cannot work for the case that matters: the payload on a fresh
 device is written by that device's own import, out of the phrase the user just typed —
 there is no older payload to read, so the number would always be 1 and would tell nobody
-anything. It would only help a restore that copies the encrypted blob across, which is
-not the restore anybody is worried about.
+anything. It would only help a restore that copies the encrypted blob across.
+
+That last sentence is the whole answer, once it is read the other way round. **A restore
+that copies an encrypted blob across is exactly what a wallet file is**, and it is what
+Sparrow and Electrum have done for years: the phrase is the key material, a wallet file is
+everything else. The count could not ride in the vault payload because a fresh device
+authors its own; it rides fine in a file that fresh device is *given*.
+
+## The wallet backup file
+
+`Settings → Wallet backup file`, behind the password, writes
+`btq-wallet-backup-YYYY-MM-DD.btqbackup`. `Import → Use a backup file` reads one back onto
+a device with no vault.
+
+**One envelope, no new cryptography.** The file is `encryptVault`'s own output — `BTQ1`,
+PBKDF2-SHA256 at 600 000 iterations, AES-256-GCM — over a plaintext that carries the HD
+seed, the BIP39 entropy when there is one, and the account list. `src/core/vault/backup.ts`
+adds a *schema*, not an algorithm, so the artefact is exactly as strong as the vault it
+came from and there is no second thing to review.
+
+It could not simply be the vault bytes already on disk, which would have been neater. The
+vault payload holds key material only; the account list lives in `WalletMeta`, which is
+rewritten every time an account is added, renamed or switched — none of which has the
+password to hand. So `exportBackup` re-seals, once, at the moment the user asks.
+
+**What travels: index and name, and nothing else.** No balance (stale the moment it is
+written), no cursor (re-found in one scan), no cached address (derived). A backup that
+carries a balance is a backup that lies about one.
+
+**Same door as the reveals.** Unlocked or refuse; the password re-proved against the
+sealed vault through `reauthPlaintext`, sharing the unlock back-off in both directions; a
+wrong one names nothing but the password; refused to pages before the method name is even
+read; both plaintexts wiped on the way out; and the sealed seed checked against the seed
+the wallet is actually deriving from, so a swapped vault blob cannot make somebody save a
+backup of a wallet that is not theirs.
+
+**The import treats the file as hostile.** AES-GCM proves the bytes were sealed by whoever
+knew that password — and on an import that may be whoever handed the file over. So
+`decodeBackup` is as strict as `parseMeta`: bounded indices, no duplicates, account 0
+required, hex checked, and every name through the same Cc/Cf/Zl/Zp strip the chrome relies
+on. Authenticated is not trusted.
+
+**What holding the file tells somebody.** It says a BTQ wallet exists — a blob whose first
+four bytes are `BTQ1` is not mistakable for anything else, and that is stated beside the
+button rather than glossed. It does **not** say how many accounts are in it: the plaintext
+is padded to a fixed 8192 bytes, so every backup this build writes is the same size
+whatever the list. The default name carries no address, no account name, no balance and no
+network. With the password, of course, it is the whole wallet — which is the sentence the
+export screen leads with.
+
+Measured against the thing it replaces: restoring a four-account wallet from the file costs
+**0** explorer requests, and brings back an account that never received a coin — the case
+discovery admitted in its own note it could never find, at any depth.
 
 ## Where the standard actually lives (and doesn't)
 
@@ -186,8 +243,9 @@ The gap-limit scan (20, matching Bitcoin convention) is what makes import *resto
 wallet rather than merely re-create key material: used addresses beyond index 0 are
 found by asking the explorer, exactly the way the balance screen does, so an imported
 wallet shows its history immediately. A lookup that fails is an error, never "unused" —
-otherwise a flaky explorer would silently truncate the restore. That first scan is also
-the one that probes for extra accounts, as described above.
+otherwise a flaky explorer would silently truncate the restore. That first scan covers the
+active account and nothing else: it is no chattier than any later refresh, and it probes
+for no account the user has not created.
 
 ## The failure modes we test
 
@@ -197,8 +255,12 @@ the one that probes for extra accounts, as described above.
 | Word not in the BIP39 list | rejected, the offending word named |
 | Hex seed that is not 64 hex chars | rejected |
 | Valid but unused seed | imports cleanly, empty history, index 0 shown |
-| Seed whose coins are on account 3 | the first scan probes two accounts past the last one it knows, adopts account 3 because its external chain has been used, and shows its balance in the switcher |
-| Seed whose account 3 was created but never funded | **not** restored — nothing on chain to find. Add it again in order; the switcher says so at the point the account is created |
+| Seed whose coins are on account 3 | the phrase alone restores Account 1; press *Add account* three times and account 3 comes back with its coins. No scan of any depth goes looking for it — the account list is metadata, and the request budget is pinned by `tests/security/scan-privacy.test.ts` |
+| Seed whose account 3 was created but never funded | the same, and it is the case that decides the design: there is nothing on any chain for a scan to find, so only the user's own record — a backup file, or a note — can bring it back |
+| Backup file plus its password | every account restored with its name and its derivation path, **zero** explorer requests to do it, and the account that was in front still in front |
+| Backup file with the wrong password | `WRONG_PASSWORD`, worded as a password problem and never as a bad file |
+| A file that is not a backup — a vault blob, a truncated copy, someone else's | `NOT_A_BACKUP`, one sentence, no field named. A vault blob is refused too: they share the envelope, and only the payload shape keeps them apart |
+| Backup whose account name carries a bidi override or half a surrogate pair | stripped on the way in by the same filter the storage layer uses — a sealed file is authenticated input, not trusted input |
 | Same seed imported twice | derives the identical addresses (golden-vector guarantee) |
 | Mnemonic vs raw-seed of the same entropy | **different wallets** — BIP39 hashing sits between; the UI labels the two import modes explicitly to prevent confusion |
 | Settings → Security on a raw-seed wallet | the phrase reveal is not rendered at all — a control that can only fail is worse than no control — and the HD seed reveal takes its place, with a sentence saying why. A phrase import seals its BIP39 entropy in the vault and can regenerate the words; a raw seed has none, and BIP39 hashing does not run backwards. Inventing words from the HD seed would hand the user a phrase that restores a *different* wallet — the seed hex they imported is the backup, and it goes back in through the same import screen |

@@ -76,11 +76,18 @@ best-effort. A vulnerability in btq-core itself belongs with
   while locked.
   Either reveal refuses a locked wallet even with the right password, and never unlocks
   one as a side effect. `wallet.status.backup` is `null` whenever locked, so a locked
-  popup learns nothing about what the vault could show. There is still no export method:
-  the wallet will not write the seed or the phrase to a file, the clipboard or anything
-  else — `reveal` means on the screen, now, and nowhere else.
-- **Pages:** cannot call `wallet.*` — send, unlock, confirm, `revealPhrase` and
-  `revealSeedHex` are not on the relay's allowlist. Site-connect is `page.requestAccounts` / `page.getAccounts` /
+  popup learns nothing about what the vault could show. A locked wallet also cannot export
+  its backup file: an export that worked while locked would be the whole wallet lifted out
+  of an unattended browser and cracked at leisure, which is strictly worse than a phrase on
+  a screen, because a file survives the walk away from the desk.
+- **Cleartext key material in a file:** still never. `reveal` means on the screen, now, and
+  nowhere else — no copy button, no clipboard, no download of a phrase or a seed. What
+  `wallet.exportBackup` writes is the `BTQ1` envelope, the same PBKDF2-SHA256 and
+  AES-256-GCM sealing the vault on disk already has, so the artefact is exactly as strong
+  as the vault it came from. That is why the account list may become a file when the phrase
+  may not: the line is cleartext versus ciphertext, and it has not moved.
+- **Pages:** cannot call `wallet.*` — send, unlock, confirm, `revealPhrase`,
+  `revealSeedHex`, `exportBackup` and `importBackup` are not on the relay's allowlist. Site-connect is `page.requestAccounts` / `page.getAccounts` /
   `page.disconnect`, matched on the **exact** origin the browser reports for the sender,
   never on an origin the page supplies.
 - **A grant is per (site, account):** approving a site approves it for the account that
@@ -92,11 +99,24 @@ best-effort. A vulnerability in btq-core itself belongs with
   page's own `disconnect` drops every account it held.
 - **Extra accounts are this wallet's convention, and cannot be re-derived by btq-core**
   (`scriptpubkeyman.cpp:1252` hardcodes `0'`). How many accounts exist is *metadata*, not
-  key material: the phrase does not carry it, and this wallet does not ask a public
-  explorer to guess it. Restoring the list is manual and exact — press *Add account* the
-  same number of times, in order, and the same seed re-derives the same addresses. The
-  switcher and `docs/HD_IMPORT.md` say so at the point the account is created. This is a
-  recovery limit, not a confidentiality one.
+  key material: a BIP39 phrase encodes entropy and says nothing about what was done with
+  it, so a phrase restores Account 1 and no more, and this wallet does not ask a public
+  explorer to guess the rest. There are two ways back and the UI names both — the switcher,
+  the import screen, and `docs/HD_IMPORT.md`. The **wallet backup file** carries the list
+  sealed beside the seed and restores it exactly, with zero explorer requests. Without one
+  the restore is manual and still exact: press *Add account* the same number of times, in
+  order, and the same seed re-derives the same addresses. This is a recovery limit, not a
+  confidentiality one.
+- **The backup file is a new artefact, and the export screen says what that means.** With
+  the password it is the whole wallet — every key, and the account names with them. Without
+  it, it is sealed, but it still tells whoever holds it that a BTQ wallet exists. What it
+  does not tell them is how large: the plaintext is padded to a fixed 8192 bytes, so every
+  backup this build writes is the same size whatever the account list, and the default file
+  name carries no address, no account name, no balance and no network. Import treats a file
+  as **authenticated but not trusted** — on that path whoever sealed it may be whoever
+  handed it over — so `decodeBackup` bounds every index, refuses duplicates and a list with
+  no account 0, and runs every name through the same Cc/Cf/Zl/Zp strip the chrome relies
+  on. Pinned by `tests/security/wallet-backup.test.ts`.
 - **A scan never asks about an address of an account the user has not created**, and a
   routine refresh asks only about the account on screen. Speculative account discovery was
   removed: it could not find an account that had never been paid, and the cost of trying

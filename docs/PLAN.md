@@ -198,7 +198,7 @@ hostile case would otherwise miss.
 
 - Vault ciphertext contains no plaintext seed bytes (the serialized blob is scanned)
 - A wrong password fails with no oracle — one error, no timing signal, attempt back-off
-- A locked wallet cannot sign, export, or derive a new address
+- A locked wallet cannot sign, export (a backup file included), or derive a new address
 - The phrase is reachable again only through Settings → Security, only on an unlocked
   wallet, and only after the password is re-checked against the sealed vault — sharing the
   unlock back-off both ways, refusing with `NO_PHRASE` for a raw-seed wallet rather than
@@ -234,11 +234,20 @@ hostile case would otherwise miss.
 
 Each of these was considered and left out on purpose; none is blocked on an unknown.
 
-- **Encrypted vault backup file.** Recovery is the phrase or the raw seed. A second export
-  path is a second thing that can leak. Showing the phrase on screen behind the password
-  is not the same decision and does not reopen this one: a file is an artefact that leaves
-  the machine, gets synced, gets backed up and outlives the vault it came from, while a
-  grid of words is gone when the screen is. That is also why there is no copy button.
+- ~~**Encrypted vault backup file.**~~ **Built** — see `docs/HD_IMPORT.md`. It was left out
+  while recovery meant "the phrase or the raw seed", because a second export path is a
+  second thing that can leak. What reopened it was not a change of taste but a change of
+  fact: deleting speculative account discovery left the account *list* with no recovery
+  path, and no phrase can be given one — a BIP39 phrase encodes entropy and says nothing
+  about what was done with it. So the wallet either hands the user something to keep, or
+  "write down how many accounts you made" is the whole of the backup story.
+
+  Everything the original entry said about a file is still true and now sits beside the
+  button: it leaves the machine, gets synced, outlives the vault it came from. What
+  changed is what is *in* it. The file is `encryptVault`'s own `BTQ1` envelope — PBKDF2
+  600 000, AES-256-GCM — so no cleartext key material is written anywhere, which is the
+  line that mattered, and it has not moved. There is still no copy button, and a phrase
+  and a seed are still shown on a screen and never written.
 - **Explorer failover and offline mode.** A failed lookup is a loud error, never a silent
   "0". Caching a stale balance behind a banner was judged worse than saying the backend is
   down.

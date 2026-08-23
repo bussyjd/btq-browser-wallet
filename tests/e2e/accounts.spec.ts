@@ -11,6 +11,9 @@
  * extension is asked anything.
  */
 import { expect, test, type Page } from '@playwright/test';
+import { mkdtempSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   importMnemonic,
   launchDevice,
@@ -23,6 +26,7 @@ import {
 import { startMockBackend, type MockBackend } from './fixtures/mock-explorer.js';
 import { videoDir } from './fixtures/video.js';
 import { addressFromHdSeed } from '../../src/core/wallet/derive.js';
+import { GAP_LIMIT } from '../../src/core/wallet/gap.js';
 import { mnemonicToHdSeed } from '../../src/core/crypto/mnemonic.js';
 
 test.describe.configure({ mode: 'serial' });
@@ -38,6 +42,11 @@ let origin: string;
 /** m/0'/0'/0' and m/1'/0'/0' — Core's account, and this wallet's second one. */
 let A0: string;
 let A1: string;
+/** The second device, the one that has only ever seen the backup file. */
+let restoreDevice: Device | undefined;
+let restoreBackend: MockBackend | undefined;
+/** Where the exported file is kept between the two tests below. */
+let backupPath: string | undefined;
 
 /** `window.btq.request(...)`, resolved or rejected, as plain data. */
 async function providerRequest(page: Page, method: string): Promise<Record<string, unknown>> {
@@ -133,9 +142,21 @@ test.beforeAll(async () => {
 });
 
 test.afterAll(async () => {
+  await restoreDevice?.close();
+  await restoreBackend?.close();
   await device?.close();
   await backend?.close();
 });
+
+/** Every address the mock backend was asked about, from its own request log. */
+function addressesAskedAbout(requests: { url: string }[]): Set<string> {
+  const out = new Set<string>();
+  for (const r of requests) {
+    const m = /\/api\/v1\/address\/([^/?]+)/.exec(r.url);
+    if (m?.[1]) out.add(decodeURIComponent(m[1]));
+  }
+  return out;
+}
 
 test('Add account moves the wallet to m/1’/0’/0’, and switching back returns', async () => {
   await openSwitcher(popup);
@@ -264,4 +285,104 @@ test('a site approved on one account is told it sees nothing on another', async 
   await expect
     .poll(async () => (await providerRequest(site, 'btq_accounts')).result, { timeout: 15_000 })
     .toEqual([A0]);
+});
+
+test('Settings writes an encrypted backup file, and the file gives nothing away', async () => {
+  // The account list is metadata: a phrase cannot carry it, and this wallet
+  // will not ask a public explorer to guess it. So it has to be possible to
+  // *keep* it, and this is the artefact that makes that possible.
+  await openSettings(popup);
+
+  // The disclosure is on screen before the password box is, because a file is
+  // a new object in the world and the moment to say so is before it exists.
+  const warning = popup.getByTestId('export-backup-warning');
+  await expect(warning).toBeVisible();
+  await expect(warning).toContainText('and your password');
+  await expect(warning).toContainText('a BTQ wallet exists');
+
+  await popup.getByTestId('export-backup').click();
+  await popup.getByTestId('export-backup-pw').fill(PASSWORD);
+  const saving = popup.waitForEvent('download');
+  await popup.getByTestId('export-backup-submit').click();
+  const download = await saving;
+
+  // The name lands in a downloads folder other software indexes: it may say
+  // what the file is and when it was written, and nothing about whose it is.
+  expect(download.suggestedFilename()).toMatch(/^btq-wallet-backup-\d{4}-\d{2}-\d{2}\.btqbackup$/);
+  for (const secret of ['Payroll', A0, A1, 'tbtq1']) {
+    expect(download.suggestedFilename(), secret).not.toContain(secret);
+  }
+
+  backupPath = join(mkdtempSync(join(tmpdir(), 'btq-backup-')), download.suggestedFilename());
+  await download.saveAs(backupPath);
+  const bytes = readFileSync(backupPath);
+
+  // It is the vault's own envelope, and it is sealed: no address, no account
+  // name, nothing readable. Anyone holding it learns that a BTQ wallet exists,
+  // which is what the warning above says and all that it says.
+  expect(bytes.subarray(0, 4).toString('latin1')).toBe('BTQ1');
+  const asText = bytes.toString('latin1');
+  for (const secret of ['Payroll', 'Account 2', A0, A1, 'tbtq1', PASSWORD, 'hdSeedHex']) {
+    expect(asText, secret).not.toContain(secret);
+  }
+
+  await expect(popup.getByTestId('export-backup-saved')).toBeVisible();
+  await popup.getByTestId('settings-back').click();
+  await expect(popup.getByTestId('balance')).toBeVisible();
+});
+
+test('a fresh device restores the account list from that file, asking the explorer nothing', async () => {
+  // The property the whole feature exists for, in a real browser: a device that
+  // has never seen this wallet ends up with both accounts and the name the user
+  // chose — and it does not buy that by handing a public explorer a batch of
+  // addresses belonging to an account it is only guessing at. Deleting
+  // speculative discovery leaves the user better off only if this test passes.
+  expect(backupPath, 'the export test must run first').toBeTruthy();
+
+  // Its own backend, so the request log below is this device's and nothing else's.
+  restoreBackend = await startMockBackend();
+  restoreDevice = await launchDevice({
+    name: 'device-restore',
+    explorerBase: restoreBackend.origin,
+    videoDir: videoDir(7, 'device-restore'),
+  });
+  const restored = await restoreDevice.popup();
+
+  await restored.getByTestId('welcome-import').click();
+  // The import screen says what a phrase can and cannot carry, at the moment
+  // somebody is choosing between the two.
+  await expect(restored.getByTestId('import-phrase-note')).toContainText('Account 1');
+  await expect(restored.getByTestId('import-accounts-note')).toContainText('scriptpubkeyman.cpp:1252');
+
+  await restored.getByTestId('import-backup').click();
+  await restored.getByTestId('import-backup-file').setInputFiles(backupPath!);
+  await restored.getByTestId('import-backup-pw').fill(PASSWORD);
+  await restored.getByTestId('import-backup-submit').click();
+
+  await expect(restored.getByTestId('balance')).toBeVisible({ timeout: 30_000 });
+  await waitForScan(restored);
+  expect(await receiveAddress(restored)).toBe(A0);
+
+  // Snapshot before the switcher is opened: opening it is a deliberate,
+  // user-initiated pass over every account, and it is allowed to ask.
+  const duringRestore = addressesAskedAbout([...restoreBackend.requests]);
+  expect(duringRestore.has(A1), 'the restore probed the second account').toBe(false);
+  // Stronger than "not A1": every address it asked about belongs to the account
+  // on screen, so nothing about the second account's chain reached the explorer.
+  const allowed = new Set<string>();
+  for (const chain of ['external', 'internal'] as const) {
+    for (let i = 0; i <= GAP_LIMIT; i++) {
+      allowed.add(addressFromHdSeed(mnemonicToHdSeed(MNEMONIC), chain, i, 'testnet', 0).address);
+    }
+  }
+  for (const address of duringRestore) {
+    expect(allowed.has(address), `${address} is not an address of the account on screen`).toBe(true);
+  }
+
+  // And the list really did come back — both accounts, with the name the user
+  // gave account 1 on the other device.
+  await restored.getByTestId('account-switcher').click();
+  await expect(restored.getByTestId('account-list')).toBeVisible();
+  await expect(restored.getByTestId('account-row-0')).toContainText('Payroll');
+  await expect(restored.getByTestId('account-row-1')).toContainText('Account 2');
 });

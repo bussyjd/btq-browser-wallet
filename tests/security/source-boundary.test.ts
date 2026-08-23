@@ -84,6 +84,12 @@ describe('trust boundary in source', () => {
       // words, which puts the phrase's preimage on the message channel.
       expect(src, relative(ROOT, f)).not.toMatch(/entropyToMnemonic/);
       expect(src, relative(ROOT, f)).not.toMatch(/mnemonicToEntropy/);
+      // The popup carries the backup file — as sealed hex, to a download, and
+      // from a file input back to the worker — and must never open or build one
+      // itself. A UI that could call these two would be a UI holding a wallet's
+      // plaintext, which is the boundary this whole file exists to keep.
+      expect(src, relative(ROOT, f)).not.toMatch(/\bencodeBackup\b/);
+      expect(src, relative(ROOT, f)).not.toMatch(/\bdecodeBackup\b/);
     }
   });
 
@@ -101,6 +107,10 @@ describe('trust boundary in source', () => {
         expect(src, relative(ROOT, f)).not.toMatch(/entropyToMnemonic/);
         expect(src, relative(ROOT, f)).not.toMatch(/mnemonicToEntropy/);
         expect(src, relative(ROOT, f)).not.toMatch(/ml_dsa44/);
+        // Neither the page provider nor the relay has any business knowing a
+        // backup file exists, let alone reading or writing one.
+        expect(src, relative(ROOT, f)).not.toMatch(/\bencodeBackup\b|\bdecodeBackup\b/);
+        expect(src, relative(ROOT, f)).not.toMatch(/vault\/backup/);
       }
     }
   });

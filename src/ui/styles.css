@@ -684,6 +684,15 @@ label {
   transition: border-color 120ms ease;
 }
 
+/* The one file input in the popup — the backup restore. `.input`'s fixed
+   height crops Chrome's own button, so this row sizes to its content. */
+input[type='file'].input-file {
+  height: auto;
+  padding: 8px 10px;
+  font-size: 12.5px;
+  line-height: 1.4;
+}
+
 textarea.input {
   height: auto;
   min-height: 84px;

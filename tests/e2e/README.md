@@ -79,6 +79,8 @@ instead). `tests/unit/vectors.test.ts` is what pins derivation to the vectors.
 | `smoke.spec.ts` types a **wrong** password into the phrase reveal first | a refusal that rendered an empty grid would be one missing `if` from rendering a full one, so the assertion is that no `seed-word-1` exists at all |
 | `smoke.spec.ts` locks the wallet with the phrase on screen | the words live in one component's state; the proof that nothing else kept a copy is that locking, and then unlocking, brings none of it back |
 | `negative.spec.ts` reveals on a raw-seed wallet | a wallet with no BIP39 entropy must say so — running words back out of its HD seed would hand the user a phrase that restores a different wallet |
+| `accounts.spec.ts` restores from a backup file on a device with its **own** mock backend, then reads that backend's request log before the switcher is opened | "restoring the account list asks the explorer nothing" is only checkable against a log nobody else is writing to. The assertion is not merely "the other account's first address was not queried" but that every address queried belongs to the account on screen |
+| `accounts.spec.ts` scans the downloaded file for the account name, both addresses and the password | the file is the one artefact of this wallet that leaves the machine; a plaintext account label beside an address in a downloads folder is a dossier |
 
 ### One thing this suite asserts *is* stored in the clear
 
@@ -222,6 +224,7 @@ back into the video.
 | `mock-node.spec.ts` | the mock node's own txid check, on transactions built in that file — no browser |
 | `connect.spec.ts` | site-connect approval, per-origin scope, revoke, cancelling one of two prompts, and what a page can reach |
 | `negative.spec.ts` | wrong password, refused destinations and amounts, misbehaving backends, storage contents, a raw-seed wallet with no phrase |
+| `accounts.spec.ts` | add / switch / rename an account, a lock that closes the switcher, a site grant that does not follow the user into another account, and the backup file: written from Settings and restored on a fresh device with its account list intact |
 | `global-setup.ts` | builds `dist/` before the run (`SKIP_BUILD=1` to reuse it) |
 | `regtest.spec.ts` | tier 2 |
 | `live.spec.ts` | tier 3 — the recorded run against the real chain |

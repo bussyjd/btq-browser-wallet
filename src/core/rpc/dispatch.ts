@@ -174,6 +174,19 @@ export async function dispatch(keyring: Keyring, request: RpcRequest, ctx: Dispa
       // has no phrase to show. Unreachable from a page: `fromTab` was refused
       // at the top of this function, before the switch.
       return keyring.revealSeedHex(str(p.password, 'password'));
+    case 'wallet.exportBackup':
+      // Same door again. What comes back is the sealed `BTQ1` envelope, not key
+      // material — but it is the whole wallet under one password, so it goes
+      // through the same re-auth and the same shared back-off as the reveals,
+      // and is refused to a page for the same reason and in the same place.
+      return keyring.exportBackup(str(p.password, 'password'));
+    case 'wallet.importBackup': {
+      // The one method here that takes a file. Both parameters are required and
+      // a missing one is BAD_PARAMS before any of it is decrypted, so "you left
+      // the password blank" never comes back as "that is not a backup".
+      const result = await keyring.importBackup(str(p.backupHex, 'backupHex'), str(p.password, 'password'));
+      return { ok: true as const, accounts: result.accounts };
+    }
     case 'wallet.maxSpendable': {
       if (!ctx.fetchUtxos) throw new WalletError('EXPLORER_UNAVAILABLE', 'Explorer is not configured.');
       return keyring.maxSpendable({

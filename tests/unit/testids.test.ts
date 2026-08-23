@@ -28,6 +28,16 @@ const REQUIRED = [
   'import-raw',
   'import-text',
   'import-submit',
+  // The third import door — the backup file, the only one that restores the
+  // account list — and the two sentences on that screen that say why the other
+  // two cannot: a phrase carries keys, and btq-core derives account 0' only.
+  'import-backup',
+  'import-backup-file',
+  'import-backup-pw',
+  'import-backup-submit',
+  'import-backup-error',
+  'import-phrase-note',
+  'import-accounts-note',
   'unlock-pw',
   'unlock-submit',
   // The vault this build cannot read: a screen of its own, not an error under
@@ -91,6 +101,16 @@ const REQUIRED = [
   'reveal-seed-error',
   'reveal-seed-hide',
   'seed-hex',
+  // Settings → Wallet backup file: the control, its password box, and the
+  // sentence beside it that says what holding the file means. The warning is on
+  // this list on purpose — it is the artefact's only disclosure to the user,
+  // and a refactor that dropped it would otherwise pass every test.
+  'export-backup',
+  'export-backup-pw',
+  'export-backup-submit',
+  'export-backup-error',
+  'export-backup-warning',
+  'export-backup-saved',
   'wipe-input',
   'wipe-confirm',
   'connect-origin',
