@@ -598,4 +598,17 @@ test('scene 10 · a site asks for an address, and the grant can be taken back', 
   await expect(after.getByTestId('dapp-out')).toHaveText('[]', { timeout: 30_000 });
   await dwell(after, 2600);
   await after.close();
+
+  // Close on the wallet, not on a test fixture.
+  //
+  // Clips are stitched in the order their pages were opened, so whatever is
+  // opened last is what the cut ends on — and proving the revoke means the last
+  // page opened was a bare demo harness printing `[]`. That is a poor final
+  // frame for the whole video, and it is the page a viewer is left looking at.
+  const closing = await deviceAlice!.popup();
+  await ensureUnlocked(closing, cfg.alice.password);
+  await waitForLiveScan(closing, 150_000);
+  await note(closing, 'Connected, then revoked — and the keys never left the extension.', 3400);
+  await dwell(closing, 3600);
+  await closing.close();
 });
