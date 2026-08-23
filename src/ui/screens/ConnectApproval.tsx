@@ -6,11 +6,14 @@ import { useAction } from '../hooks/useAction.js';
 export function ConnectApproval({
   origin,
   address,
+  accountName,
   onApprove,
   onDeny,
 }: {
   origin: string;
   address: string | null;
+  /** The account this approval is for — a grant covers one account, not the wallet. */
+  accountName?: string;
   onApprove: () => Promise<void>;
   onDeny: () => Promise<void>;
 }) {
@@ -30,9 +33,14 @@ export function ConnectApproval({
       <Card tone="quiet">
         <ul className="small" style={{ margin: 0, paddingLeft: 18 }}>
           <li>
-            It will see: your receive address
+            It will see: the receive address of {accountName ?? 'this account'}
             {address ? <span className="mono"> ({address.slice(0, 12)}…)</span> : null}
           </li>
+          {/* The grant is per (site, account). Switching to another account
+              tells the site `accountsChanged([])`; it sees an address there
+              only if the user approves it there too, through this same
+              window. Promised here because this is where the promise is made. */}
+          <li>Your other accounts stay hidden — approving here approves this account only</li>
           <li>It will never see: your seed phrase or any key</li>
           <li>It cannot move funds — every send needs your password here</li>
         </ul>

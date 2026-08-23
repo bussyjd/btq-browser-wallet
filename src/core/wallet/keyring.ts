@@ -28,7 +28,7 @@ import { BroadcastError, WalletError, type BroadcastVia } from './errors.js';
 import { deriveKeySeed, masterFromSeed } from '../crypto/hd.js';
 import { scriptForAddress } from '../script/address.js';
 import { addressFromHdSeed, type DerivedAddress } from './derive.js';
-import { scanChain, type AddressLookup, type ChainScan } from './gap.js';
+import { ACCOUNT_GAP_LIMIT, scanChain, type AddressLookup, type ChainScan } from './gap.js';
 import {
   MAX_ACCOUNTS,
   ACCOUNT_NAME_MAX,
@@ -38,6 +38,7 @@ import {
   ensureAccounts,
   mirrorActive,
   parseAccountName,
+  type AccountRecord,
   type ActivityItem,
   type WalletMeta,
   type WalletStorage,
@@ -49,7 +50,14 @@ import { planSend, previewFromSigned, signPlan, type SendPlan, type SendPreview 
 import { maxSpendable, outpointKey, type OwnedUtxo } from '../tx/coinselect.js';
 import { assertFeeRate, MIN_RELAY_SAT_PER_KVB } from '../tx/fee.js';
 import { parseTx } from '../tx/parse.js';
-import { grantOrigin, isOriginAllowed, revokeOrigin, canonicalOrigin } from '../connect/permissions.js';
+import {
+  canonicalOrigin,
+  grantSite,
+  isGranted,
+  parseGrants,
+  revokeGrant,
+  type SiteGrant,
+} from '../connect/permissions.js';
 
 export const DEFAULT_LOCK_MS = 5 * 60 * 1000;
 /** Failed unlocks before the keyring starts making a guesser wait. */
@@ -187,12 +195,24 @@ export class Keyring {
       // False whenever locked, so a locked popup learns nothing about it.
       canRevealPhrase: backup === 'recoveryPhrase',
       activeAccount: meta?.activeAccount ?? 0,
-      accounts: (meta?.accounts ?? []).map((a) => ({
-        index: a.index,
-        name: a.name,
-        lastBalanceSats: a.lastBalanceSats,
-        address: a.address,
-      })),
+      // Empty whenever locked, for the reason `canRevealPhrase` is false there:
+      // every entry carries a receive address and a name the user chose, and
+      // before accounts existed no address left this worker while locked
+      // (`wallet.receive` requires unlocked, `peekReceiveAddress` throws
+      // LOCKED, `getAccounts` answers `[]`). Anyone who opens a locked popup —
+      // a borrowed laptop, a shoulder, a recording of the unlock screen —
+      // would otherwise read the whole address set, labelled "Payroll" and
+      // "Exchange", and pull every account's history off the public explorer.
+      // The aggregate balance above was already visible; these are not.
+      accounts:
+        this.hdSeed === null
+          ? []
+          : (meta?.accounts ?? []).map((a) => ({
+              index: a.index,
+              name: a.name,
+              lastBalanceSats: a.lastBalanceSats,
+              address: a.address,
+            })),
     };
   }
 
@@ -594,8 +614,9 @@ export class Keyring {
     return reserved;
   }
 
-  async balances(fetchUtxos: FetchUtxos): Promise<WalletBalances> {
-    const coins = await this.gatherUtxos(fetchUtxos);
+  /** Balance of one account — the active one unless `account` names another. */
+  async balances(fetchUtxos: FetchUtxos, account?: number): Promise<WalletBalances> {
+    const coins = await this.gatherUtxos(fetchUtxos, account);
     let totalSats = 0n;
     let confirmedSats = 0n;
     for (const c of coins) {
@@ -803,8 +824,15 @@ export class Keyring {
     return (await this.storage.loadActivity()).filter((a) => (a.accountIndex ?? 0) === account);
   }
 
-  async connectedSites(): Promise<string[]> {
-    return this.storage.loadOrigins();
+  /**
+   * Every approval this wallet holds, as the (origin, account) pairs they are.
+   *
+   * Not lock-gated — Settings needs it and it was never gated — and
+   * deliberately carrying the account *index* rather than its name: names are
+   * the user's own words and do not leave a locked worker (see `status`).
+   */
+  async connectedSites(): Promise<SiteGrant[]> {
+    return parseGrants(await this.storage.loadOrigins());
   }
 
   /**
@@ -826,7 +854,11 @@ export class Keyring {
     if (!this.hdSeed) throw new WalletError('LOCKED', 'Wallet is locked.');
     const o = canonicalOrigin(origin);
     const allowed = await this.storage.loadOrigins();
-    if (isOriginAllowed(allowed, o)) {
+    // The grant is per (origin, account). A site approved for Account 1 asking
+    // again while Account 2 is active is a site asking for something it has not
+    // been given, so it goes back through the approval window like any other
+    // first request.
+    if (isGranted(allowed, o, await this.activeAccountIndex())) {
       return { accounts: [await this.peekReceiveAddress()] };
     }
     // Deliberately no durable record. A parked request lives and dies with the
@@ -836,12 +868,19 @@ export class Keyring {
     return { pending: true };
   }
 
+  /**
+   * What a connected page may see: the active account's address when *that*
+   * pair was approved, and `[]` otherwise — including when the user has
+   * switched to an account this site was never given. Switching is how a user
+   * says "not this identity"; the worker must not answer it with an address.
+   */
   async getAccounts(origin: string): Promise<{ accounts: string[] }> {
     this.maybeAutoLock();
     const o = canonicalOrigin(origin);
     const allowed = await this.storage.loadOrigins();
-    if (!isOriginAllowed(allowed, o) || this.hdSeed === null) return { accounts: [] };
+    if (this.hdSeed === null) return { accounts: [] };
     try {
+      if (!isGranted(allowed, o, await this.activeAccountIndex())) return { accounts: [] };
       return { accounts: [await this.peekReceiveAddress()] };
     } catch (e) {
       if (e instanceof WalletError && e.code === 'LOCKED') return { accounts: [] };
@@ -852,7 +891,11 @@ export class Keyring {
   async approveConnect(origin: string): Promise<{ accounts: string[] }> {
     this.requireUnlocked();
     const o = canonicalOrigin(origin);
-    const allowed = grantOrigin(await this.storage.loadOrigins(), o);
+    // The approval screen says "this site will see one address": the address of
+    // the account that is active as the user clicks Connect. That is the pair
+    // that is stored, so it is also the only pair this grant can ever answer.
+    const account = await this.activeAccountIndex();
+    const allowed = grantSite(await this.storage.loadOrigins(), o, account);
     await this.storage.saveOrigins(allowed);
     await this.storage.savePendingConnect(null);
     return { accounts: [(await this.receiveAddress()).address] };
@@ -869,13 +912,20 @@ export class Keyring {
     await this.storage.savePendingConnect(null);
   }
 
-  async revokeSite(origin: string): Promise<void> {
-    const allowed = revokeOrigin(await this.storage.loadOrigins(), origin);
+  /**
+   * Take a grant back. One row in Settings is one (origin, account) pair, so
+   * that is what `account` names. `page.disconnect` passes none: a site saying
+   * "forget me" means every account it was ever approved for, not just the one
+   * that happens to be active.
+   */
+  async revokeSite(origin: string, account?: number): Promise<void> {
+    const allowed = revokeGrant(await this.storage.loadOrigins(), origin, account);
     await this.storage.saveOrigins(allowed);
   }
 
   /**
-   * Incremental gap scan.
+   * Gap scan one account's two chains, in place. The single place the address
+   * walk is written down, so every account gets exactly the same treatment.
    *
    * The resume point is `externalNext` / `internalNext` — one past the highest
    * index already known to be used. Everything below that is settled, so a
@@ -886,31 +936,12 @@ export class Keyring {
    *
    * `scannedExternal` / `scannedInternal` record how far the last pass looked,
    * for diagnostics and so `full: true` can be told apart from a resume.
-   *
-   * The reported balance is the sum of `/utxos` over the derived addresses —
-   * never the explorer's own `balance` field, which the live indexer reports as
-   * negative for busy addresses (tests/fixtures/explorer/address-used.json).
    */
-  async scan(
+  private async scanAccount(
+    rec: AccountRecord,
     lookup: AddressLookup,
-    fetchUtxos?: FetchUtxos,
-    tip?: ChainTip | null,
-    opts: { full?: boolean } = {},
-  ): Promise<{
-    external: ChainScan;
-    internal: ChainScan;
-    usedExternal: number;
-    usedInternal: number;
-    totalBalanceSats: bigint;
-    confirmedBalanceSats: bigint;
-    tipHeight: number | null;
-    lastScanAt: number;
-  }> {
-    this.requireUnlocked();
-    const meta = await this.walletMeta();
-    const rec = activeRecord(meta);
-    const full = opts.full === true;
-
+    full: boolean,
+  ): Promise<{ external: ChainScan; internal: ChainScan }> {
     const external = await scanChain({
       chain: 'external',
       addressAt: (i) => this.addressAt('external', i, rec.index).address,
@@ -933,34 +964,143 @@ export class Keyring {
     rec.scannedExternal = Math.max(full ? -1 : rec.scannedExternal, external.scannedTo);
     rec.scannedInternal = Math.max(full ? -1 : rec.scannedInternal, internal.scannedTo);
     rec.address = this.addressAt('external', rec.externalNext, rec.index).address;
+    return { external, internal };
+  }
+
+  /**
+   * Has this account's external chain ever been used? The BIP44 question, asked
+   * of an account this device does not know about yet.
+   *
+   * External only, and deliberately: a change address is never published, so an
+   * account with internal history and no external history cannot exist. Halving
+   * the probe halves what a restore pays for accounts that were never made.
+   */
+  private async accountIsUsed(index: number, lookup: AddressLookup): Promise<boolean> {
+    const scan = await scanChain({
+      chain: 'external',
+      addressAt: (i) => this.addressAt('external', i, index).address,
+      lookup,
+      startIndex: 0,
+      lastUsedIndex: -1,
+    });
+    return scan.used.length > 0;
+  }
+
+  /**
+   * Bring the wallet up to date with the chain.
+   *
+   * **Every known account is walked, not just the active one.** Restoring this
+   * wallet from its phrase re-derives account 0 and nothing else unless the
+   * scan goes looking: a wallet whose coins sit on Account 3 would otherwise
+   * come back empty and stay empty, because the switcher is built from the
+   * account list a scan of one account never grows.
+   *
+   * A full rescan — and the first scan a restored wallet ever runs — also
+   * probes `ACCOUNT_GAP_LIMIT` accounts past the highest one it knows, and
+   * adopts any whose external chain has been used. That is the only way a fresh
+   * device learns that accounts above the first ever existed; the seed itself
+   * does not say, and neither does btq-core, which hardcodes `0'`
+   * (`scriptpubkeyman.cpp:1252`). **An account that never received coins cannot
+   * be rediscovered this way at all** — there is nothing on any chain to find —
+   * which is why the switcher says so at the point the account is created.
+   *
+   * The reported balance is the sum of `/utxos` over the derived addresses —
+   * never the explorer's own `balance` field, which the live indexer reports as
+   * negative for busy addresses (tests/fixtures/explorer/address-used.json).
+   */
+  async scan(
+    lookup: AddressLookup,
+    fetchUtxos?: FetchUtxos,
+    tip?: ChainTip | null,
+    opts: { full?: boolean } = {},
+  ): Promise<{
+    external: ChainScan;
+    internal: ChainScan;
+    usedExternal: number;
+    usedInternal: number;
+    totalBalanceSats: bigint;
+    confirmedBalanceSats: bigint;
+    tipHeight: number | null;
+    lastScanAt: number;
+    /** Accounts this pass found on chain that the device did not know about. */
+    discoveredAccounts: number[];
+  }> {
+    this.requireUnlocked();
+    const meta = await this.walletMeta();
+    const rec = activeRecord(meta);
+    const full = opts.full === true;
+    // A restore's very first scan is a restore scan even though the user never
+    // pressed "Rescan": it is the pass that has to find whatever the seed was
+    // carrying. After that, discovery costs ~20 derivations per probed account
+    // and is left to the explicit full rescan.
+    const discover = full || meta.lastScanAt === null;
+
+    let external: ChainScan | null = null;
+    let internal: ChainScan | null = null;
+    // Ascending, so a lower account is always settled before a higher one and
+    // the discovery probe below starts from a list that is fully up to date.
+    for (const record of [...meta.accounts].sort((a, b) => a.index - b.index)) {
+      const scanned = await this.scanAccount(record, lookup, full);
+      if (record.index === rec.index) {
+        external = scanned.external;
+        internal = scanned.internal;
+      }
+    }
+
+    const discoveredAccounts: number[] = [];
+    if (discover) {
+      let empty = 0;
+      let next = Math.max(...meta.accounts.map((a) => a.index)) + 1;
+      while (next < MAX_ACCOUNTS && empty < ACCOUNT_GAP_LIMIT && meta.accounts.length < MAX_ACCOUNTS) {
+        if (await this.accountIsUsed(next, lookup)) {
+          const found = emptyAccount(next);
+          await this.scanAccount(found, lookup, true);
+          meta.accounts.push(found);
+          meta.accounts.sort((a, b) => a.index - b.index);
+          discoveredAccounts.push(next);
+          empty = 0;
+        } else {
+          empty += 1;
+        }
+        next += 1;
+      }
+    }
+
     meta.tipHeight = tip?.height ?? meta.tipHeight;
     meta.lastScanAt = this.now();
     mirrorActive(meta);
-    // Persist the new cursor first so the UTXO sweep below covers every address.
+    // Persist the new cursors first so the UTXO sweep below covers every
+    // address — including a discovered account's, which `gatherUtxos` refuses
+    // to walk until the account is in the stored list.
     await this.storage.saveMeta(meta);
 
     let totalBalanceSats = BigInt(rec.lastBalanceSats || '0');
     let confirmedBalanceSats = BigInt(rec.confirmedBalanceSats || '0');
     if (fetchUtxos) {
-      const b = await this.balances(fetchUtxos);
-      totalBalanceSats = b.totalSats;
-      confirmedBalanceSats = b.confirmedSats;
-      rec.lastBalanceSats = totalBalanceSats.toString();
-      rec.confirmedBalanceSats = confirmedBalanceSats.toString();
+      for (const record of meta.accounts) {
+        const b = await this.balances(fetchUtxos, record.index);
+        record.lastBalanceSats = b.totalSats.toString();
+        record.confirmedBalanceSats = b.confirmedSats.toString();
+        if (record.index === rec.index) {
+          totalBalanceSats = b.totalSats;
+          confirmedBalanceSats = b.confirmedSats;
+        }
+      }
       mirrorActive(meta);
       await this.storage.saveMeta(meta);
     }
 
     this.touch();
     return {
-      external,
-      internal,
+      external: external ?? emptyChainScan('external', rec.externalNext),
+      internal: internal ?? emptyChainScan('internal', rec.internalNext),
       usedExternal: rec.usedExternal,
       usedInternal: rec.usedInternal,
       totalBalanceSats,
       confirmedBalanceSats,
       tipHeight: meta.tipHeight,
       lastScanAt: meta.lastScanAt ?? this.now(),
+      discoveredAccounts,
     };
   }
 
@@ -988,6 +1128,15 @@ export class Keyring {
     const seed = this.hdSeed;
     if (!seed) throw new WalletError('LOCKED', 'Wallet is locked.');
     return addressFromHdSeed(seed, 'external', rec.externalNext, this.network, rec.index).address;
+  }
+
+  /**
+   * The persisted active account. Read from storage rather than from
+   * `activeIndex` so a service worker that restarted mid-session answers with
+   * the account the user is actually looking at, not the 0 it woke up with.
+   */
+  private async activeAccountIndex(): Promise<number> {
+    return (await this.walletMeta()).activeAccount;
   }
 
   private async walletMeta(): Promise<WalletMeta> {
@@ -1083,6 +1232,15 @@ export class Keyring {
   private clearPending(): void {
     this.pending = null;
   }
+}
+
+/**
+ * The "nothing was looked at" scan result, for the impossible case where the
+ * active account is not in the list the loop walked. `activeRecord` guarantees
+ * it is, so this exists to keep the return shape total rather than to be hit.
+ */
+function emptyChainScan(chain: Chain, nextIndex: number): ChainScan {
+  return { chain, nextIndex, used: [], scannedTo: nextIndex - 1 };
 }
 
 /** Outpoints a signed transaction spends, for reserving them against re-selection. */

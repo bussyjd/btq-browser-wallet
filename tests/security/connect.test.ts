@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { Keyring } from '../../src/core/wallet/keyring.js';
 import { dispatch } from '../../src/core/rpc/dispatch.js';
-import { canonicalOrigin, isOriginAllowed, grantOrigin } from '../../src/core/connect/permissions.js';
+import { canonicalOrigin, isGranted, grantSite, parseGrant } from '../../src/core/connect/permissions.js';
 import { PAGE_METHODS } from '../../src/core/connect/permissions.js';
 import { SECRET_RESULT_KEYS } from '../../src/core/rpc/protocol.js';
 import { MemoryWalletStorage, TEST_ENCRYPT } from '../helpers/memory-store.js';
@@ -27,12 +27,27 @@ function keysOf(value: unknown, into: string[] = []): string[] {
 
 describe('site-connect exact origin', () => {
   it('does not treat a suffix or prefix lookalike as the same origin', () => {
-    const allowed = grantOrigin([], 'https://example.com');
-    expect(isOriginAllowed(allowed, 'https://example.com')).toBe(true);
-    expect(isOriginAllowed(allowed, 'https://evil.example.com')).toBe(false);
-    expect(isOriginAllowed(allowed, 'https://example.com.evil.net')).toBe(false);
+    const allowed = grantSite([], 'https://example.com', 0);
+    expect(isGranted(allowed, 'https://example.com', 0)).toBe(true);
+    expect(isGranted(allowed, 'https://evil.example.com', 0)).toBe(false);
+    expect(isGranted(allowed, 'https://example.com.evil.net', 0)).toBe(false);
+    // …and the account is half of the key, not decoration.
+    expect(isGranted(allowed, 'https://example.com', 1)).toBe(false);
     expect(canonicalOrigin('https://example.com')).toBe('https://example.com');
     expect(() => canonicalOrigin('https://example.com/path')).toThrow(/Invalid origin/);
+  });
+
+  it('reads a pre-accounts grant as account 0, and refuses a malformed one', () => {
+    // Migration: every grant written before accounts existed was for the only
+    // account there was. It stays stored as the bare origin, so an older build
+    // can still read what this one writes for account 0.
+    expect(parseGrant('https://example.com')).toEqual({ origin: 'https://example.com', account: 0 });
+    expect(grantSite([], 'https://example.com', 0)).toEqual(['https://example.com']);
+    expect(grantSite([], 'https://example.com', 3)).toEqual(['https://example.com#3']);
+    expect(parseGrant('https://example.com#3')).toEqual({ origin: 'https://example.com', account: 3 });
+    for (const bad of ['https://example.com#20', 'https://example.com#x', 'https://example.com/#1', 'not-an-origin', 42]) {
+      expect(parseGrant(bad), String(bad)).toBeNull();
+    }
   });
 
   it('a page cannot call wallet.confirmSend even with an approved origin', async () => {

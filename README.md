@@ -66,8 +66,26 @@ this wallet does about it.
 
 **Accounts.** The header name opens an account switcher. **Add account** derives the next
 HD account from the same seed (`m/1'/…`, `m/2'/…`); Account 1 stays on Core's path
-`m/0'/…`. Receive, send, history and `window.btq` follow whichever account is active —
-a connected site sees `accountsChanged` when you switch.
+`m/0'/…`. Receive, send, history and `window.btq` follow whichever account is active.
+
+Two things about extra accounts are said in the switcher itself, because they can cost
+you coins:
+
+- **btq-core cannot derive them.** It hardcodes the account level to `0'`
+  (`scriptpubkeyman.cpp:1252`), so the seed that restores this wallet in Core restores
+  Account 1 and nothing else. Accounts above the first are this wallet's own convention.
+- **A restore finds an extra account only if it has been paid.** Every account the
+  device knows about is scanned on every refresh, and a full rescan — or the first scan
+  after an import — probes two accounts past the last one it knows and adopts any whose
+  addresses have been used. An account that never received coins leaves nothing on any
+  chain to find: add it again, in order. Write down how many you made.
+
+**A site connection is per account.** Approving a site approves it for the account that
+is active at that moment. Switch to another account and the site is told
+`accountsChanged([])` and sees nothing there until you approve it on that account too —
+which goes through the same approval window. Settings → Connected sites lists one row
+per site *and account*, and **Revoke** takes back that row alone; the page's own
+**Disconnect** drops every account it was approved for.
 
 **Receive.** The *Receive* tab shows the next unused external address (`tbtq1z…`), its
 derivation path, a QR of exactly that string, and **Copy address**. Balance is the sum
@@ -97,7 +115,8 @@ extension opens an approval window naming the exact origin; the page's promise s
 unsettled until you answer. **Connect** hands it one address; **Cancel**, closing that
 window, or five minutes of silence gets it `USER_REJECTED` (EIP-1193 code `4001`).
 **Disconnect** — or Settings → Connected sites → **Revoke** — takes it back and fires
-`accountsChanged([])`. A page can never call `wallet.*`: send, unlock and the phrase
+`accountsChanged([])`. The grant it hands out is for one account: the one that was
+active when you clicked **Connect**. A page can never call `wallet.*`: send, unlock and the phrase
 reveal are not on the relay's allowlist, which forwards `page.requestAccounts`,
 `page.getAccounts` and `page.disconnect` and nothing else.
 
@@ -300,7 +319,8 @@ loses its `seed-word-N` id fails the recording run rather than quietly appearing
   estimate × 3000 sat/kvB) — the node's own rule, not a stricter guess.
 - **Derivation** is hardened-only over the 32-byte ML-DSA seed — `m/k'/0'/n'` external,
   `m/k'/1'/n'` internal. Account 0 (`m/0'/…`) is btq-core's legacy path; extra
-  accounts are `m/1'/…`, `m/2'/…` from the same seed. There is no xpub and no
+  accounts are `m/1'/…`, `m/2'/…` from the same seed and are **this wallet's own
+  convention** — Core hardcodes `0'` and cannot derive them. There is no xpub and no
   watch-only derivation.
 
 Every constant with its `btq-core` source line: [`docs/REFERENCE.md`](docs/REFERENCE.md).

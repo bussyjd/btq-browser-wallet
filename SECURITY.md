@@ -71,6 +71,9 @@ best-effort. A vulnerability in btq-core itself belongs with
   wallet is never deleted on the wallet's initiative: the refusal explains, and the DELETE
   confirmation on that same screen stays the user's to type.
 - **Locked state:** cannot sign, derive, list history, or show the phrase or the seed.
+  `wallet.status` reports **no accounts at all** while locked: every entry carries a
+  receive address and a name the user chose, and no address has ever left this worker
+  while locked.
   Either reveal refuses a locked wallet even with the right password, and never unlocks
   one as a side effect. `wallet.status.backup` is `null` whenever locked, so a locked
   popup learns nothing about what the vault could show. There is still no export method:
@@ -80,6 +83,19 @@ best-effort. A vulnerability in btq-core itself belongs with
   `revealSeedHex` are not on the relay's allowlist. Site-connect is `page.requestAccounts` / `page.getAccounts` /
   `page.disconnect`, matched on the **exact** origin the browser reports for the sender,
   never on an origin the page supplies.
+- **A grant is per (site, account):** approving a site approves it for the account that
+  was active when the user clicked Connect, and for no other. Switching to an account a
+  site was not approved for gets it `accountsChanged([])` and `page.getAccounts` answers
+  `[]` — the wallet never pushes a new account's address to an already-approved site.
+  Approving that site on the second account goes through the same approval window as any
+  first request. Settings lists one row per (site, account) and revokes that row; the
+  page's own `disconnect` drops every account it held.
+- **Extra accounts are this wallet's convention, and cannot be re-derived by btq-core**
+  (`scriptpubkeyman.cpp:1252` hardcodes `0'`). A restore rediscovers one only by finding
+  its coins: every known account is scanned, and a full or first scan probes two accounts
+  past the last one known. An account that never received coins cannot be recovered from
+  the phrase alone — the switcher and `docs/HD_IMPORT.md` say so at the point the account
+  is created. This is a recovery limit, not a confidentiality one.
 - **Connect without consent:** an unapproved origin's `requestAccounts` is held, not
   answered. Approval requires a click in the extension's own window; deny, closing that
   window, or a 5-minute timeout rejects with `USER_REJECTED` (EIP-1193 `4001`). One

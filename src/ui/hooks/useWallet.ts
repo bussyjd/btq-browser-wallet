@@ -14,6 +14,7 @@ import type {
   SeedReveal,
   SendPreview,
   SendResult,
+  SiteGrant,
   TipInfo,
   WalletStatus,
 } from '../types.js';
@@ -40,7 +41,7 @@ export function useWallet() {
   const [status, setStatus] = useState<WalletStatus | null>(null);
   const [receive, setReceive] = useState<ReceiveInfo | null>(null);
   const [history, setHistory] = useState<HistoryEntry[]>([]);
-  const [sites, setSites] = useState<string[]>([]);
+  const [sites, setSites] = useState<SiteGrant[]>([]);
   const [pendingOrigin, setPendingOrigin] = useState<string | null>(null);
   const [backend, setBackend] = useState<BackendInfo | null>(null);
   const [tip, setTip] = useState<TipInfo | null>(null);
@@ -71,8 +72,11 @@ export function useWallet() {
 
   const loadSites = useCallback(async () => {
     const c = await rpc<ConnectedSites>('wallet.connectedSites');
-    setSites(c.origins);
-    return c.origins;
+    // A worker that predates per-account grants sends origins only; every one
+    // of its grants was account 0, because that was the only account there was.
+    const rows = c.sites ?? c.origins.map((origin) => ({ origin, account: 0 }));
+    setSites(rows);
+    return rows;
   }, []);
 
   const refreshHistory = useCallback(async () => {
@@ -159,7 +163,10 @@ export function useWallet() {
     setReceive(null);
     setHistory([]);
     setScanned(false);
-    setStatus((s) => (s ? { ...s, unlocked: false } : s));
+    // Drop the account rows with it: they carry an address and the user's own
+    // name for it, and the worker stops answering with them the moment it
+    // locks. The popup must not go on rendering what the worker withdrew.
+    setStatus((s) => (s ? { ...s, unlocked: false, accounts: [] } : s));
   }, []);
 
   /**
@@ -250,9 +257,15 @@ export function useWallet() {
     setPendingOrigin(null);
   }, []);
 
-  const revokeSite = useCallback(async (origin: string) => {
-    await rpc('wallet.revokeSite', { origin });
-    setSites((s) => s.filter((o) => o !== origin));
+  /**
+   * Revoke one row — one site's grant on one account. Without an account it is
+   * the whole site, which is what the page's own disconnect does.
+   */
+  const revokeSite = useCallback(async (origin: string, account?: number) => {
+    await rpc('wallet.revokeSite', account === undefined ? { origin } : { origin, account });
+    setSites((s) =>
+      s.filter((g) => g.origin !== origin || (account !== undefined && g.account !== account)),
+    );
   }, []);
 
   const createAccount = useCallback(async () => {

@@ -1167,6 +1167,15 @@ dl {
   word-break: break-all;
 }
 
+/* Which account a grant is for. A site is approved per account, never once for
+   the whole wallet, so the row has to say which one. */
+.site-account {
+  display: block;
+  font-family: var(--sans);
+  font-size: 11px;
+  color: var(--ink-3);
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

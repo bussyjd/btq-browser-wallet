@@ -233,10 +233,20 @@ export async function dispatch(keyring: Keyring, request: RpcRequest, ctx: Dispa
       return keyring.switchAccount(nat(p.index, 'index'));
     case 'wallet.renameAccount':
       return keyring.renameAccount(nat(p.index, 'index'), str(p.name, 'name'));
-    case 'wallet.connectedSites':
-      return { origins: await keyring.connectedSites() };
+    case 'wallet.connectedSites': {
+      // `sites` is the real answer — one row per (origin, account) approval.
+      // `origins` stays beside it as the flat list of sites with any grant at
+      // all, so a popup older than this worker keeps rendering something true.
+      const sites = await keyring.connectedSites();
+      return { origins: [...new Set(sites.map((s) => s.origin))], sites };
+    }
     case 'wallet.revokeSite':
-      await keyring.revokeSite(str(p.origin, 'origin'));
+      // No account named means the whole site, every account — what the page's
+      // own `disconnect` means. Settings names one, and revokes that row only.
+      await keyring.revokeSite(
+        str(p.origin, 'origin'),
+        p.account === undefined ? undefined : nat(p.account, 'account'),
+      );
       return { ok: true as const };
     case 'wallet.getBackend':
       if (!ctx.getBackend) throw new WalletError('BAD_BACKEND', 'Backend settings are not available.');

@@ -160,6 +160,8 @@ extkey:  73 bytes = depth(1) ‖ fingerprint(4) ‖ child(4 BE) ‖ chaincode(32
 path:    external m/k'/0'/n'      internal m/k'/1'/n'
          k = 0 is src/wallet/scriptpubkeyman.cpp DeriveNewDilithiumChildKey
          extra accounts (this wallet) use k ≥ 1; Core has no RPC for them
+         — scriptpubkeyman.cpp:1252 passes BIP32_HARDENED_KEY_LIMIT (0') as
+         the account level, so a seed restores only k = 0 anywhere in Core
 key:     ML-DSA-44 KeyGen(ξ = derived seed)
 ```
 

@@ -9,7 +9,8 @@ import { dispatch } from '../../src/core/rpc/dispatch.js';
 import { SECRET_RESULT_KEYS } from '../../src/core/rpc/protocol.js';
 import { scriptForAddress } from '../../src/core/script/address.js';
 import { addressFromHdSeed } from '../../src/core/wallet/derive.js';
-import { emptyAccount, MAX_ACCOUNTS, parseMeta } from '../../src/core/wallet/storage.js';
+import { ACCOUNT_NAME_MAX, emptyAccount, MAX_ACCOUNTS, parseMeta } from '../../src/core/wallet/storage.js';
+import { ACCOUNT_GAP_LIMIT } from '../../src/core/wallet/gap.js';
 import { mnemonicToHdSeed } from '../../src/core/crypto/mnemonic.js';
 import { bytesToHex, hexToBytes } from '../../src/core/util/hex.js';
 import { PUBLIC_KEY_BYTES, TX_SIGNATURE_BYTES, SIGHASH_ALL, verifyTransactionHash } from '../../src/core/crypto/mldsa.js';
@@ -23,6 +24,7 @@ import vectors from '../vectors/golden.json' with { type: 'json' };
 const MNEMONIC = 'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about';
 const PASSWORD = 'testnet-ok';
 const DAPP = 'https://dapp.example';
+const OTHER = 'https://other.example';
 const DEST = vectors.entries[1]!.addresses.testnet;
 const HD = mnemonicToHdSeed(MNEMONIC);
 
@@ -150,16 +152,93 @@ describe('extra HD accounts', () => {
     expect((await k.status()).accounts).toHaveLength(1);
   });
 
-  it('getAccounts follows the active account after a switch', async () => {
+  it('a site grant does not follow the user into another account', async () => {
+    // Attacker / user gain: the second account exists precisely to keep an
+    // identity away from this site. A grant stored per origin alone handed the
+    // site that account's address the moment the user switched — or pressed
+    // "Add account", which switches — with no prompt and no way to tell from
+    // the connected-sites list that it had happened.
     const k = ring();
     await k.importMnemonic(MNEMONIC, PASSWORD);
     await k.approveConnect(DAPP);
     const before = (await k.getAccounts(DAPP)).accounts;
-    const created = await k.createAccount();
-    const after = (await k.getAccounts(DAPP)).accounts;
     expect(before).toEqual([expect.any(String)]);
-    expect(after).toEqual([created.address]);
-    expect(after[0]).not.toBe(before[0]);
+
+    const created = await k.createAccount();
+    expect((await k.getAccounts(DAPP)).accounts).toEqual([]);
+    // Not merely absent from the answer — the address must not appear at all.
+    expect(JSON.stringify(await k.getAccounts(DAPP))).not.toContain(created.address);
+    // And asking again from the page is a fresh approval, not a silent yes.
+    expect(await k.requestAccounts(DAPP)).toEqual({ pending: true });
+
+    await k.switchAccount(0);
+    expect((await k.getAccounts(DAPP)).accounts).toEqual(before);
+  });
+
+  it('approving on the second account grants that pair alone, and revoke is per pair', async () => {
+    const k = ring();
+    await k.importMnemonic(MNEMONIC, PASSWORD);
+    const a0 = (await k.receiveAddress()).address;
+    await k.approveConnect(DAPP);
+    const a1 = (await k.createAccount()).address;
+    await k.approveConnect(DAPP);
+
+    expect(await k.connectedSites()).toEqual([
+      { origin: DAPP, account: 0 },
+      { origin: DAPP, account: 1 },
+    ]);
+    expect((await k.getAccounts(DAPP)).accounts).toEqual([a1]);
+    // A second site, approved only on account 1, stays blind on account 0.
+    await k.approveConnect(OTHER);
+    await k.switchAccount(0);
+    expect((await k.getAccounts(DAPP)).accounts).toEqual([a0]);
+    expect((await k.getAccounts(OTHER)).accounts).toEqual([]);
+
+    // Revoking one row leaves the other standing…
+    await k.revokeSite(DAPP, 0);
+    expect((await k.getAccounts(DAPP)).accounts).toEqual([]);
+    await k.switchAccount(1);
+    expect((await k.getAccounts(DAPP)).accounts).toEqual([a1]);
+    // …and the page's own disconnect drops the site entirely.
+    await k.revokeSite(DAPP);
+    expect(await k.connectedSites()).toEqual([{ origin: OTHER, account: 1 }]);
+  });
+
+  it('a locked wallet hands out no address and no account name', async () => {
+    // Attacker gain: a locked popup on a borrowed laptop, a shoulder, or a
+    // screen recording of the unlock screen would otherwise read every
+    // account's address — and the names the user chose to label them
+    // ("Payroll", "Exchange") — and pull the whole history of each off the
+    // public explorer. No address left this worker while locked before extra
+    // accounts existed, and none may now.
+    const store = new MemoryWalletStorage();
+    const k = ring(store);
+    await k.importMnemonic(MNEMONIC, PASSWORD);
+    const a0 = (await k.receiveAddress()).address;
+    const a1 = (await k.createAccount()).address;
+    await k.renameAccount(1, 'Payroll');
+    expect((await k.status()).accounts).toHaveLength(2);
+
+    k.lock();
+    const locked = await k.status();
+    expect(locked.unlocked).toBe(false);
+    expect(locked.accounts).toEqual([]);
+    const blob = JSON.stringify(locked);
+    expect(blob).not.toContain(a0);
+    expect(blob).not.toContain(a1);
+    expect(blob).not.toContain('Payroll');
+    // The account the wallet will open on is not a secret, and the Unlock
+    // screen keeps working.
+    expect(locked.activeAccount).toBe(1);
+    expect(locked.hasVault).toBe(true);
+    expect(locked.canRevealPhrase).toBe(false);
+
+    // Unlocking gives them back.
+    await k.unlock(PASSWORD);
+    expect((await k.status()).accounts).toEqual([
+      expect.objectContaining({ index: 0, address: a0 }),
+      expect.objectContaining({ index: 1, address: a1, name: 'Payroll' }),
+    ]);
   });
 
   it('rename rejects an empty name and does not write control characters', async () => {
@@ -417,6 +496,172 @@ describe('extra HD accounts', () => {
     const meta = await store.loadMeta();
     expect(meta?.accounts.find((a) => a.index === 0)?.externalNext).toBe(0);
     expect(meta?.accounts.find((a) => a.index === 1)?.externalNext).toBe(1);
+  });
+
+  it('a restore scan finds coins on an account the fresh device never heard of', async () => {
+    // User loss: this is the whole H3 failure. A device restoring the phrase
+    // knows about account 0 and nothing else — the seed does not say how many
+    // accounts existed and btq-core cannot derive them at all — so a scan that
+    // walked only the active account brought back an empty wallet and left the
+    // coins on Account 3 looking permanently gone.
+    const store = new MemoryWalletStorage();
+    const restored = ring(store);
+    await restored.importMnemonic(MNEMONIC, PASSWORD);
+    const a2 = addressFromHdSeed(HD, 'external', 0, 'testnet', 2).address;
+    const lookup = async (address: string) => ({
+      used: address === a2,
+      txCount: address === a2 ? 1 : 0,
+      reportedBalanceSats: 0n,
+    });
+
+    const scan = await restored.scan(lookup, coins({ [a2]: [utxo(a2, 12_345n)] }));
+    expect(scan.discoveredAccounts).toEqual([2]);
+
+    const status = await restored.status();
+    expect(status.accounts.map((a) => a.index)).toEqual([0, 2]);
+    expect(status.accounts.find((a) => a.index === 2)?.lastBalanceSats).toBe('12345');
+    // Found means spendable, not merely listed: the coins are reachable from
+    // the account the switcher can now reach.
+    await restored.switchAccount(2);
+    expect((await restored.balances(coins({ [a2]: [utxo(a2, 12_345n)] }))).totalSats).toBe(12_345n);
+    expect((await store.loadMeta())?.accounts.find((a) => a.index === 2)?.externalNext).toBe(1);
+  });
+
+  it('a scan updates every known account, not only the active one', async () => {
+    // User loss: the switcher showed a stale balance for every account the user
+    // was not standing on, and a payment to Account 2 while Account 1 was
+    // active was invisible until they happened to switch.
+    const store = new MemoryWalletStorage();
+    const k = ring(store);
+    await k.importMnemonic(MNEMONIC, PASSWORD);
+    const a1 = (await k.createAccount()).address;
+    await k.switchAccount(0);
+    expect((await k.status()).activeAccount).toBe(0);
+
+    await k.scan(
+      async (address) => ({
+        used: address === a1,
+        txCount: address === a1 ? 1 : 0,
+        reportedBalanceSats: 0n,
+      }),
+      coins({ [a1]: [utxo(a1, 7_000n)] }),
+    );
+
+    const meta = await store.loadMeta();
+    expect(meta?.accounts.find((a) => a.index === 1)?.externalNext).toBe(1);
+    expect(meta?.accounts.find((a) => a.index === 1)?.lastBalanceSats).toBe('7000');
+    // …and the account nobody paid is left exactly where it was.
+    expect(meta?.accounts.find((a) => a.index === 0)?.externalNext).toBe(0);
+    expect(meta?.accounts.find((a) => a.index === 0)?.lastBalanceSats).toBe('0');
+  });
+
+  it('an account that never received coins is NOT rediscovered — the documented limit', async () => {
+    // Not a bug: there is nothing on any chain to find. This is pinned so the
+    // sentence the switcher and docs tell the user ("write down how many
+    // accounts you made") cannot quietly stop being true.
+    const first = ring();
+    await first.importMnemonic(MNEMONIC, PASSWORD);
+    await first.createAccount();
+    expect((await first.status()).accounts).toHaveLength(2);
+
+    const restored = ring();
+    await restored.importMnemonic(MNEMONIC, PASSWORD);
+    const scan = await restored.scan(
+      async () => ({ used: false, txCount: 0, reportedBalanceSats: 0n }),
+      async () => [],
+    );
+    expect(scan.discoveredAccounts).toEqual([]);
+    expect((await restored.status()).accounts.map((a) => a.index)).toEqual([0]);
+  });
+
+  it('discovery stops after the account gap limit, so storage cannot wedge the scan', async () => {
+    // Attacker gain: an unbounded probe is a scan that walks 20 accounts of 20
+    // addresses on every full rescan — 800 ML-DSA derivations and 800 explorer
+    // calls, from a wallet with one funded account.
+    const restored = ring();
+    await restored.importMnemonic(MNEMONIC, PASSWORD);
+    const far = addressFromHdSeed(HD, 'external', 0, 'testnet', ACCOUNT_GAP_LIMIT + 1).address;
+    const probed = new Set<string>();
+    const scan = await restored.scan(
+      async (address) => {
+        probed.add(address);
+        return { used: address === far, txCount: address === far ? 1 : 0, reportedBalanceSats: 0n };
+      },
+      async () => [],
+      null,
+      { full: true },
+    );
+    expect(scan.discoveredAccounts).toEqual([]);
+    expect(probed.has(far)).toBe(false);
+  });
+
+  it('a meta a pre-accounts build round-tripped does not hand account 0 another account\'s balance', () => {
+    // User loss: the top-level cursors are a mirror of the *active* account. A
+    // rollback build (or a hand-edited record) drops the accounts list but can
+    // leave `activeAccount` behind, and account 0 then showed account 2's
+    // balance and re-derived from account 2's cursor — a receive address that
+    // is not account 0's, and a number that is nobody's.
+    const rolled = parseMeta({
+      network: 'testnet',
+      origin: 'bip39',
+      activeAccount: 2,
+      externalNext: 5,
+      internalNext: 3,
+      lastBalanceSats: '123456',
+      confirmedBalanceSats: '100000',
+    });
+    expect(rolled?.accounts.find((a) => a.index === 0)).toMatchObject({
+      externalNext: 0,
+      internalNext: 0,
+      lastBalanceSats: '0',
+      confirmedBalanceSats: '0',
+    });
+    expect(rolled?.accounts.find((a) => a.index === 2)).toMatchObject({
+      externalNext: 5,
+      internalNext: 3,
+      lastBalanceSats: '123456',
+      confirmedBalanceSats: '100000',
+    });
+    expect(rolled?.activeAccount).toBe(2);
+
+    // The genuine pre-accounts record — no activeAccount at all — is still
+    // account 0's, and keeps its cursors. Migration must not regress.
+    const v1 = parseMeta({
+      network: 'testnet',
+      origin: 'bip39',
+      externalNext: 5,
+      internalNext: 3,
+      lastBalanceSats: '123456',
+    });
+    expect(v1?.accounts).toHaveLength(1);
+    expect(v1?.accounts[0]).toMatchObject({ index: 0, externalNext: 5, lastBalanceSats: '123456' });
+    expect(v1?.externalNext).toBe(5);
+  });
+
+  it('an account name carries no invisible controls and no half a character', async () => {
+    // Attacker gain: the name is the only attacker-writable string this chrome
+    // renders, right beside a shortened address. U+202E reverses what follows
+    // it, U+200B pads with width the user cannot see, U+2028 ends the line —
+    // all of them survived a filter that only dropped C0 and DEL.
+    const k = ring();
+    await k.importMnemonic(MNEMONIC, PASSWORD);
+    const renamed = await k.renameAccount(0, 'Pay\u202Eroll\u200B\u2028\u0007');
+    expect(renamed.name).toBe('Payroll');
+    expect(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(renamed.name)).toBe(false);
+
+    // Storage is the real attacker path, and it goes through the same filter.
+    const poisoned = parseMeta({
+      network: 'testnet',
+      origin: 'bip39',
+      accounts: [{ index: 0, name: 'Sav\u202Eings\u200B' }],
+    });
+    expect(poisoned?.accounts[0]?.name).toBe('Savings');
+
+    // The cap is code points, not UTF-16 units: an astral name must never be
+    // stored cut in half, which is what `slice(0, 32)` did to it.
+    const long = await k.renameAccount(0, `a${'\u{1F600}'.repeat(40)}`);
+    expect([...long.name]).toHaveLength(ACCOUNT_NAME_MAX);
+    expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(long.name)).toBe(false);
   });
 
   it('parseMeta does not let a missing account 0 hide the golden-path coins', () => {

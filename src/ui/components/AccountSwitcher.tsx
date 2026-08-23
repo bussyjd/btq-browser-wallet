@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { formatSats } from '../../core/wallet/format.js';
+import { ACCOUNT_GAP_LIMIT } from '../../core/wallet/gap.js';
 import { MAX_ACCOUNTS } from '../../core/wallet/storage.js';
 import { shortAddress } from '../format.js';
 import type { AccountInfo } from '../types.js';
@@ -130,6 +131,17 @@ export function AccountSwitcher({
           >
             Add account
           </Button>
+          {/* Said here, where the decision is made, and not only in the docs.
+              Account 1 is btq-core's own path; everything below it is this
+              wallet's convention, and a restore finds those accounts only by
+              looking for coins on them. */}
+          <p className="small" data-testid="account-note">
+            Account 1 is the only account btq-core can derive from this seed. The others are
+            this wallet's own: restoring the phrase re-adds an extra account only if it has
+            received coins — a rescan looks {ACCOUNT_GAP_LIMIT} accounts past the last one it
+            knows. An account you never used cannot be found again from the phrase alone, so
+            write down how many you made.
+          </p>
         </div>
         <InlineError message={create.error ?? switchTo.error ?? rename.error} />
       </div>

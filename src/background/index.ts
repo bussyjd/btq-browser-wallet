@@ -231,6 +231,20 @@ function broadcastAccountsChanged(origin: string, accounts: string[]): void {
   }
 }
 
+/**
+ * What this origin may see right now, straight from the keyring's own rule:
+ * the active account's address when that (origin, account) pair is approved,
+ * `[]` otherwise. Never throws — an event the worker cannot compute must not
+ * take down the RPC answer the popup is waiting for.
+ */
+async function accountsForOrigin(origin: string): Promise<string[]> {
+  try {
+    return (await keyring.getAccounts(origin)).accounts;
+  } catch {
+    return [];
+  }
+}
+
 function accountsOf(result: unknown): string[] {
   const accounts = (result as { accounts?: unknown } | null)?.accounts;
   return Array.isArray(accounts) ? accounts.filter((a): a is string => typeof a === 'string') : [];
@@ -345,7 +359,10 @@ async function handleMessage(
   }
   if (!fromTab && method === 'wallet.revokeSite') {
     const origin = originParam(message.params);
-    if (origin) broadcastAccountsChanged(origin, []);
+    // Revoking one account's grant does not disconnect the site outright: it
+    // may still hold a grant for the account that is active. Ask, rather than
+    // assuming — the answer is `[]` in every case that really was a disconnect.
+    if (origin) broadcastAccountsChanged(origin, await accountsForOrigin(origin));
   }
   if (!fromTab && method === 'wallet.wipe') {
     // The vault the requests were waiting on no longer exists.
@@ -356,14 +373,13 @@ async function handleMessage(
     broadcastAccountsChanged(pageOrigin, []);
   }
   if (!fromTab && (method === 'wallet.switchAccount' || method === 'wallet.createAccount')) {
-    const address =
-      typeof result === 'object' && result !== null && typeof (result as { address?: unknown }).address === 'string'
-        ? (result as { address: string }).address
-        : null;
-    if (address) {
-      for (const origin of await keyring.connectedSites()) {
-        broadcastAccountsChanged(origin, [address]);
-      }
+    // Never "here is the new address" to every site that was ever approved:
+    // the grant is per (origin, account), so a site that has no grant for the
+    // account now active is told `accountsChanged([])` and sees nothing until
+    // the user approves it there too. The worker asks the keyring for each
+    // site's answer rather than deciding here — one rule, in one place.
+    for (const origin of new Set((await keyring.connectedSites()).map((s) => s.origin))) {
+      broadcastAccountsChanged(origin, await accountsForOrigin(origin));
     }
   }
   sendResponse({ result });

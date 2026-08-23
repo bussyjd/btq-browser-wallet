@@ -91,6 +91,12 @@ export function App() {
     onAutoLock(() => {
       const from = screenRef.current;
       if (from === 'unlock' || from === 'onboarding' || from === 'boot') return;
+      // Close the switcher on the way out, exactly as the Lock button does.
+      // The overlay is only *hidden* while the screen is 'unlock' (the render
+      // guard below reads `screen === 'home'`), and `afterAuth` puts the screen
+      // back to 'home' — so without this the first thing on screen after
+      // re-typing the password is a modal listing every account and address.
+      setAccountsOpen(false);
       setReturnTo(from === 'settings' ? 'settings' : 'home');
       setLockNote('Locked after inactivity.');
       setScreen('unlock');
@@ -176,6 +182,12 @@ export function App() {
 
   const unlocked = Boolean(wallet.status?.unlocked);
   const showHeaderTools = unlocked && (screen === 'home' || screen === 'connect');
+  // The account everything on screen is about — the header's name, and the one
+  // a connect approval is granted for. Empty while locked: `status.accounts`
+  // carries names and addresses and is empty then, deliberately.
+  const activeAccountName =
+    (wallet.status?.accounts ?? []).find((a) => a.index === (wallet.status?.activeAccount ?? 0))?.name ??
+    'Account 1';
   // A dedicated approval window answers for its own site and nothing else; the
   // toolbar popup shows whatever the worker still has a live caller for.
   const connectOrigin = WANT_CONNECT ? (WINDOW_ORIGIN ?? wallet.pendingOrigin) : wallet.pendingOrigin;
@@ -226,6 +238,7 @@ export function App() {
             }}
             onWipe={async (confirmation) => {
               await wallet.wipe(confirmation);
+              setAccountsOpen(false);
               setSendResult(null);
               setLockNote(null);
               setScreen('onboarding');
@@ -238,6 +251,7 @@ export function App() {
           <ConnectApproval
             origin={connectOrigin}
             address={wallet.receive?.address ?? null}
+            accountName={activeAccountName}
             onApprove={async () => {
               await wallet.approveConnect(connectOrigin);
               finishConnect();
@@ -266,12 +280,7 @@ export function App() {
     <div className="app">
       <Header
         networkLabel={`Testnet${wallet.backend?.nodeUrl ? ' · node' : ''}`}
-        accountName={
-          showHeaderTools
-            ? (wallet.status?.accounts ?? []).find((a) => a.index === (wallet.status?.activeAccount ?? 0))?.name ??
-              'Account 1'
-            : undefined
-        }
+        accountName={showHeaderTools ? activeAccountName : undefined}
         onOpenAccounts={screen === 'home' ? () => setAccountsOpen(true) : undefined}
         onBack={screen === 'settings' ? () => setScreen('home') : undefined}
         onRefresh={showHeaderTools ? () => void wallet.refresh() : undefined}
@@ -313,10 +322,13 @@ export function App() {
           wallet={wallet}
           onToast={showToast}
           onLocked={() => {
+            setAccountsOpen(false);
             setSendResult(null);
             setScreen('unlock');
           }}
           onWiped={() => {
+            // A new wallet's switcher must not open onto the old wallet's list.
+            setAccountsOpen(false);
             setSendResult(null);
             setScreen('onboarding');
           }}

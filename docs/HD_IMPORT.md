@@ -58,10 +58,45 @@ index *n* is `m/k'/0'/n'` (receive) or `m/k'/1'/n'` (change). Account `k = 0`
 is byte-for-byte `DeriveNewDilithiumChildKey` in
 `src/wallet/scriptpubkeyman.cpp` — that is the golden-vector path. Extra
 accounts in this wallet walk the same hardened split one level up
-(`m/1'/…`, `m/2'/…`), the way MetaMask walks `m/44'/60'/k'`. btq-core has no
-RPC for a second Dilithium account; these extra accounts are this wallet's,
-restored by adding them again after an import (the gap scan covers one
-account at a time).
+(`m/1'/…`, `m/2'/…`), the way MetaMask walks `m/44'/60'/k'`.
+
+## Accounts above the first are this wallet's convention, not BTQ's
+
+Say it plainly, because it is the one thing about this feature that can cost somebody
+coins:
+
+- **btq-core cannot derive them.** `src/wallet/scriptpubkeyman.cpp:1252` calls
+  `DeriveDilithiumExtKey(masterKey, BIP32_HARDENED_KEY_LIMIT, accountKey)` — the account
+  level is the hardcoded constant `0'`, there is no parameter and no RPC that moves it.
+  A seed that restores this wallet in btq-core restores **account 1 only** (`m/0'/…`).
+  Core's only other door for those coins is `importdilithiumkey`, one leaf key at a
+  time, and this wallet has no key export.
+- **The seed does not say how many accounts there were.** An account is a derivation
+  path, not a record; nothing about `m/2'/…` is written into the phrase.
+
+So a restore rediscovers extra accounts the only way anything can — by looking for
+their coins on the chain:
+
+1. Every account this device already knows about is walked on every scan, both chains,
+   with the ordinary 20-address gap limit. (Before this, only the *active* account was
+   scanned, so a restored wallet sitting on account 1 never even looked at account 2.)
+2. A **full rescan**, and the first scan a freshly imported wallet runs, additionally
+   probes `ACCOUNT_GAP_LIMIT = 2` accounts past the highest one it knows and adopts any
+   whose external chain has ever been used — the BIP44 account-discovery rule, one level
+   up from the address gap limit. Two consecutive unused accounts end the probe.
+3. **An account that never received coins cannot be found this way.** There is nothing
+   on any chain to look for. It comes back only by pressing *Add account* again, in
+   order, because `createAccount` always takes `max(index) + 1`.
+
+The wallet says all of this in the account switcher itself, under *Add account*, rather
+than only here.
+
+The alternative considered and rejected was recording the account count inside the
+sealed vault payload. It cannot work for the case that matters: the payload on a fresh
+device is written by that device's own import, out of the phrase the user just typed —
+there is no older payload to read, so the number would always be 1 and would tell nobody
+anything. It would only help a restore that copies the encrypted blob across, which is
+not the restore anybody is worried about.
 
 ## Where the standard actually lives (and doesn't)
 
@@ -126,7 +161,8 @@ The gap-limit scan (20, matching Bitcoin convention) is what makes import *resto
 wallet rather than merely re-create key material: used addresses beyond index 0 are
 found by asking the explorer, exactly the way the balance screen does, so an imported
 wallet shows its history immediately. A lookup that fails is an error, never "unused" —
-otherwise a flaky explorer would silently truncate the restore.
+otherwise a flaky explorer would silently truncate the restore. That first scan is also
+the one that probes for extra accounts, as described above.
 
 ## The failure modes we test
 
@@ -136,6 +172,8 @@ otherwise a flaky explorer would silently truncate the restore.
 | Word not in the BIP39 list | rejected, the offending word named |
 | Hex seed that is not 64 hex chars | rejected |
 | Valid but unused seed | imports cleanly, empty history, index 0 shown |
+| Seed whose coins are on account 3 | the first scan probes two accounts past the last one it knows, adopts account 3 because its external chain has been used, and shows its balance in the switcher |
+| Seed whose account 3 was created but never funded | **not** restored — nothing on chain to find. Add it again in order; the switcher says so at the point the account is created |
 | Same seed imported twice | derives the identical addresses (golden-vector guarantee) |
 | Mnemonic vs raw-seed of the same entropy | **different wallets** — BIP39 hashing sits between; the UI labels the two import modes explicitly to prevent confusion |
 | Settings → Security on a raw-seed wallet | the phrase reveal is not rendered at all — a control that can only fail is worse than no control — and the HD seed reveal takes its place, with a sentence saying why. A phrase import seals its BIP39 entropy in the vault and can regenerate the words; a raw seed has none, and BIP39 hashing does not run backwards. Inventing words from the HD seed would hand the user a phrase that restores a *different* wallet — the seed hex they imported is the backup, and it goes back in through the same import screen |

@@ -194,17 +194,26 @@ function satsString(v: unknown): string {
   return typeof v === 'string' && /^-?\d{1,20}$/.test(v) ? v : '0';
 }
 
+/**
+ * Everything invisible that can reorder or hide what the chrome renders.
+ *
+ * `Cc` is the C0/C1 range and DEL. `Cf` is the format class, which is where the
+ * bidi overrides live: U+202E turns "Payroll<RLO>gpj.exe" into something that
+ * reads backwards next to a real address, and U+200B/U+FEFF pad a name with
+ * width the user cannot see. `Zl`/`Zp` are the line and paragraph separators —
+ * U+2028 ends a line inside what is supposed to be one row. An account name is
+ * the only attacker-writable string this UI renders, so none of them survive.
+ */
+const NAME_CONTROLS = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu;
+
 export function parseAccountName(v: unknown, fallback: string): string {
   if (typeof v !== 'string') return fallback;
-  let stripped = '';
-  for (const ch of v) {
-    const c = ch.codePointAt(0) ?? 0;
-    if (c < 32 || c === 127) continue;
-    stripped += ch;
-  }
-  const name = stripped.trim();
+  const name = v.replace(NAME_CONTROLS, '').trim();
   if (name.length === 0) return fallback;
-  return name.slice(0, ACCOUNT_NAME_MAX);
+  // Sliced by code point, not by UTF-16 unit: `slice` on a string of astral
+  // characters can cut an emoji in half and store a lone surrogate, which is
+  // not a string the UI (or JSON) can round-trip.
+  return [...name].slice(0, ACCOUNT_NAME_MAX).join('');
 }
 
 function parseCachedAddress(v: unknown): string | null {
@@ -241,16 +250,26 @@ export function parseMeta(v: unknown): WalletMeta | null {
   if (typeof v.network !== 'string' || !NETWORKS.has(v.network)) return null;
   if (v.origin !== 'bip39' && v.origin !== 'raw32') return null;
 
-  const account0 = emptyAccount(0);
-  account0.externalNext = counter(v.externalNext);
-  account0.internalNext = counter(v.internalNext);
-  account0.usedExternal = counter(v.usedExternal);
-  account0.usedInternal = counter(v.usedInternal);
-  account0.lastBalanceSats = satsString(v.lastBalanceSats);
-  account0.confirmedBalanceSats = satsString(v.confirmedBalanceSats);
-  account0.scannedExternal = counter(v.scannedExternal, -1);
-  account0.scannedInternal = counter(v.scannedInternal, -1);
-  account0.address = parseCachedAddress(v.address);
+  // Which account the top-level cursors belong to. They are a mirror of the
+  // *active* account, so a meta that names one is telling us whose they are.
+  const activeWanted =
+    typeof v.activeAccount === 'number' &&
+    Number.isInteger(v.activeAccount) &&
+    v.activeAccount >= 0 &&
+    v.activeAccount < MAX_ACCOUNTS
+      ? v.activeAccount
+      : 0;
+
+  const mirrored = emptyAccount(activeWanted);
+  mirrored.externalNext = counter(v.externalNext);
+  mirrored.internalNext = counter(v.internalNext);
+  mirrored.usedExternal = counter(v.usedExternal);
+  mirrored.usedInternal = counter(v.usedInternal);
+  mirrored.lastBalanceSats = satsString(v.lastBalanceSats);
+  mirrored.confirmedBalanceSats = satsString(v.confirmedBalanceSats);
+  mirrored.scannedExternal = counter(v.scannedExternal, -1);
+  mirrored.scannedInternal = counter(v.scannedInternal, -1);
+  mirrored.address = parseCachedAddress(v.address);
 
   const accounts: AccountRecord[] = [];
   const seen = new Set<number>();
@@ -263,29 +282,37 @@ export function parseMeta(v: unknown): WalletMeta | null {
       accounts.push(rec);
     }
   }
-  if (accounts.length === 0) accounts.push(account0);
-  else if (!seen.has(0)) {
+  if (accounts.length === 0) {
+    // No list at all: a meta written before extra accounts existed, or one a
+    // rollback build round-tripped and stripped. The cursors it does carry
+    // belong to whichever account was active — handing them to account 0 when
+    // the mirror is account 2's shows account 0 a balance that is not its own
+    // and re-derives the wrong receive address. So the mirror stays with its
+    // owner and account 0, if that is not it, comes back empty and rescans.
+    accounts.push(mirrored);
+    if (mirrored.index !== 0) accounts.push(emptyAccount(0));
+    seen.add(mirrored.index);
+    seen.add(0);
+  } else if (!seen.has(0)) {
     // A poisoned list that omits account 0 would hide the golden-path coins
     // and, with nextIndex already at MAX_ACCOUNTS, block adding it back.
     accounts.push(emptyAccount(0));
   }
   accounts.sort((a, b) => a.index - b.index);
 
-  const activeWanted =
-    typeof v.activeAccount === 'number' && Number.isInteger(v.activeAccount) ? v.activeAccount : 0;
   const activeAccount = accounts.some((a) => a.index === activeWanted) ? activeWanted : accounts[0]!.index;
 
   return mirrorActive({
     network: v.network as BtqNetwork,
     origin: v.origin,
-    externalNext: account0.externalNext,
-    internalNext: account0.internalNext,
-    usedExternal: account0.usedExternal,
-    usedInternal: account0.usedInternal,
-    lastBalanceSats: account0.lastBalanceSats,
-    confirmedBalanceSats: account0.confirmedBalanceSats,
-    scannedExternal: account0.scannedExternal,
-    scannedInternal: account0.scannedInternal,
+    externalNext: mirrored.externalNext,
+    internalNext: mirrored.internalNext,
+    usedExternal: mirrored.usedExternal,
+    usedInternal: mirrored.usedInternal,
+    lastBalanceSats: mirrored.lastBalanceSats,
+    confirmedBalanceSats: mirrored.confirmedBalanceSats,
+    scannedExternal: mirrored.scannedExternal,
+    scannedInternal: mirrored.scannedInternal,
     tipHeight:
       typeof v.tipHeight === 'number' && Number.isInteger(v.tipHeight) && v.tipHeight >= 0 ? v.tipHeight : null,
     lastScanAt: typeof v.lastScanAt === 'number' && Number.isFinite(v.lastScanAt) ? v.lastScanAt : null,

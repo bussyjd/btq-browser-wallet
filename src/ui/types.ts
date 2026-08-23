@@ -188,8 +188,25 @@ export interface PendingConnect {
   origin: string;
 }
 
+/**
+ * One approval, as the worker stores it: this site may see *this* account's
+ * address and no other. Switching to an account a site was not approved for
+ * gets the site `accountsChanged([])`, not a new address.
+ */
+export interface SiteGrant {
+  origin: string;
+  account: number;
+}
+
 export interface ConnectedSites {
+  /** Flat list of sites holding any grant. Kept for a popup older than the worker. */
   origins: string[];
+  /**
+   * One row per (origin, account). Optional: a worker older than this popup
+   * omits it, and the UI then reads every grant as account 0 — which is what
+   * such a worker's grants actually were.
+   */
+  sites?: SiteGrant[];
 }
 
 /** Fee presets the popup offers, in sat/kvB (the contract's unit). */

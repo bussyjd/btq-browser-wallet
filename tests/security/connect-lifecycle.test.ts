@@ -266,10 +266,17 @@ describe('accountsChanged broadcast', () => {
     expect(chromeFake.tabMessages[0]?.message).toMatchObject({ event: 'accountsChanged', origin: DAPP, accounts: [] });
   });
 
-  it('emits accountsChanged with the new receive address after create and switch', async () => {
+  it('a switch to an unapproved account tells the site it sees nothing', async () => {
+    // Attacker / user gain: the user makes a second account precisely to keep
+    // an identity away from a site. Before this, pressing "Add account" — which
+    // switches — pushed that brand-new address to every site ever approved,
+    // with no prompt. The grant is per (origin, account): the site is told it
+    // has nothing, and gets an address back only when the user approves it
+    // there too.
     chromeFake.tabs = [{ id: 4 }];
     await connectSite(DAPP, 4);
     chromeFake.tabMessages.length = 0;
+
     const created = (await ok(chromeFake.call({ method: 'wallet.createAccount' }))) as { address: string };
     await flush();
     expect(chromeFake.tabMessages).toEqual([
@@ -280,11 +287,15 @@ describe('accountsChanged broadcast', () => {
           kind: 'event',
           event: 'accountsChanged',
           origin: DAPP,
-          accounts: [created.address],
+          accounts: [],
         },
       }),
     ]);
+    expect(await ok(chromeFake.callFromPage({ method: 'page.getAccounts' }, DAPP))).toEqual({ accounts: [] });
+    // And the new account's address is nowhere in what the site was told.
+    expect(JSON.stringify(chromeFake.tabMessages)).not.toContain(created.address);
 
+    // Switching back to the account the site *was* approved for restores it.
     chromeFake.tabMessages.length = 0;
     const switched = (await ok(chromeFake.call({ method: 'wallet.switchAccount', params: { index: 0 } }))) as {
       address: string;
@@ -298,6 +309,45 @@ describe('accountsChanged broadcast', () => {
     });
     expect(await ok(chromeFake.callFromPage({ method: 'page.getAccounts' }, DAPP))).toEqual({
       accounts: [switched.address],
+    });
+  });
+
+  it('the site can be approved on the second account, through the normal prompt', async () => {
+    chromeFake.tabs = [{ id: 6 }];
+    await connectSite(DAPP, 6);
+    const created = (await ok(chromeFake.call({ method: 'wallet.createAccount' }))) as { address: string };
+
+    // Asking again from the same page is a *new* request: it parks and opens a
+    // window, exactly like a site nobody has ever approved.
+    const request = chromeFake.callFromPage({ method: 'page.requestAccounts' }, DAPP, 6);
+    await flush();
+    expect(request.settled).toBe(false);
+    expect(chromeFake.windows.length).toBeGreaterThan(0);
+    await ok(chromeFake.call({ method: 'wallet.approveConnect', params: { origin: DAPP } }));
+    expect(await request.promise).toMatchObject({ result: { accounts: [created.address] } });
+
+    // Two grants now, one per account, and both answer on their own account.
+    const sites = (await ok(chromeFake.call({ method: 'wallet.connectedSites' }))) as {
+      origins: string[];
+      sites: { origin: string; account: number }[];
+    };
+    expect(sites.origins).toEqual([DAPP]);
+    expect(sites.sites).toEqual([
+      { origin: DAPP, account: 0 },
+      { origin: DAPP, account: 1 },
+    ]);
+    expect(await ok(chromeFake.callFromPage({ method: 'page.getAccounts' }, DAPP))).toEqual({
+      accounts: [created.address],
+    });
+    await ok(chromeFake.call({ method: 'wallet.switchAccount', params: { index: 0 } }));
+    expect(await ok(chromeFake.callFromPage({ method: 'page.getAccounts' }, DAPP))).toEqual({ accounts: [address] });
+
+    // Revoking one row leaves the other standing.
+    await ok(chromeFake.call({ method: 'wallet.revokeSite', params: { origin: DAPP, account: 0 } }));
+    expect(await ok(chromeFake.callFromPage({ method: 'page.getAccounts' }, DAPP))).toEqual({ accounts: [] });
+    await ok(chromeFake.call({ method: 'wallet.switchAccount', params: { index: 1 } }));
+    expect(await ok(chromeFake.callFromPage({ method: 'page.getAccounts' }, DAPP))).toEqual({
+      accounts: [created.address],
     });
   });
 

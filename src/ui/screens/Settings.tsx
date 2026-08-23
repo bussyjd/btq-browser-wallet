@@ -90,6 +90,17 @@ export function Settings({
   const noPhraseReason =
     'This wallet was imported from a raw 32-byte seed. It has no recovery phrase — the seed hex you imported is its backup.';
 
+  /**
+   * The user's own name for an account, when this popup has it. The worker
+   * sends grants as an index and never a name — names do not leave a locked
+   * worker — so the fallback is the default name, which is derived from the
+   * index and is nobody's private label.
+   */
+  function accountName(index: number): string {
+    const named = (wallet.status?.accounts ?? []).find((a) => a.index === index)?.name;
+    return named ?? `Account ${index + 1}`;
+  }
+
   function closeReveal() {
     setAsking(false);
     setRevealPassword('');
@@ -207,20 +218,34 @@ export function Settings({
         {wallet.sites.length === 0 ? (
           <p className="small">No site can see your address.</p>
         ) : (
-          wallet.sites.map((origin) => (
-            <div key={origin} className="site-row" data-testid="site-row">
-              <span className="origin">{origin}</span>
-              <Button
-                variant="secondary"
-                small
-                data-testid="site-revoke"
-                disabled={revoke.busy}
-                onClick={() => void revoke.run(() => wallet.revokeSite(origin))}
-              >
-                Revoke
-              </Button>
-            </div>
-          ))
+          <>
+            {/* One row per approval, not per site: a grant is for one account,
+                so a site the user connected from two accounts is two rows and
+                revoking one leaves the other standing. */}
+            <p className="small">
+              Each row is one site on one account. A site sees nothing while a different
+              account is active until you approve it there too.
+            </p>
+            {wallet.sites.map((grant) => (
+              <div key={`${grant.origin}#${grant.account}`} className="site-row" data-testid="site-row">
+                <span className="origin">
+                  {grant.origin}
+                  <span className="site-account" data-testid="site-account">
+                    {accountName(grant.account)}
+                  </span>
+                </span>
+                <Button
+                  variant="secondary"
+                  small
+                  data-testid="site-revoke"
+                  disabled={revoke.busy}
+                  onClick={() => void revoke.run(() => wallet.revokeSite(grant.origin, grant.account))}
+                >
+                  Revoke
+                </Button>
+              </div>
+            ))}
+          </>
         )}
         <InlineError message={revoke.error} testId="revoke-error" />
       </Card>

@@ -103,6 +103,13 @@ const REQUIRED = [
   'account-add',
   'account-row-0',
   'account-rename',
+  'account-name',
+  // The sentence that says extra accounts are this wallet's own convention,
+  // rendered where the account is created. tests/e2e/accounts.spec.ts reads it.
+  'account-note',
+  // Which account a site's grant is for — a connection is per (origin,
+  // account), and the Settings row has to say which one it is revoking.
+  'site-account',
 ];
 
 function walk(dir: string): string[] {

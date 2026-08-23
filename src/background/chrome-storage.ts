@@ -1,4 +1,5 @@
 import { bytesToHex, hexToBytes } from '../core/util/hex.js';
+import { parseGrant } from '../core/connect/permissions.js';
 import {
   parseActivity,
   parseMeta,
@@ -48,8 +49,11 @@ export class ChromeWalletStorage implements WalletStorage {
     const r = await chrome.storage.local.get(ORIGINS_KEY);
     const raw = r[ORIGINS_KEY];
     if (!Array.isArray(raw)) return [];
-    // Only well-formed origins; a junk entry must never widen the allowlist.
-    return raw.filter((o): o is string => typeof o === 'string' && /^https?:\/\/[^/]+$/.test(o));
+    // Only well-formed grants; a junk entry must never widen the allowlist.
+    // A grant is an origin (account 0, and what every pre-accounts build
+    // wrote) or `origin#index` for any other account — `parseGrant` is the
+    // authority on both, so there is one grammar and not two.
+    return raw.filter((o): o is string => typeof o === 'string' && parseGrant(o) !== null);
   }
 
   async saveOrigins(origins: string[]): Promise<void> {
