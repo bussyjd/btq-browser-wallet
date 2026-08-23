@@ -19,4 +19,9 @@ export interface KeyringStatus {
   tipHeight: number | null;
   /** ms epoch of the last successful scan. */
   lastScanAt: number | null;
+  /**
+   * True only when this vault is unlocked *and* carries BIP39 entropy. False
+   * whenever locked, so a locked popup learns nothing about the vault.
+   */
+  canRevealPhrase: boolean;
 }

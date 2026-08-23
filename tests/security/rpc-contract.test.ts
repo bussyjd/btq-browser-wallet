@@ -38,6 +38,7 @@ describe('wallet RPC contract v2', () => {
       'wallet.prepareSend',
       'wallet.confirmSend',
       'wallet.history',
+      'wallet.revealPhrase',
     ]) {
       expect(WALLET_METHODS.includes(m as never), m).toBe(true);
     }
@@ -60,11 +61,16 @@ describe('wallet RPC contract v2', () => {
       'confirmedBalanceSats',
       'tipHeight',
       'lastScanAt',
+      'canRevealPhrase',
     ]) {
       expect(Object.hasOwn(status, key), key).toBe(true);
     }
     expect(status.lastBalanceSats).toBe('0');
     expect(status.confirmedBalanceSats).toBe('0');
+    // A locked keyring — here, one with no vault at all — must answer "no".
+    // The popup gates the reveal button on `=== true`, so an omitted or
+    // truthy-by-accident value would offer a button that can only fail.
+    expect(status.canRevealPhrase).toBe(false);
   });
 
   it('wallet.prepareSend returns vsize and weight alongside the fee', async () => {

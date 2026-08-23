@@ -3,6 +3,7 @@ import { Button } from '../components/Button.js';
 import { Card } from '../components/Card.js';
 import { Field, PasswordField } from '../components/Field.js';
 import { InlineError } from '../components/InlineError.js';
+import { SeedGrid } from '../components/SeedGrid.js';
 import { useAction } from '../hooks/useAction.js';
 import type { Wallet } from '../hooks/useWallet.js';
 
@@ -42,6 +43,15 @@ export function Settings({
   const [note, setNote] = useState<{ text: string; warn: boolean } | null>(null);
   const [confirmation, setConfirmation] = useState('');
   const [showWipe, setShowWipe] = useState(false);
+  // The reveal, in component state only — no ref, no module variable, no
+  // sessionStorage, and deliberately not in `useWallet`. App.tsx renders
+  // <Settings> only while the screen is 'settings', so leaving, "Lock now" and
+  // auto-lock all unmount this component and take the words with them. That is
+  // the mechanism; a useEffect cleanup would be theatre on top of it. The
+  // property is asserted end to end instead (reveal → lock-now → no grid).
+  const [askingPhrase, setAskingPhrase] = useState(false);
+  const [revealPassword, setRevealPassword] = useState('');
+  const [phrase, setPhrase] = useState<string[] | null>(null);
 
   const test = useAction();
   const rescan = useAction();
@@ -49,6 +59,26 @@ export function Settings({
   const lock = useAction();
   const wipe = useAction();
   const revoke = useAction();
+  const reveal = useAction();
+
+  // `=== true`, never `!== false`: an older service worker omits the field
+  // entirely, and "unknown" must read as "no" rather than offering a button
+  // that can only fail.
+  const canReveal = wallet.status?.canRevealPhrase === true;
+  // Why not, in the wallet's own words. The same two sentences the worker
+  // throws with (keyring.ts noPhraseMessage), so the disabled state and the
+  // refusal cannot drift into saying different things.
+  const noPhraseReason =
+    wallet.status?.origin === 'raw32'
+      ? 'This wallet was imported from a raw 32-byte seed. It has no recovery phrase — the seed hex you imported is its backup.'
+      : 'This wallet was sealed before the wallet could read a phrase back. The phrase you wrote down still restores it; the vault cannot produce it.';
+
+  function closeReveal() {
+    setAskingPhrase(false);
+    setRevealPassword('');
+    setPhrase(null);
+    reveal.setError(null);
+  }
 
   function draft() {
     return { explorerBase, nodeUrl, nodeUser, nodePassword };
@@ -222,6 +252,76 @@ export function Settings({
           </Button>
         </div>
         <InlineError message={lock.error} testId="lock-error" />
+
+        <div className="mt-8">
+          {phrase ? (
+            <div className="stack-sm">
+              <p className="note note-warn" role="status">
+                Anyone who reads these words owns this wallet. Nobody legitimate will ever ask
+                you for them.
+              </p>
+              <SeedGrid words={phrase} />
+              <Button variant="secondary" data-testid="reveal-hide" onClick={closeReveal}>
+                Hide phrase
+              </Button>
+            </div>
+          ) : askingPhrase ? (
+            <form
+              className="stack-sm"
+              onSubmit={(e) => {
+                e.preventDefault();
+                void reveal.run(async () => {
+                  const result = await wallet.revealPhrase(revealPassword);
+                  // Spent — clear it the instant it has been used. A failure
+                  // keeps it, so a typo can be fixed without retyping.
+                  setRevealPassword('');
+                  setPhrase(result.words);
+                });
+              }}
+            >
+              {/* The warning goes before the field, so it is read before the
+                  password is typed rather than after the words are on screen. */}
+              <p className="note note-warn" role="status">
+                Your recovery phrase will be shown on this screen. Make sure nobody is watching
+                and nothing is recording.
+              </p>
+              <PasswordField
+                id="reveal-pw"
+                data-testid="reveal-pw"
+                label="Password"
+                autoComplete="off"
+                value={revealPassword}
+                onChange={(e) => setRevealPassword(e.target.value)}
+              />
+              <Button type="submit" data-testid="reveal-submit" disabled={reveal.busy}>
+                {reveal.busy ? 'Checking…' : 'Show phrase'}
+              </Button>
+              <Button variant="secondary" onClick={closeReveal}>
+                Cancel
+              </Button>
+              <InlineError message={reveal.error} testId="reveal-error" />
+            </form>
+          ) : (
+            <div className="stack-sm">
+              <p className="small">
+                {canReveal
+                  ? 'Your recovery phrase can be shown again with your password. Anyone who reads those words owns this wallet.'
+                  : noPhraseReason}
+              </p>
+              <Button
+                variant="secondary"
+                data-testid="reveal-phrase"
+                disabled={!canReveal}
+                onClick={() => {
+                  reveal.setError(null);
+                  setAskingPhrase(true);
+                }}
+              >
+                Show recovery phrase
+              </Button>
+            </div>
+          )}
+        </div>
       </Card>
 
       <Card tone={showWipe ? 'warn' : 'default'}>

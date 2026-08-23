@@ -47,6 +47,7 @@ describe('a locked wallet refuses every path that touches the seed', () => {
     },
     { name: 'approveConnect', run: (k) => k.approveConnect('https://dapp.example') },
     { name: 'reauth', run: (k) => k.reauth(PASSWORD) },
+    { name: 'revealPhrase', run: (k) => k.revealPhrase(PASSWORD) },
   ];
 
   for (const c of cases) {
@@ -93,6 +94,7 @@ describe('a locked wallet refuses every path that touches the seed', () => {
       ['wallet.unlock', {}],
       ['wallet.revokeSite', {}],
       ['wallet.wipe', {}],
+      ['wallet.revealPhrase', {}],
     ] as const) {
       try {
         await dispatch(k, { method, params }, { fromTab: false });
@@ -187,6 +189,22 @@ describe('unlock attempt throttling', () => {
     for (let i = 0; i < UNLOCK_ATTEMPTS_BEFORE_BACKOFF; i++) {
       await expect(k.reauth('wrong-password')).rejects.toThrow('Incorrect password.');
     }
+    await expect(k.reauth(PASSWORD)).rejects.toThrow(/Too many wrong passwords/);
+  });
+
+  it('re-auth and the phrase reveal share one counter, in both directions', async () => {
+    // Attacker gain: two password-checking entry points with independent
+    // counters give twice the guesses, and alternating between them gives
+    // unlimited ones.
+    const clock = { t: 1_000 };
+    const k = ring(new MemoryWalletStorage(), clock);
+    await k.importMnemonic(MNEMONIC, PASSWORD);
+    for (let i = 0; i < UNLOCK_ATTEMPTS_BEFORE_BACKOFF; i++) {
+      // Alternate the two entry points; neither resets what the other counted.
+      const attempt = i % 2 === 0 ? k.reauth('wrong-password') : k.revealPhrase('wrong-password');
+      await expect(attempt).rejects.toThrow('Incorrect password.');
+    }
+    await expect(k.revealPhrase(PASSWORD)).rejects.toThrow(/Too many wrong passwords/);
     await expect(k.reauth(PASSWORD)).rejects.toThrow(/Too many wrong passwords/);
   });
 });

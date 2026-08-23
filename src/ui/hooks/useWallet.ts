@@ -8,6 +8,7 @@ import type {
   HistoryEntry,
   MaxSpendable,
   PendingConnect,
+  PhraseReveal,
   ReceiveInfo,
   ScanResult,
   SendPreview,
@@ -25,8 +26,13 @@ export interface BackendDraft {
 
 /**
  * Every service-worker call the popup makes, in one place. Screens get data and
- * actions as props; none of them talk to `rpc()` directly, and none of them ever
- * sees key material — the worker only returns addresses, amounts and hex.
+ * actions as props and none of them talk to `rpc()` directly.
+ *
+ * Two calls return phrase material and only those two: `create`, the onboarding
+ * reveal, and `revealPhrase`, the re-display behind the password. Both hand the
+ * result straight back to the caller and put nothing into this hook's state, so
+ * the words live in one screen's component state and die when it unmounts.
+ * Every other call returns addresses, amounts and hex.
  */
 export function useWallet() {
   const [status, setStatus] = useState<WalletStatus | null>(null);
@@ -151,6 +157,19 @@ export function useWallet() {
     setStatus((s) => (s ? { ...s, unlocked: false } : s));
   }, []);
 
+  /**
+   * The recovery phrase for the open vault, after the password is re-typed.
+   *
+   * The one call in this file that deliberately does not `setState` its result:
+   * putting the words in hook state would keep them alive across every screen
+   * for as long as the popup is open, and survive leaving Settings. The caller
+   * owns them and drops them on unmount.
+   */
+  const revealPhrase = useCallback(
+    (password: string) => rpc<PhraseReveal>('wallet.revealPhrase', { password }),
+    [],
+  );
+
   const wipe = useCallback(async (confirmation: string) => {
     await rpc('wallet.wipe', { confirmation });
     setStatus(null);
@@ -258,6 +277,7 @@ export function useWallet() {
     importSeed,
     unlock,
     lock,
+    revealPhrase,
     wipe,
     prepareSend,
     confirmSend,

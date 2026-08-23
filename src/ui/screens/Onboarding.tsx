@@ -17,7 +17,15 @@ type Step =
   | 'import-mnemonic'
   | 'import-raw';
 
-/** The one-shot reveal: the password and the words, held only until the vault is sealed. */
+/**
+ * The onboarding reveal: the chosen password and the generated phrase, held in
+ * memory only until the vault is sealed.
+ *
+ * Nothing is persisted before `confirm`, so closing the popup here really does
+ * discard *this* seed and the next attempt generates a different one. That is
+ * unlike the phrase afterwards, which Settings → Security can show again behind
+ * the password once a vault exists.
+ */
 interface Reveal {
   password: string;
   mnemonic: string;

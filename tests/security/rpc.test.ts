@@ -58,7 +58,7 @@ describe('RPC surface — what a page could try', () => {
     expect(WALLET_METHODS.includes('wallet.exportSeed' as never)).toBe(false);
   });
 
-  it('create is the only response that contains a mnemonic, and only once', async () => {
+  it('create and revealPhrase are the only responses that carry phrase material', async () => {
     const k = keyring();
     const created = (await dispatch(k, { method: 'wallet.create', params: { password: 'testnet-ok' } }, { fromTab: false })) as {
       mnemonic: string;
@@ -85,6 +85,36 @@ describe('RPC surface — what a page could try', () => {
     for (const secret of SECRET_RESULT_KEYS) {
       expect(keys.includes(secret)).toBe(false);
     }
+
+    // The second one. It carries the phrase deliberately, under exactly one
+    // key, and only to an extension page that just re-typed the password.
+    const revealed = (await dispatch(
+      k,
+      { method: 'wallet.revealPhrase', params: { password: 'testnet-ok' } },
+      { fromTab: false },
+    )) as { words: string[] };
+    expect(Object.keys(revealed)).toEqual(['words']);
+    expect(revealed.words).toEqual(words);
+
+    // And every other method still carries none of it — the honest replacement
+    // for "only once", which a re-display feature cannot claim. Whole tokens,
+    // so a word that happens to be a substring of an address does not mask a
+    // real leak or invent one.
+    const others: Record<string, unknown> = {
+      status: await dispatch(k, { method: 'wallet.status' }, { fromTab: false }),
+      receive: await dispatch(k, { method: 'wallet.receive' }, { fromTab: false }),
+      activity: await dispatch(k, { method: 'wallet.activity' }, { fromTab: false }),
+      history: await dispatch(k, { method: 'wallet.history' }, { fromTab: false, fetchHistory: async () => [] }),
+      connectedSites: await dispatch(k, { method: 'wallet.connectedSites' }, { fromTab: false }),
+    };
+    for (const [name, result] of Object.entries(others)) {
+      const tokens = new Set(JSON.stringify(result).toLowerCase().split(/[^a-z]+/));
+      for (const word of new Set(words)) expect(tokens.has(word), `${name} leaked "${word}"`).toBe(false);
+      for (const secret of SECRET_RESULT_KEYS) {
+        expect(collectKeys(result).includes(secret), `${name}.${secret}`).toBe(false);
+      }
+    }
+    expect(collectKeys(others.status).includes('words')).toBe(false);
   });
 });
 

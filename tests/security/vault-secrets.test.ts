@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { encryptVault, decryptVault, DEFAULT_PBKDF2_ITERATIONS } from '../../src/core/vault/encrypt.js';
 import { encodePayload } from '../../src/core/vault/payload.js';
-import { mnemonicToHdSeed } from '../../src/core/crypto/mnemonic.js';
+import { mnemonicToEntropy, mnemonicToHdSeed } from '../../src/core/crypto/mnemonic.js';
 import { bytesToHex, hexToBytes } from '../../src/core/util/hex.js';
 import { WalletError } from '../../src/core/wallet/errors.js';
 
@@ -24,6 +24,32 @@ describe('vault ciphertext does not leak secrets', () => {
     expect(asLatin.includes(MNEMONIC)).toBe(false);
     expect(asLatin.includes('abandon abandon abandon')).toBe(false);
     expect(DEFAULT_PBKDF2_ITERATIONS).toBeGreaterThanOrEqual(210_000);
+  });
+
+  it('a v2 blob hides the BIP39 entropy as thoroughly as the seed', async () => {
+    // Attacker gain: the entropy is the phrase's preimage — sixteen bytes that
+    // regenerate all twelve words. It is sealed in the same ciphertext as the
+    // HD seed, and reading storage must recover neither.
+    const hdSeed = mnemonicToHdSeed(MNEMONIC);
+    const entropyHex = bytesToHex(mnemonicToEntropy(MNEMONIC));
+    const plain = encodePayload({
+      v: 2,
+      network: 'testnet',
+      origin: 'bip39',
+      hdSeedHex: bytesToHex(hdSeed),
+      entropyHex,
+    });
+    const blob = await encryptVault(plain, PASSWORD, { iterations: 1_000 });
+    const asLatin = new TextDecoder('latin1').decode(blob);
+    expect(entropyHex).toHaveLength(32); // the scans below are not vacuous
+    expect(asLatin.includes(entropyHex)).toBe(false);
+    expect(asLatin.includes('entropyHex')).toBe(false);
+    expect(asLatin.includes(bytesToHex(hdSeed))).toBe(false);
+    expect(asLatin.includes(MNEMONIC)).toBe(false);
+    expect(asLatin.includes('abandon abandon abandon')).toBe(false);
+    // It still opens, and comes back exactly as it went in.
+    const out = await decryptVault(blob, PASSWORD);
+    expect(new TextDecoder().decode(out)).toContain(entropyHex);
   });
 
   it('wrong password fails with a single non-oracle message', async () => {

@@ -1,12 +1,21 @@
 /**
  * In-memory keyring. The HD seed lives here only while unlocked.
- * Persistence is the AES-GCM vault blob; the mnemonic is never stored.
+ *
+ * Persistence is the AES-GCM vault blob. The phrase itself is never stored —
+ * what a v2 vault holds is its 16- or 32-byte BIP39 *entropy*, sealed in the
+ * same ciphertext as the HD seed it derives, so `revealPhrase` can regenerate
+ * the words behind the password and prove they re-derive this wallet. Nothing
+ * is held in the clear, and no mnemonic string is ever kept on this object: a
+ * JS string cannot be zeroed, so caching one would be strictly worse than
+ * regenerating it and letting go.
  */
 import type { BtqNetwork } from '../script/address.js';
 import type { Chain } from '../crypto/hd.js';
 import {
   assertPassword,
+  entropyToMnemonic,
   generateMnemonic,
+  mnemonicToEntropy,
   mnemonicToHdSeed,
   parseMnemonic,
   parseRawSeedHex,
@@ -79,8 +88,28 @@ export interface ConfirmSendResult extends SendPreview {
   broadcastVia: BroadcastVia;
 }
 
+/**
+ * Why this wallet cannot show a phrase. Driven off the payload's own `origin`,
+ * never the metadata copy: `emptyMeta(…, 'bip39')` fallbacks re-stamp a raw32
+ * wallet as bip39, and a wrong answer here is the difference between "you have
+ * no phrase" and a manufactured one.
+ */
+export function noPhraseMessage(origin: SeedOrigin): string {
+  return origin === 'raw32'
+    ? 'This wallet was imported from a raw 32-byte seed. It has no recovery phrase — the seed hex you imported is its backup.'
+    : 'This wallet was sealed before the wallet could read a phrase back. The phrase you wrote down still restores it; the vault cannot produce it.';
+}
+
 export class Keyring {
   private hdSeed: Uint8Array | null = null;
+  /**
+   * Whether the vault currently open carries BIP39 entropy. In-memory only, and
+   * a UI affordance: `revealPhrase` re-checks the payload it actually decrypts.
+   * Deliberately not a cleartext `WalletMeta` flag — `origin` is already
+   * duplicated between payload and meta and that duplication is what produced
+   * the re-stamp bug this reads around.
+   */
+  private phraseAvailable = false;
   private pending: { mnemonic: string; challenge: number[] } | null = null;
   private lastActivity = 0;
   private failedUnlocks = 0;
@@ -116,6 +145,9 @@ export class Keyring {
       confirmedBalanceSats: meta?.confirmedBalanceSats ?? '0',
       tipHeight: meta?.tipHeight ?? null,
       lastScanAt: meta?.lastScanAt ?? null,
+      // False whenever locked, so a locked popup learns nothing about whether
+      // this device's vault could produce a phrase.
+      canRevealPhrase: this.hdSeed !== null && this.phraseAvailable,
     };
   }
 
@@ -157,7 +189,11 @@ export class Keyring {
       }
     }
     const { mnemonic } = this.pending;
-    await this.seal(mnemonicToHdSeed(mnemonic), password, 'bip39');
+    // Entropy into a local first: inlining it as the 4th argument would
+    // evaluate the seed first, and a throw would then strand an un-wiped
+    // 64-byte HD seed that never reaches seal()'s finally.
+    const entropy = mnemonicToEntropy(mnemonic);
+    await this.seal(mnemonicToHdSeed(mnemonic), password, 'bip39', entropy);
   }
 
   async importMnemonic(mnemonic: string, password: string): Promise<void> {
@@ -167,7 +203,8 @@ export class Keyring {
       throw new WalletError('ALREADY_EXISTS', 'A wallet already exists on this device. Remove it first.');
     }
     const parsed = parseMnemonic(mnemonic);
-    await this.seal(mnemonicToHdSeed(parsed), password, 'bip39');
+    const entropy = mnemonicToEntropy(parsed);
+    await this.seal(mnemonicToHdSeed(parsed), password, 'bip39', entropy);
   }
 
   async importSeed(seedHex: string, password: string): Promise<void> {
@@ -195,6 +232,7 @@ export class Keyring {
     try {
       const payload = decodePayload(plain);
       this.hdSeed = hexToBytes(payload.hdSeedHex);
+      this.phraseAvailable = payload.entropyHex !== undefined;
       this.failedUnlocks = 0;
       this.unlockBlockedUntil = 0;
       this.touch();
@@ -209,6 +247,7 @@ export class Keyring {
       wipeBytes(this.hdSeed);
       this.hdSeed = null;
     }
+    this.phraseAvailable = false;
     this.lastActivity = 0;
   }
 
@@ -231,7 +270,14 @@ export class Keyring {
     return addressFromHdSeed(seed, chain, index, this.network);
   }
 
-  async reauth(password: string): Promise<void> {
+  /**
+   * Prove the password against the sealed vault, sharing the unlock throttle.
+   *
+   * Returns the decrypted plaintext; the caller owns it and MUST wipe it. This
+   * never installs a seed: a correct password here does not unlock a locked
+   * wallet, and a wrong one counts against the same back-off as unlock.
+   */
+  private async reauthPlaintext(password: string): Promise<Uint8Array> {
     this.requireUnlocked();
     this.assertUnlockAllowed();
     const blob = await this.storage.loadVault();
@@ -243,10 +289,66 @@ export class Keyring {
       this.noteFailedUnlock();
       throw e;
     }
-    wipePlaintext(plain);
     this.failedUnlocks = 0;
     this.unlockBlockedUntil = 0;
     this.touch();
+    return plain;
+  }
+
+  async reauth(password: string): Promise<void> {
+    wipePlaintext(await this.reauthPlaintext(password));
+  }
+
+  /**
+   * Show the recovery phrase again, behind the password, on an already-unlocked
+   * wallet.
+   *
+   * Deliberately **not** one-shot, and it does not pretend to be: anybody who
+   * can call this has the password, and the password already carries full spend
+   * authority over the same vault. What it does guarantee is that the words
+   * never leave the worker without the password being re-typed, that a wrong
+   * password costs the same back-off as a wrong unlock, and that the words it
+   * returns re-derive *this* wallet.
+   *
+   * The words are regenerated from the vault's entropy on every call and let go
+   * — never cached on this object, because a JS string cannot be zeroed.
+   */
+  async revealPhrase(password: string): Promise<{ words: string[] }> {
+    const plain = await this.reauthPlaintext(password);
+    let entropy: Uint8Array | undefined;
+    let derived: Uint8Array | undefined;
+    let stored: Uint8Array | undefined;
+    try {
+      const payload = decodePayload(plain);
+      if (payload.entropyHex === undefined) {
+        throw new WalletError('NO_PHRASE', noPhraseMessage(payload.origin));
+      }
+      entropy = hexToBytes(payload.entropyHex);
+      const mnemonic = entropyToMnemonic(entropy);
+      // Self-check before anything reaches the screen: a phrase that restores a
+      // *different* wallet is worse than no phrase at all. It costs ~1 ms next
+      // to the 600 000-round password check above, so it is free.
+      //
+      // A plain length-then-loop compare. Constant time is deliberately not
+      // required here: both sides are our own material, decrypted from one
+      // authenticated ciphertext, with no attacker input and no oracle — the
+      // caller already proved the password to get this far.
+      derived = mnemonicToHdSeed(mnemonic);
+      stored = hexToBytes(payload.hdSeedHex);
+      let same = derived.length === stored.length;
+      if (same) {
+        for (let i = 0; i < derived.length; i++) {
+          if (derived[i] !== stored[i]) same = false;
+        }
+      }
+      if (!same) throw new WalletError('NO_PHRASE', 'The stored phrase does not match this wallet.');
+      return { words: mnemonic.split(' ') };
+    } finally {
+      if (entropy) wipeBytes(entropy);
+      if (derived) wipeBytes(derived);
+      if (stored) wipeBytes(stored);
+      wipePlaintext(plain);
+    }
   }
 
   /**
@@ -693,28 +795,48 @@ export class Keyring {
     return addressFromHdSeed(seed, 'external', meta?.externalNext ?? 0, this.network).address;
   }
 
-  private async seal(hdSeed: Uint8Array, password: string, origin: SeedOrigin): Promise<void> {
+  /**
+   * Seal the vault. `entropy`, when given, is the BIP39 entropy the HD seed was
+   * derived from — the only thing that lets the phrase be read back later. Both
+   * byte arrays are wiped on the way out, whether or not the seal succeeded.
+   */
+  private async seal(
+    hdSeed: Uint8Array,
+    password: string,
+    origin: SeedOrigin,
+    entropy?: Uint8Array,
+  ): Promise<void> {
     let plain: Uint8Array | undefined;
     try {
+      // Inside the try so the finally still wipes both buffers: this is a
+      // programming error, not a user one, and it must not leave a live seed
+      // and a live entropy on the heap on its way out.
+      if (entropy && origin !== 'bip39') throw new Error('raw seeds have no BIP39 entropy');
       if (await this.storage.loadVault()) {
         throw new WalletError('ALREADY_EXISTS', 'A wallet already exists on this device. Remove it first.');
       }
       const payload: VaultPayload = {
-        v: 1,
+        v: 2,
         network: this.network,
         origin,
         hdSeedHex: bytesToHex(hdSeed),
+        // Conditional spread, not `entropyHex: entropy && …`: an explicit
+        // `undefined` survives as a key on the object, and anything that later
+        // serialised it as null would be refused by decodePayload.
+        ...(entropy ? { entropyHex: bytesToHex(entropy) } : {}),
       };
       plain = encodePayload(payload);
       const blob = await encryptVault(plain, password, this.opts.encrypt);
       await this.storage.saveVault(blob);
       await this.storage.saveMeta(emptyMeta(this.network, origin));
       this.hdSeed = new Uint8Array(hdSeed);
+      this.phraseAvailable = entropy !== undefined;
       this.clearPending();
       this.touch();
     } finally {
       if (plain) wipePlaintext(plain);
       wipeBytes(hdSeed);
+      if (entropy) wipeBytes(entropy);
     }
   }
 

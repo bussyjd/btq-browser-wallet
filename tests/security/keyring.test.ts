@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { Keyring } from '../../src/core/wallet/keyring.js';
 import { WalletError } from '../../src/core/wallet/errors.js';
-import { mnemonicToHdSeed } from '../../src/core/crypto/mnemonic.js';
+import { mnemonicToEntropy, mnemonicToHdSeed } from '../../src/core/crypto/mnemonic.js';
 import { bytesToHex } from '../../src/core/util/hex.js';
 import { MemoryWalletStorage, TEST_ENCRYPT } from '../helpers/memory-store.js';
 
@@ -28,7 +28,7 @@ describe('keyring — paths that leak secrets or skip the vault', () => {
     expect((await k.status()).pendingReveal).toBe(true);
   });
 
-  it('status never re-returns the mnemonic after the one-shot reveal', async () => {
+  it('status never carries the mnemonic', async () => {
     const k = ring();
     const reveal = await k.create(PASSWORD);
     const status = await k.status();
@@ -62,7 +62,10 @@ describe('keyring — paths that leak secrets or skip the vault', () => {
     expect(a.address.startsWith('tbtq1z')).toBe(true);
   });
 
-  it('vault blob does not contain the mnemonic or HD seed hex', async () => {
+  it('vault blob does not contain the mnemonic, the HD seed, or the entropy in the clear', async () => {
+    // The entropy is the newest thing in the vault and the shortest, so it is
+    // the one most likely to end up somewhere it should not. It is also the
+    // preimage of the phrase: leaking it leaks the words themselves.
     const store = new MemoryWalletStorage();
     const k = ring(store);
     await k.importMnemonic(MNEMONIC, PASSWORD);
@@ -71,6 +74,14 @@ describe('keyring — paths that leak secrets or skip the vault', () => {
     const latin = new TextDecoder('latin1').decode(blob!);
     expect(latin.includes(MNEMONIC)).toBe(false);
     expect(latin.includes(bytesToHex(mnemonicToHdSeed(MNEMONIC)))).toBe(false);
+    const entropyHex = bytesToHex(mnemonicToEntropy(MNEMONIC));
+    expect(entropyHex).toHaveLength(32); // the scan below is not vacuous
+    expect(latin.includes(entropyHex)).toBe(false);
+    expect(latin.includes('entropyHex')).toBe(false);
+    // The metadata is not encrypted at all, so it must never have seen either.
+    const meta = JSON.stringify(await store.loadMeta());
+    expect(meta.includes(entropyHex)).toBe(false);
+    expect(meta.includes('abandon')).toBe(false);
   });
 
   it('wrong unlock does not leave the keyring unlocked', async () => {

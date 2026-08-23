@@ -28,6 +28,12 @@ export interface WalletStatus {
   tipHeight?: number | null;
   /** ms epoch of the last successful scan. */
   lastScanAt?: number | null;
+  /**
+   * True only when the vault is unlocked and holds a phrase this build can read
+   * back. Optional: an older worker omits it, which the UI must read as "no",
+   * so gate on `=== true` and never on `!== false`.
+   */
+  canRevealPhrase?: boolean;
 }
 
 export interface ScanResult {
@@ -53,6 +59,16 @@ export interface CreateReveal {
   mnemonic: string;
   /** 0-based positions in the phrase the user has to type back. */
   challenge: number[];
+}
+
+/**
+ * The result of `wallet.revealPhrase` — the recovery phrase, already split, for
+ * a wallet that is unlocked and whose password was just re-typed. It is the one
+ * result besides the onboarding reveal that carries secret material, so it is
+ * rendered and dropped: never stored in `useWallet` state, never persisted.
+ */
+export interface PhraseReveal {
+  words: string[];
 }
 
 export interface SendPreview {

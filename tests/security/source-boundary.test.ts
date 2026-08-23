@@ -78,6 +78,12 @@ describe('trust boundary in source', () => {
       expect(src, relative(ROOT, f)).not.toMatch(/mnemonicToHdSeed/);
       expect(src, relative(ROOT, f)).not.toMatch(/deriveKeySeed/);
       expect(src, relative(ROOT, f)).not.toMatch(/encryptVault/);
+      // The phrase reveal is rendered in the popup but *derived* in the worker.
+      // These two helpers in a UI file mean the wrong shape was built: the
+      // worker handing over raw BIP39 entropy for the popup to expand into
+      // words, which puts the phrase's preimage on the message channel.
+      expect(src, relative(ROOT, f)).not.toMatch(/entropyToMnemonic/);
+      expect(src, relative(ROOT, f)).not.toMatch(/mnemonicToEntropy/);
     }
   });
 
@@ -92,6 +98,8 @@ describe('trust boundary in source', () => {
         expect(src, relative(ROOT, f)).not.toMatch(/mnemonicToHdSeed/);
         expect(src, relative(ROOT, f)).not.toMatch(/deriveKeySeed/);
         expect(src, relative(ROOT, f)).not.toMatch(/encryptVault/);
+        expect(src, relative(ROOT, f)).not.toMatch(/entropyToMnemonic/);
+        expect(src, relative(ROOT, f)).not.toMatch(/mnemonicToEntropy/);
         expect(src, relative(ROOT, f)).not.toMatch(/ml_dsa44/);
       }
     }

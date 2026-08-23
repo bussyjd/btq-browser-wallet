@@ -10,6 +10,7 @@
 import { expect, test, type Page } from '@playwright/test';
 import {
   importMnemonic,
+  importRawSeed,
   launchDevice,
   leaveSettings,
   openSettings,
@@ -27,7 +28,7 @@ import { decodeRaw } from './fixtures/tx-decode.js';
 import { verifyTransaction } from './fixtures/mock-node.js';
 import { scriptHexFor } from './fixtures/btq-address.js';
 import { addressFromHdSeed } from '../../src/core/wallet/derive.js';
-import { mnemonicToHdSeed } from '../../src/core/crypto/mnemonic.js';
+import { mnemonicToEntropy, mnemonicToHdSeed } from '../../src/core/crypto/mnemonic.js';
 
 test.describe.configure({ mode: 'serial' });
 
@@ -288,6 +289,12 @@ test('storage holds the sealed vault and the unbroadcast bytes, nothing else', a
   expect(blob).not.toContain(PASSWORD);
   expect(blob).not.toContain('secretkey');
   expect(blob).not.toContain('privatekey');
+  // The BIP39 entropy a v2 vault seals is the phrase's preimage — sixteen bytes
+  // that regenerate all twelve words. It is inside the ciphertext or it is a
+  // leak; there is no third place for it to be.
+  expect(toHex(mnemonicToEntropy(MNEMONIC))).toHaveLength(32);
+  expect(blob).not.toContain(toHex(mnemonicToEntropy(MNEMONIC)));
+  expect(blob).not.toContain('entropyhex');
 
   // The node's RPC credential is a different kind of secret, and the wallet
   // treats it differently: `saveBackend` writes the whole backend config to
@@ -317,4 +324,47 @@ test('storage holds the sealed vault and the unbroadcast bytes, nothing else', a
   expect(withNodeBlob).not.toContain(toHex(mnemonicToHdSeed(MNEMONIC)));
   expect(withNodeBlob).not.toContain(MNEMONIC);
   expect(withNodeBlob).not.toContain(PASSWORD);
+  expect(withNodeBlob).not.toContain(toHex(mnemonicToEntropy(MNEMONIC)));
+  expect(withNodeBlob).not.toContain('entropyhex');
+});
+
+test('a raw-seed wallet says it has no phrase instead of inventing one', async () => {
+  // A raw 32-byte HD seed has no BIP39 phrase behind it. Rendering one anyway
+  // would produce a valid-looking 24-word backup whose BIP39 seed is a
+  // *different* wallet — words the user writes down and cannot restore from.
+  // The wallet refuses, names why, and points at the backup that does work.
+  test.setTimeout(180_000);
+  // Deliberately no `videoDir`: this device is a refusal check, and the demo
+  // video is stitched from every recorded clip in order. A raw-seed import that
+  // exists to prove a button stays disabled is not a demo beat.
+  const raw = await launchDevice({
+    name: 'device-raw-seed',
+    explorerBase: backend.origin,
+  });
+  try {
+    const page = await raw.popup();
+    await importRawSeed(page, 'a1'.repeat(32), 'raw-seed-pass');
+    await waitForScan(page);
+
+    await openSettings(page);
+    await expect(page.getByTestId('reveal-phrase')).toBeDisabled();
+    await expect(page.getByTestId('reveal-phrase').locator('xpath=..')).toContainText(
+      'It has no recovery phrase — the seed hex you imported is its backup.',
+    );
+    // Disabled in the UI is a courtesy; the worker is the one that must refuse.
+    // It does so only *after* the password checks out, so the answer is not a
+    // probe a passer-by at an open popup can run.
+    const refused: { threw: boolean; message: string } = await raw
+      .rpc(page, 'wallet.revealPhrase', { password: 'raw-seed-pass' })
+      .then(
+        () => ({ threw: false, message: 'wallet.revealPhrase returned a phrase for a raw seed' }),
+        (e: Error) => ({ threw: true, message: e.message }),
+      );
+    expect(refused.threw, refused.message).toBe(true);
+    expect(refused.message).toContain('NO_PHRASE');
+    expect(refused.message).toContain('raw 32-byte seed');
+    await expect(page.getByTestId('seed-word-1')).toHaveCount(0);
+  } finally {
+    await raw.close();
+  }
 });

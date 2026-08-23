@@ -153,6 +153,10 @@ export async function dispatch(keyring: Keyring, request: RpcRequest, ctx: Dispa
     case 'wallet.wipe':
       await keyring.wipe(str(p.confirmation, 'confirmation'));
       return { ok: true as const };
+    case 'wallet.revealPhrase':
+      // The keyring re-proves the password against the sealed vault and shares
+      // the unlock back-off; a missing one is BAD_PARAMS before it is touched.
+      return keyring.revealPhrase(str(p.password, 'password'));
     case 'wallet.maxSpendable': {
       if (!ctx.fetchUtxos) throw new WalletError('EXPLORER_UNAVAILABLE', 'Explorer is not configured.');
       return keyring.maxSpendable({

@@ -7,7 +7,9 @@ import { ChromeWalletStorage } from '../../src/background/chrome-storage.js';
 import { loadBackend, saveBackend } from '../../src/background/backend-store.js';
 import { Keyring } from '../../src/core/wallet/keyring.js';
 import { emptyMeta, parseActivity, parseMeta } from '../../src/core/wallet/storage.js';
-import { mnemonicToHdSeed } from '../../src/core/crypto/mnemonic.js';
+import { mnemonicToEntropy, mnemonicToHdSeed } from '../../src/core/crypto/mnemonic.js';
+import { encodePayload } from '../../src/core/vault/payload.js';
+import { encryptVault } from '../../src/core/vault/encrypt.js';
 import { bytesToHex } from '../../src/core/util/hex.js';
 import { FakeChrome, uninstallChrome } from '../helpers/fake-chrome.js';
 import { TEST_ENCRYPT } from '../helpers/memory-store.js';
@@ -46,6 +48,12 @@ describe('persisted extension storage', () => {
     expect(serialized).not.toContain('abandon abandon');
     expect(serialized).not.toContain(bytesToHex(mnemonicToHdSeed(MNEMONIC)));
     expect(serialized).not.toContain(PASSWORD);
+    // The BIP39 entropy the v2 vault seals is the phrase's preimage; it is
+    // stored inside the ciphertext and nowhere a reader of storage can see.
+    const entropyHex = bytesToHex(mnemonicToEntropy(MNEMONIC));
+    expect(entropyHex).toHaveLength(32);
+    expect(serialized).not.toContain(entropyHex);
+    expect(serialized).not.toContain('entropyHex');
   });
 
   it('a wipe removes every wallet key from storage', async () => {
@@ -123,6 +131,34 @@ describe('persisted extension storage', () => {
     const restarted = new Keyring(new ChromeWalletStorage(), { encrypt: TEST_ENCRYPT, network: 'testnet' });
     await restarted.unlock(PASSWORD);
     expect((await restarted.receiveAddress()).address).toBe(before.address);
+  });
+
+  it('a genuine v1 vault record opens, derives the right address, and shows no phrase', async () => {
+    // The test above writes a *current-build* vault, so it cannot notice a
+    // decoder that stopped accepting v1. This one writes the bytes a
+    // pre-reveal build actually produced: v1, no entropy field at all.
+    const storage = new ChromeWalletStorage();
+    const plain = encodePayload({
+      v: 1,
+      network: 'testnet',
+      origin: 'bip39',
+      hdSeedHex: bytesToHex(mnemonicToHdSeed(MNEMONIC)),
+    });
+    await storage.saveVault(await encryptVault(plain, PASSWORD, TEST_ENCRYPT));
+    await storage.saveMeta(emptyMeta('testnet', 'bip39'));
+
+    const keyring = new Keyring(new ChromeWalletStorage(), { encrypt: TEST_ENCRYPT, network: 'testnet' });
+    await keyring.unlock(PASSWORD);
+    const reference = new Keyring(new ChromeWalletStorage(), { encrypt: TEST_ENCRYPT, network: 'testnet' });
+    expect((await keyring.receiveAddress()).address).toMatch(/^tbtq1z/);
+    expect((await keyring.status()).canRevealPhrase).toBe(false);
+    await expect(keyring.revealPhrase(PASSWORD)).rejects.toMatchObject({ code: 'NO_PHRASE' });
+    // …and the address is the one this mnemonic derives, not merely some address.
+    await storage.clear();
+    await reference.importMnemonic(MNEMONIC, PASSWORD);
+    expect((await reference.receiveAddress()).address).toBe(
+      (await keyring.receiveAddress()).address,
+    );
   });
 });
 

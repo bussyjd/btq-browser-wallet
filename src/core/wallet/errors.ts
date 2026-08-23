@@ -12,6 +12,8 @@ export type WalletErrorCode =
   | 'ALREADY_EXISTS'
   | 'NO_VAULT'
   | 'NO_PENDING'
+  /** The vault holds no BIP39 entropy, so no phrase can be shown. Never a password problem. */
+  | 'NO_PHRASE'
   | 'CONFIRM_MISMATCH'
   | 'EXPLORER_SCHEMA'
   | 'EXPLORER_UNAVAILABLE'

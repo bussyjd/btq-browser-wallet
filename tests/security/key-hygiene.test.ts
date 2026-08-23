@@ -8,6 +8,7 @@ import { describe, it, expect } from 'vitest';
 import { keyPairFromSeed, publicKeyFromSeed, signTransactionHash, SECRET_KEY_BYTES } from '../../src/core/crypto/mldsa.js';
 import { deriveKeySeed, derivePath, masterFromSeed, accountKey, HARDENED } from '../../src/core/crypto/hd.js';
 import { addressFromHdSeed } from '../../src/core/wallet/derive.js';
+import { mnemonicToHdSeed } from '../../src/core/crypto/mnemonic.js';
 import { bytesToHex, hexToBytes } from '../../src/core/util/hex.js';
 import { Keyring } from '../../src/core/wallet/keyring.js';
 import { MemoryWalletStorage, TEST_ENCRYPT } from '../helpers/memory-store.js';
@@ -67,6 +68,28 @@ describe('secret material lifetime', () => {
       const d = addressFromHdSeed(HD_SEED, v.chain as 'external' | 'internal', v.index, 'testnet');
       expect(d.address, v.path).toBe(v.addresses.testnet);
     }
+  });
+
+  it('a reveal wipes what it derived without disturbing the vault', async () => {
+    // `revealPhrase` wipes four buffers on its way out: the decrypted payload,
+    // the entropy, the seed it re-derived for the self-check, and the seed it
+    // compared against. JavaScript gives a test no handle on a function's own
+    // locals, so this cannot observe the zeroing directly — asserted instead is
+    // the thing a wipe of the *wrong* buffer would break: a second reveal
+    // returning different (or empty) words, and re-auth failing afterwards
+    // because the vault's own bytes were cleared underneath it.
+    const k = new Keyring(new MemoryWalletStorage(), { encrypt: TEST_ENCRYPT, network: 'testnet' });
+    await k.importMnemonic(MNEMONIC, PASSWORD);
+    const first = await k.revealPhrase(PASSWORD);
+    const second = await k.revealPhrase(PASSWORD);
+    expect(first.words.join(' ')).toBe(MNEMONIC);
+    expect(second.words).toEqual(first.words);
+    await k.reauth(PASSWORD);
+    expect((await k.status()).unlocked).toBe(true);
+    // And the wallet still derives from the same seed it did before.
+    expect((await k.receiveAddress()).address).toBe(
+      addressFromHdSeed(mnemonicToHdSeed(MNEMONIC), 'external', 0, 'testnet').address,
+    );
   });
 
   it('lock zeroes the in-memory HD seed', async () => {

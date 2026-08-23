@@ -11,7 +11,13 @@
  *
  * These two inputs of "the same entropy" are different wallets — see docs/HD_IMPORT.md.
  */
-import { generateMnemonic as scureGenerate, mnemonicToSeedSync, validateMnemonic } from '@scure/bip39';
+import {
+  entropyToMnemonic as scureEntropyToMnemonic,
+  generateMnemonic as scureGenerate,
+  mnemonicToEntropy as scureMnemonicToEntropy,
+  mnemonicToSeedSync,
+  validateMnemonic,
+} from '@scure/bip39';
 import { wordlist } from '@scure/bip39/wordlists/english';
 import { WalletError } from '../wallet/errors.js';
 import { hexToBytes } from '../util/hex.js';
@@ -46,6 +52,31 @@ export function parseMnemonic(input: string): string {
 /** 64-byte BIP39 seed — the bytes we feed to masterFromSeed. */
 export function mnemonicToHdSeed(mnemonic: string, passphrase = ''): Uint8Array {
   return mnemonicToSeedSync(parseMnemonic(mnemonic), passphrase);
+}
+
+/**
+ * The 16- or 32-byte BIP39 entropy behind a phrase — the preimage the words are
+ * a rendering of. Validates the phrase first, so a phrase this wallet would
+ * refuse to import can never be turned into stored entropy.
+ *
+ * This file is the only importer of `@scure/bip39`; keep it that way.
+ */
+export function mnemonicToEntropy(mnemonic: string): Uint8Array {
+  return scureMnemonicToEntropy(parseMnemonic(mnemonic), wordlist);
+}
+
+/**
+ * The phrase for a BIP39 entropy — the exact inverse of `mnemonicToEntropy`,
+ * reproducing what `parseMnemonic` normalised. Only the two lengths this wallet
+ * seals (12 and 24 words) are accepted: BIP39 also defines 20/24/28-byte
+ * entropies, and silently returning a 15-word phrase for one would produce a
+ * backup the import screen then refuses.
+ */
+export function entropyToMnemonic(entropy: Uint8Array): string {
+  if (entropy.length !== 16 && entropy.length !== 32) {
+    throw new WalletError('BAD_MNEMONIC', `BIP39 entropy is 16 or 32 bytes, not ${entropy.length}.`);
+  }
+  return scureEntropyToMnemonic(entropy, wordlist);
 }
 
 /** Raw btq-core HD seed: exactly 32 bytes as hex (sethdseed shape). */

@@ -32,6 +32,9 @@ import { feeForP2mrTx, formatSats } from './fixtures/consensus.js';
 import { buildSingleKeyLeaf } from './fixtures/mock-node.js';
 import { fromHex, tapLeafHash, tapscriptSighash, toHex } from './fixtures/bip341.js';
 import { videoDir } from './fixtures/video.js';
+// The recording-only redaction, asserted rather than assumed: the reveal grid
+// is a phrase surface like the onboarding one, and it must be covered too.
+import { SEED_WORDS, expectRedacted } from './fixtures/redact.js';
 // The same encoder the popup renders its QR with, run here over the address the
 // test derived — so the QR is proved to encode *this* address and no other.
 import { encode as encodeQr } from 'uqr';
@@ -112,7 +115,7 @@ test('the test-side hashes are pinned to btq-core-verified golden vectors', () =
   expect(toHex(digest)).toBe(PINNED_SIGHASH);
 });
 
-test('create a wallet: the phrase is shown once and never stored', async () => {
+test('create a wallet: the phrase is shown, and stored only inside the sealed vault', async () => {
   popup = await deviceA.popup();
   await expect(popup.getByTestId('welcome-create')).toBeVisible();
 
@@ -135,8 +138,14 @@ test('create a wallet: the phrase is shown once and never stored', async () => {
   expect(Object.keys(storage)).toContain('vault');
   expect(Object.keys(storage)).toContain('meta');
   // "BTQ1" | kdf | iterations | salt | iv | AES-GCM ciphertext, and nothing else.
+  // A v2 payload seals the 16-byte BIP39 entropy alongside the HD seed, so the
+  // phrase can be read back under Settings → Security: 288 bytes for a
+  // 12-word wallet, 320 for a 24-word one. The bound does not move — the words
+  // themselves would be 469 bytes and would not fit, which is one of the
+  // reasons the vault stores the entropy rather than the text.
   const vault = storage.vault as string;
   expect(vault.startsWith('42545131')).toBe(true);
+  expect(vault.length / 2).toBe(288);
   expect(vault.length / 2).toBeLessThan(400);
 });
 
@@ -183,6 +192,84 @@ test('lock, refuse the wrong password, unlock', async () => {
   await expect(popup.getByTestId('balance')).toBeVisible();
   const open = await deviceA.rpc<{ unlocked: boolean }>(popup, 'wallet.status');
   expect(open.unlocked).toBe(true);
+  await waitForScan(popup);
+});
+
+test('Settings: the phrase reads back behind the password, and is stored nowhere new', async () => {
+  // The re-display the wallet used to refuse. It is gated on the same password
+  // that already carries full spend authority over the same vault, on a wallet
+  // that is already unlocked — and the words it returns are the words the
+  // create screen showed, which is the only thing that makes it a backup
+  // rather than a second, different secret.
+  await openSettings(popup);
+  await expect(popup.getByTestId('reveal-phrase')).toBeEnabled();
+  await popup.getByTestId('reveal-phrase').click();
+
+  // A wrong password shows no grid at all — not an empty one, not a redacted
+  // one. A refusal that rendered an empty grid would be one missing `if` away
+  // from rendering a full one.
+  await popup.getByTestId('reveal-pw').fill('not-the-password');
+  await popup.getByTestId('reveal-submit').click();
+  await expect(popup.getByTestId('reveal-error')).toHaveText('Incorrect password.');
+  await expect(popup.getByTestId('seed-word-1')).toHaveCount(0);
+
+  await popup.getByTestId('reveal-pw').fill(PASSWORD);
+  await popup.getByTestId('reveal-submit').click();
+  await expect(popup.getByTestId('seed-word-1')).toBeVisible();
+  // Same grid component as onboarding, so the recording redaction covers it by
+  // construction. Asserted, because "by construction" is what stops being true.
+  await expectRedacted(popup, SEED_WORDS, 12);
+  const shown: string[] = [];
+  for (let i = 1; i <= 12; i++) {
+    shown.push(((await popup.getByTestId(`seed-word-${i}`).textContent()) ?? '').trim());
+  }
+  expect(shown).toEqual(words);
+  // No clipboard button on this screen, by design and by assertion.
+  await expect(popup.getByTestId('copy-address')).toHaveCount(0);
+
+  // Reading the phrase back wrote nothing anywhere: it still exists only inside
+  // the sealed vault, exactly as it did before the reveal.
+  const storage = await deviceA.storage();
+  const blob = JSON.stringify(storage).toLowerCase();
+  for (const word of words) expect(blob).not.toContain(` ${word} `);
+  expect(blob).not.toContain(words.join(' '));
+  expect(blob).not.toContain(toHex(hdSeed));
+  expect(blob).not.toContain(PASSWORD);
+  const vault = storage.vault as string;
+  expect(vault.startsWith('42545131')).toBe(true);
+  expect(vault.length / 2).toBeLessThan(400);
+
+  await popup.getByTestId('reveal-hide').click();
+  await expect(popup.getByTestId('seed-word-1')).toHaveCount(0);
+  await leaveSettings(popup);
+  await waitForScan(popup);
+});
+
+test('locking takes a phrase off the screen with it', async () => {
+  // The words live in one component's state and nowhere else — no ref, no
+  // module variable, no sessionStorage, not in the wallet hook. Leaving
+  // Settings unmounts that component, and so does locking, which is the
+  // mechanism rather than a cleanup callback. This is the assertion that keeps
+  // it true.
+  await openSettings(popup);
+  await popup.getByTestId('reveal-phrase').click();
+  await popup.getByTestId('reveal-pw').fill(PASSWORD);
+  await popup.getByTestId('reveal-submit').click();
+  await expect(popup.getByTestId('seed-word-1')).toBeVisible();
+
+  await popup.getByTestId('lock-now').click();
+  await expect(popup.getByTestId('unlock-pw')).toBeVisible();
+  await expect(popup.getByTestId('seed-word-1')).toHaveCount(0);
+
+  // Still gone after unlocking, rather than re-rendered by a component that
+  // quietly kept it, and Settings is back to asking.
+  await unlock(popup, PASSWORD);
+  await expect(popup.getByTestId('balance')).toBeVisible();
+  await expect(popup.getByTestId('seed-word-1')).toHaveCount(0);
+  await openSettings(popup);
+  await expect(popup.getByTestId('seed-word-1')).toHaveCount(0);
+  await expect(popup.getByTestId('reveal-phrase')).toBeVisible();
+  await leaveSettings(popup);
   await waitForScan(popup);
 });
 

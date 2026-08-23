@@ -1,9 +1,15 @@
 import { Button } from '../components/Button.js';
 import { Card } from '../components/Card.js';
+import { SeedGrid } from '../components/SeedGrid.js';
 
 /**
- * The one and only time the phrase is on screen. No copy button: the clipboard
- * is readable by anything else running on this machine.
+ * The phrase, during onboarding, before the vault exists.
+ *
+ * Nothing is persisted at this point: the words live in the parent's state and
+ * are gone if the popup closes, so this screen is genuinely the last chance to
+ * write down *this* seed. It is no longer the last chance ever to see a phrase
+ * — once the vault is sealed, Settings → Security shows it again behind the
+ * password. Saying so here is what stops people photographing the screen.
  */
 export function ShowSeed({ words, onContinue }: { words: string[]; onContinue: () => void }) {
   return (
@@ -16,19 +22,13 @@ export function ShowSeed({ words, onContinue }: { words: string[]; onContinue: (
       </div>
       <Card tone="warn">
         <p className="small">
-          <strong>Shown once.</strong> The wallet cannot display this phrase again. Keep this
-          window open until you have finished — closing it discards these words and the next
-          attempt generates a different seed.
+          <strong>Write them down now.</strong> Nothing is saved until you confirm — close this
+          window and these words are gone, and the next attempt generates a different seed. Once
+          the vault is sealed you can read the phrase back under <strong>Settings → Security</strong>,
+          with your password.
         </p>
       </Card>
-      <ol className="seed-grid">
-        {words.map((w, i) => (
-          <li key={i}>
-            <span className="n">{i + 1}</span>
-            <span data-testid={`seed-word-${i + 1}`}>{w}</span>
-          </li>
-        ))}
-      </ol>
+      <SeedGrid words={words} />
       <Button data-testid="seed-continue" onClick={onContinue}>
         I wrote it down
       </Button>
