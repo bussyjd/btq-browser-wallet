@@ -18,7 +18,7 @@ best-effort. A vulnerability in btq-core itself belongs with
 
 ## Trust boundary
 
-- The HD seed — and the BIP39 entropy it was derived from, which a v2 vault seals in the
+- The HD seed — and the BIP39 entropy it was derived from, which the vault seals in the
   same ciphertext — decrypt **only** in the MV3 service worker, and **only** while
   unlocked. Locking, an auto-lock, or a service-worker restart drops them. The phrase is
   regenerated from that entropy when it is asked for and let go again; it is never cached,
@@ -30,8 +30,9 @@ best-effort. A vulnerability in btq-core itself belongs with
   and die with the screen. Signing happens in the worker; the popup sends intent and a
   password.
 - It receives the **HD seed** on one method and one only: `wallet.revealSeedHex`, behind
-  the same re-typed password, for the wallets that have no phrase to show. Offering them
-  a greyed-out button instead would have left a wallet whose backup cannot be got at,
+  the same re-typed password, for the one wallet that has no phrase to show — a raw
+  32-byte import. Offering it a greyed-out button instead would have left a wallet whose
+  backup cannot be got at,
   which is not a security property but a lost-coins one. It is offered *instead of* the
   phrase control, never as well — `wallet.status.backup` names the one control the popup
   may render — and the hex is checked against the seed the worker is actually deriving
@@ -55,13 +56,20 @@ best-effort. A vulnerability in btq-core itself belongs with
   already unlocked **and** the password re-typed against the sealed vault. A wrong one
   counts against the same back-off as a wrong unlock and names nothing but the password.
   There is no copy button on that screen, or on any screen that shows a phrase or a seed.
-  A wallet imported from a raw 32-byte seed, or sealed before the reveal existed, refuses
-  with `NO_PHRASE` rather than manufacture words for a different wallet — and words that
-  are shown are checked to re-derive *this* vault's HD seed before they reach the screen.
-  Those wallets are shown their HD seed instead, under the same conditions. There is no
-  in-place upgrade for a pre-reveal vault and there will not be one: the only thing that
-  could seal the entropy is the phrase, and asking a user to type their phrase in "to
-  upgrade the vault" is the phishing script, not a migration.
+  A wallet imported from a raw 32-byte seed refuses with `NO_PHRASE` rather than
+  manufacture words for a different wallet — and words that are shown are checked to
+  re-derive *this* vault's HD seed before they reach the screen. That wallet is shown its
+  HD seed instead, under the same conditions. There are only ever these two, because the
+  vault payload holds `origin` and the sealed entropy together: a wallet that says it came
+  from a phrase can always produce one.
+- **A vault this build cannot read:** one payload version exists, and a payload from the
+  pre-2 development build is refused with `VAULT_TOO_OLD` — its own code and its own copy,
+  reached only after the password has opened the ciphertext, and only once the payload has
+  been parsed far enough to be recognised as ours and intact. Corrupt or foreign bytes
+  still get the one non-oracle `NOT_A_VAULT`, because "remove this wallet and import it
+  again" is the wrong instruction to give somebody whose vault is merely damaged. The
+  wallet is never deleted on the wallet's initiative: the refusal explains, and the DELETE
+  confirmation on that same screen stays the user's to type.
 - **Locked state:** cannot sign, derive, list history, or show the phrase or the seed.
   Either reveal refuses a locked wallet even with the right password, and never unlocks
   one as a side effect. `wallet.status.backup` is `null` whenever locked, so a locked

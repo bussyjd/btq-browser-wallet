@@ -101,16 +101,13 @@ export interface ConfirmSendResult extends SendPreview {
 }
 
 /**
- * Why this wallet cannot show a phrase. Driven off the payload's own `origin`,
- * never the metadata copy: `emptyMeta(…, 'bip39')` fallbacks re-stamp a raw32
- * wallet as bip39, and a wrong answer here is the difference between "you have
- * no phrase" and a manufactured one.
+ * Why this wallet cannot show a phrase — and there is exactly one reason, which
+ * is why this is a sentence and not a lookup. A wallet imported from a raw
+ * 32-byte seed never had a phrase; every other wallet this build can open was
+ * sealed from one and can show it. The two import buttons, and nothing else.
  */
-export function noPhraseMessage(origin: SeedOrigin): string {
-  return origin === 'raw32'
-    ? 'This wallet was imported from a raw 32-byte seed. It has no recovery phrase — the seed hex you imported is its backup.'
-    : 'This wallet was sealed before the wallet could read a phrase back. The phrase you wrote down still restores it; the vault cannot produce it.';
-}
+export const NO_PHRASE_MESSAGE =
+  'This wallet was imported from a raw 32-byte seed. It has no recovery phrase — the seed hex you imported is its backup.';
 
 export class Keyring {
   private hdSeed: Uint8Array | null = null;
@@ -160,10 +157,11 @@ export class Keyring {
     const loaded = await this.storage.loadMeta();
     const meta = loaded ? mirrorActive(ensureAccounts(loaded)) : null;
     // Which backup this wallet can show, decided in one place. An open vault
-    // always has one: the phrase when the entropy is sealed beside the seed,
-    // the HD seed itself otherwise — a raw-32 import never had a phrase, and a
-    // v1 vault's entropy is gone for good. `null` means "offer no control",
-    // which is the locked case, and never "offer a control that does nothing".
+    // always has one, and which one follows from how it was imported: the
+    // phrase when the entropy is sealed beside the seed, the HD seed itself for
+    // a raw-32 import, which never had a phrase. `null` means "offer no
+    // control", which is the locked case, and never "offer a control that does
+    // nothing".
     const backup: BackupKind | null =
       this.hdSeed === null ? null : this.phraseAvailable ? 'recoveryPhrase' : 'hdSeed';
     return {
@@ -442,7 +440,9 @@ export class Keyring {
     try {
       const payload = decodePayload(plain);
       if (payload.entropyHex === undefined) {
-        throw new WalletError('NO_PHRASE', noPhraseMessage(payload.origin));
+        // The decoder holds `origin === 'bip39'` and "carries entropy" together,
+        // so an absent entropy here means a raw-32 import and nothing else.
+        throw new WalletError('NO_PHRASE', NO_PHRASE_MESSAGE);
       }
       entropy = hexToBytes(payload.entropyHex);
       const mnemonic = entropyToMnemonic(entropy);
@@ -475,19 +475,16 @@ export class Keyring {
   /**
    * Show the HD seed as hex, behind the password, on an already-unlocked wallet.
    *
-   * The backup for the wallets that have no phrase to show — a raw-32 import
-   * never had one, and a v1 vault's BIP39 entropy is gone because
-   * `mnemonicToHdSeed` is one-way. What comes back is the master secret every
-   * key in this wallet is derived from, and it is offered *instead of* the
-   * phrase control, never as well — see `status().backup`.
+   * The backup for the wallet that has no phrase to show: a raw-32 import,
+   * which never had one. What comes back is the master secret every key in this
+   * wallet is derived from, and it is offered *instead of* the phrase control,
+   * never as well — see `status().backup`.
    *
-   * How far it gets the user back depends on which wallet it is, and the popup
-   * says which rather than averaging the two: a raw-32 wallet's 32-byte seed
-   * goes straight back in through `Import → raw seed`, while a seed that came
-   * from a phrase is 64 bytes and `parseRawSeedHex` deliberately refuses those
-   * (`tests/unit/mnemonic.test.ts`, "so a BIP39 seed is not imported as raw").
-   * For that wallet the phrase on paper is still what restores it, and this is
-   * the master secret to keep beside it.
+   * That wallet's 32-byte seed goes straight back in through `Import → raw
+   * seed`. A seed that came from a phrase is 64 bytes and `parseRawSeedHex`
+   * deliberately refuses those (`tests/unit/mnemonic.test.ts`, "so a BIP39 seed
+   * is not imported as raw"), which is why a phrase wallet is offered its
+   * phrase — the thing that actually restores it — rather than this.
    *
    * Same guarantees as `revealPhrase`, deliberately and by reusing the same
    * code: locked refuses, the password is re-proved against the sealed vault,

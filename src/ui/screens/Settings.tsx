@@ -83,14 +83,12 @@ export function Settings({
         ? 'recoveryPhrase'
         : null
       : reported;
-  // Why there is no phrase, in the wallet's own words: the same two sentences
-  // the worker throws with (keyring.ts `noPhraseMessage`), so the screen and the
-  // refusal cannot drift into saying different things. `origin` is the vault
-  // payload's own, not the metadata copy that a lost `meta` re-stamps.
+  // Why there is no phrase, in the wallet's own words: the same sentence the
+  // worker throws with (keyring.ts `NO_PHRASE_MESSAGE`), so the screen and the
+  // refusal cannot drift into saying different things. There is one reason and
+  // one sentence — a raw 32-byte import is the only wallet without a phrase.
   const noPhraseReason =
-    wallet.status?.origin === 'raw32'
-      ? 'This wallet was imported from a raw 32-byte seed. It has no recovery phrase — the seed hex you imported is its backup.'
-      : 'This wallet was sealed before the wallet could read a phrase back. The phrase you wrote down still restores it; the vault cannot produce it.';
+    'This wallet was imported from a raw 32-byte seed. It has no recovery phrase — the seed hex you imported is its backup.';
 
   function closeReveal() {
     setAsking(false);
@@ -357,9 +355,8 @@ export function Settings({
                 </p>
                 <SeedHex seedHex={seedHex} />
                 <p className="small">
-                  {wallet.status?.origin === 'raw32'
-                    ? 'Write them down. To restore this wallet on any device, choose Import, then “Raw seed”, and type these characters back in.'
-                    : 'Write them down and keep them with your recovery phrase. They are this wallet’s master secret; the phrase is what restores it.'}
+                  Write them down. To restore this wallet on any device, choose Import, then
+                  “Raw seed”, and type these characters back in.
                 </p>
                 <Button variant="secondary" data-testid="reveal-seed-hide" onClick={closeReveal}>
                   Hide seed
@@ -401,35 +398,15 @@ export function Settings({
             ) : (
               <div className="stack-sm">
                 <p className="small">{noPhraseReason}</p>
-                {/* What the seed is worth differs by wallet, so the two are said
-                    separately rather than in one sentence that is half true of
-                    each. A raw-32 wallet's seed goes straight back in through
-                    the import screen. A phrase-derived seed is 64 bytes, and
-                    that screen takes 32 — so for those wallets the seed is the
-                    master secret to keep, and the phrase is what restores. */}
-                {wallet.status?.origin === 'raw32' ? (
-                  <p className="small">
-                    That seed can be shown here with your password: the 64 hex characters every
-                    key in this wallet is derived from. Import → “Raw seed” takes them back and
-                    restores this wallet exactly, addresses and all.
-                  </p>
-                ) : (
-                  <>
-                    <p className="small">
-                      What the vault can still show you is the HD seed itself — the hex every
-                      key in this wallet is derived from, and the whole of its master secret.
-                      Keep it wherever you keep the phrase.
-                    </p>
-                    <p className="small">
-                      It is not a second way in on this build: a seed that came from a phrase is
-                      64 bytes, and Import → “Raw seed” takes a 32-byte one. The phrase you
-                      wrote down is what restores this wallet — and importing it into a fresh
-                      install would seal a wallet that can show its words again. This one cannot,
-                      because it never stored them. Nothing here will ever ask you to type your
-                      phrase in to upgrade anything; anything that does is trying to steal it.
-                    </p>
-                  </>
-                )}
+                {/* This branch is reached by exactly one kind of wallet, so it
+                    says one thing. The seed it shows goes straight back in
+                    through the import screen — a full round trip, not a
+                    consolation prize for a wallet that lost something. */}
+                <p className="small">
+                  That seed can be shown here with your password: the 64 hex characters every
+                  key in this wallet is derived from. Import → “Raw seed” takes them back and
+                  restores this wallet exactly, addresses and all.
+                </p>
                 <Button
                   variant="secondary"
                   data-testid="reveal-seed"

@@ -12,14 +12,26 @@ export type WalletErrorCode =
   | 'ALREADY_EXISTS'
   | 'NO_VAULT'
   | 'NO_PENDING'
-  /** The vault holds no BIP39 entropy, so no phrase can be shown. Never a password problem. */
+  /**
+   * The wallet was imported from a raw 32-byte seed, so it holds no BIP39
+   * entropy and has no phrase to show. Never a password problem, and never a
+   * reason to run words back out of an HD seed.
+   */
   | 'NO_PHRASE'
   | 'CONFIRM_MISMATCH'
   | 'EXPLORER_SCHEMA'
   | 'EXPLORER_UNAVAILABLE'
   | 'FORBIDDEN'
   | 'UNKNOWN_METHOD'
+  /** The blob is not one of ours: corrupt, foreign, or hand-edited. */
   | 'NOT_A_VAULT'
+  /**
+   * The blob *is* one of ours and predates this build's vault format. Distinct
+   * from `NOT_A_VAULT` because it is not damage and reads nothing like it: the
+   * ciphertext opened, the password was right, and the only way on is to remove
+   * the wallet and import its phrase or seed again.
+   */
+  | 'VAULT_TOO_OLD'
   | 'BAD_ADDRESS'
   | 'WRONG_NETWORK'
   | 'LEGACY_DILITHIUM'

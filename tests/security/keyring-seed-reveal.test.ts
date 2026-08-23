@@ -1,13 +1,17 @@
 /**
- * Showing the HD seed — the backup for every wallet that has no phrase to show.
+ * Showing the HD seed — the backup for the wallet that has no phrase to show.
  *
- * Two wallets can never produce a recovery phrase: one imported from a raw
- * 32-byte seed, which never had one, and a v1 vault sealed before the reveal
- * existed, whose BIP39 entropy is gone because `mnemonicToHdSeed` is one-way.
- * Refusing both and offering nothing else leaves the user with a wallet they
- * cannot back up — so they are offered the HD seed itself, the hex every key
- * here is derived from. How far that gets them back differs by wallet and the
- * popup says which: see the round-trip tests at the bottom of this file.
+ * One wallet can never produce a recovery phrase: the one imported from a raw
+ * 32-byte seed, which never had one. Refusing it and offering nothing else
+ * would leave that user unable to back up their wallet at all, so they are
+ * offered the HD seed itself — the same hex they typed in, and a full round
+ * trip back through `Import → raw seed`.
+ *
+ * A wallet sealed from a phrase is offered its phrase instead (`status().backup`
+ * names exactly one control), but the method still answers for it, and this
+ * file keeps that honest too: the 64-byte seed it hands back is real and is
+ * *not* a second way in, because `parseRawSeedHex` refuses 128 hex characters
+ * on purpose.
  *
  * It is the same secret behind the same door as the phrase, so this file holds
  * the same properties down: locked refuses, the password is re-proved against
@@ -27,12 +31,12 @@ import { emptyMeta } from '../../src/core/wallet/storage.js';
 import { mnemonicToHdSeed } from '../../src/core/crypto/mnemonic.js';
 import { bytesToHex, hexToBytes } from '../../src/core/util/hex.js';
 import { MemoryWalletStorage, TEST_ENCRYPT } from '../helpers/memory-store.js';
-import { sealV1 } from '../helpers/v1-vault.js';
 
 const MNEMONIC = 'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about';
 const PASSWORD = 'testnet-ok';
 const RAW_SEED_HEX = 'a1'.repeat(32);
-const V1_SEED_HEX = bytesToHex(mnemonicToHdSeed(MNEMONIC));
+/** The 64-byte BIP39 seed behind MNEMONIC — 128 hex characters, not 64. */
+const PHRASE_SEED_HEX = bytesToHex(mnemonicToHdSeed(MNEMONIC));
 
 function ring(store = new MemoryWalletStorage(), clock?: { t: number }) {
   return new Keyring(store, {
@@ -42,11 +46,10 @@ function ring(store = new MemoryWalletStorage(), clock?: { t: number }) {
   });
 }
 
-/** An open v1 wallet — the one the user in the bug report actually has. */
-async function openV1(store = new MemoryWalletStorage()) {
-  await sealV1(store, MNEMONIC, PASSWORD);
+/** An open phrase wallet — Settings offers it the phrase, not this. */
+async function openBip39(store = new MemoryWalletStorage()) {
   const k = ring(store);
-  await k.unlock(PASSWORD);
+  await k.importMnemonic(MNEMONIC, PASSWORD);
   return k;
 }
 
@@ -63,11 +66,11 @@ describe('revealSeedHex hands back the seed that restores this wallet', () => {
     expect((await k.revealSeedHex(PASSWORD)).seedHex).toBe(RAW_SEED_HEX);
   });
 
-  it('a v1 wallet gets back the seed its lost phrase derives', async () => {
-    // The property that makes this a backup at all: the hex on screen is the
-    // hex the user's own written-down phrase would produce.
-    const k = await openV1();
-    expect((await k.revealSeedHex(PASSWORD)).seedHex).toBe(V1_SEED_HEX);
+  it('a phrase wallet gets back the seed its phrase derives', async () => {
+    // The property that makes this a backup at all: the hex is the hex the
+    // user's own written-down phrase produces, and nothing else.
+    const k = await openBip39();
+    expect((await k.revealSeedHex(PASSWORD)).seedHex).toBe(PHRASE_SEED_HEX);
   });
 
   it('the revealed hex is the seed this wallet actually derives from', async () => {
@@ -75,7 +78,7 @@ describe('revealSeedHex hands back the seed that restores this wallet', () => {
     // backup the user trusts and loses their coins to. Checked against the
     // address on screen, through the same derivation the wallet uses.
     for (const [open, expected] of [
-      [openV1, V1_SEED_HEX],
+      [openBip39, PHRASE_SEED_HEX],
       [openRaw32, RAW_SEED_HEX],
     ] as const) {
       const k = await open();
@@ -93,8 +96,8 @@ describe('revealSeedHex hands back the seed that restores this wallet', () => {
     // characters would have been asserting a wish.
     const raw = await (await openRaw32()).revealSeedHex(PASSWORD);
     expect(raw.seedHex).toMatch(/^[0-9a-f]{64}$/);
-    const v1 = await (await openV1()).revealSeedHex(PASSWORD);
-    expect(v1.seedHex).toMatch(/^[0-9a-f]{128}$/);
+    const fromPhrase = await (await openBip39()).revealSeedHex(PASSWORD);
+    expect(fromPhrase.seedHex).toMatch(/^[0-9a-f]{128}$/);
   });
 
   it('a raw-32 wallet\'s seed goes back in through Import → raw seed', async () => {
@@ -108,15 +111,16 @@ describe('revealSeedHex hands back the seed that restores this wallet', () => {
     expect((await restored.receiveAddress()).address).toBe(onScreen.address);
   });
 
-  it('a phrase-derived seed is refused by that import, which is why the copy sends the user to the phrase', async () => {
+  it('a phrase-derived seed is refused by that import, which is why a phrase wallet is offered its phrase', async () => {
     // `parseRawSeedHex` deliberately refuses 64-byte hex so a BIP39 seed is not
     // imported as a raw one (tests/unit/mnemonic.test.ts pins that decision).
-    // The consequence is load-bearing for what Settings may honestly say to a
-    // v1 wallet: the seed it shows is that wallet's master secret, but on this
-    // build the phrase on paper is what restores it. If this refusal is ever
-    // lifted, this test fails and that copy has to be revisited — which is the
-    // whole reason it is written down here.
-    const k = await openV1();
+    // Two things rest on it. Settings offers a phrase wallet its phrase rather
+    // than this hex, because only the phrase restores it. And a wallet sealed
+    // by the pre-2 build has no export-and-reimport escape at all — which is
+    // why `OLD_VAULT_MESSAGE` sends its owner to the phrase and says so. If
+    // this refusal is ever lifted, this test fails and both have to be
+    // revisited, which is the whole reason it is written down here.
+    const k = await openBip39();
     const { seedHex } = await k.revealSeedHex(PASSWORD);
     await expect(ring().importSeed(seedHex, PASSWORD)).rejects.toMatchObject({
       code: 'BAD_SEED_HEX',
@@ -131,15 +135,15 @@ describe('revealSeedHex hands back the seed that restores this wallet', () => {
 
   it('a phrase wallet can show its seed too, and it is the same seed', async () => {
     // Settings never offers both controls, but the method must not pretend the
-    // seed does not exist for a v2 vault: it is the same secret, one derivation
-    // away from the words that method already hands out.
+    // seed does not exist for a phrase wallet: it is the same secret, one
+    // derivation away from the words that method already hands out.
     const k = ring();
     await k.importMnemonic(MNEMONIC, PASSWORD);
-    expect((await k.revealSeedHex(PASSWORD)).seedHex).toBe(V1_SEED_HEX);
+    expect((await k.revealSeedHex(PASSWORD)).seedHex).toBe(PHRASE_SEED_HEX);
   });
 
   it('two consecutive reveals return the same hex, and the wallet still works', async () => {
-    const k = await openV1();
+    const k = await openBip39();
     const first = await k.revealSeedHex(PASSWORD);
     const second = await k.revealSeedHex(PASSWORD);
     expect(second.seedHex).toBe(first.seedHex);
@@ -156,7 +160,7 @@ describe('revealSeedHex refuses without the password', () => {
   it('a locked wallet refuses even with the right password', async () => {
     // Attacker gain: a seed reveal that works while locked turns "I stepped
     // away from an open browser" into "the master secret was on screen".
-    for (const open of [openV1, openRaw32]) {
+    for (const open of [openBip39, openRaw32]) {
       const k = await open();
       k.lock();
       await expect(k.revealSeedHex(PASSWORD)).rejects.toThrow(/locked/i);
@@ -172,9 +176,9 @@ describe('revealSeedHex refuses without the password', () => {
   });
 
   it('a wrong password refuses, and the right one still works after', async () => {
-    const k = await openV1();
+    const k = await openBip39();
     await expect(k.revealSeedHex('not-the-password')).rejects.toThrow('Incorrect password.');
-    expect((await k.revealSeedHex(PASSWORD)).seedHex).toBe(V1_SEED_HEX);
+    expect((await k.revealSeedHex(PASSWORD)).seedHex).toBe(PHRASE_SEED_HEX);
   });
 
   it('a wrong password names the password and never any of the secret', async () => {
@@ -237,16 +241,15 @@ describe('revealSeedHex shares the unlock throttle in both directions', () => {
   it('wrong unlocks throttle a later seed reveal, and a good unlock clears it', async () => {
     const clock = { t: 1_000 };
     const store = new MemoryWalletStorage();
-    await sealV1(store, MNEMONIC, PASSWORD);
     const k = ring(store, clock);
-    await k.unlock(PASSWORD);
+    await k.importMnemonic(MNEMONIC, PASSWORD);
     k.lock();
     for (let i = 0; i < UNLOCK_ATTEMPTS_BEFORE_BACKOFF; i++) {
       await expect(k.unlock('wrong-password')).rejects.toThrow('Incorrect password.');
     }
     clock.t += 600_000; // wait out the back-off, then open the wallet
     await k.unlock(PASSWORD);
-    expect((await k.revealSeedHex(PASSWORD)).seedHex).toBe(V1_SEED_HEX);
+    expect((await k.revealSeedHex(PASSWORD)).seedHex).toBe(PHRASE_SEED_HEX);
   });
 
   it('a successful seed reveal resets the counter', async () => {
@@ -297,10 +300,10 @@ describe('a seed reveal leaves nothing behind on disk', () => {
   it('the vault blob, metadata and activity hold none of the hex', async () => {
     // Attacker gain: a reveal that wrote the seed anywhere would turn "read
     // chrome.storage" into "spend everything", which is the whole boundary.
-    for (const seedHex of [RAW_SEED_HEX, V1_SEED_HEX]) {
+    for (const seedHex of [RAW_SEED_HEX, PHRASE_SEED_HEX]) {
       const store = new MemoryWalletStorage();
       const k =
-        seedHex === RAW_SEED_HEX ? await openRaw32(store) : await openV1(store);
+        seedHex === RAW_SEED_HEX ? await openRaw32(store) : await openBip39(store);
       const revealed = (await k.revealSeedHex(PASSWORD)).seedHex;
       expect(revealed).toBe(seedHex);
 
@@ -325,11 +328,11 @@ describe('a seed reveal leaves nothing behind on disk', () => {
     // the object after the password had been forgotten. Locking and re-opening
     // has to go back through the vault, so a locked wallet has nothing to give.
     const store = new MemoryWalletStorage();
-    const k = await openV1(store);
+    const k = await openBip39(store);
     await k.revealSeedHex(PASSWORD);
     k.lock();
     await expect(k.revealSeedHex(PASSWORD)).rejects.toThrow(/locked/i);
-    expect(JSON.stringify(k)).not.toContain(V1_SEED_HEX);
+    expect(JSON.stringify(k)).not.toContain(PHRASE_SEED_HEX);
   });
 });
 
@@ -342,17 +345,22 @@ describe('status().backup names the one control Settings may render', () => {
     expect(status.canRevealPhrase).toBe(true);
   });
 
-  it('a v1 vault and a raw-seed wallet both say `seed`', async () => {
-    for (const open of [openV1, openRaw32]) {
-      const status = await (await open()).status();
-      expect(status.backup).toBe('hdSeed');
-      expect(status.canRevealPhrase).toBe(false);
-    }
+  it('a raw-seed wallet says `seed`, and it is the only wallet that does', async () => {
+    // Two imports, two answers, and no third one: the control Settings renders
+    // follows from which button the user pressed on the import screen.
+    const raw = await (await openRaw32()).status();
+    expect(raw.backup).toBe('hdSeed');
+    expect(raw.canRevealPhrase).toBe(false);
+    expect(raw.origin).toBe('raw32');
+
+    const fromPhrase = await (await openBip39()).status();
+    expect(fromPhrase.backup).toBe('recoveryPhrase');
+    expect(fromPhrase.origin).toBe('bip39');
   });
 
   it('is null whenever locked, and null with no vault at all', async () => {
     expect((await ring().status()).backup).toBeNull();
-    const k = await openV1();
+    const k = await openRaw32();
     k.lock();
     const locked = await k.status();
     expect(locked.backup).toBeNull();
@@ -379,7 +387,7 @@ describe('status().backup names the one control Settings may render', () => {
     // that renders a control which can only fail.
     const phrase = ring();
     await phrase.importMnemonic(MNEMONIC, PASSWORD);
-    const wallets = [phrase, await openV1(), await openRaw32()];
+    const wallets = [phrase, await openBip39(), await openRaw32()];
     for (const k of wallets) {
       for (const status of [await k.status(), (k.lock(), await k.status())]) {
         expect(status.canRevealPhrase).toBe(status.backup === 'recoveryPhrase');
@@ -394,7 +402,7 @@ describe('status().backup names the one control Settings may render', () => {
     // assertion that keeps a dead control off the screen.
     const phrase = ring();
     await phrase.importMnemonic(MNEMONIC, PASSWORD);
-    for (const k of [phrase, await openV1(), await openRaw32()]) {
+    for (const k of [phrase, await openBip39(), await openRaw32()]) {
       const { backup } = await k.status();
       expect(backup).not.toBeNull();
       if (backup === 'recoveryPhrase') {
@@ -409,10 +417,10 @@ describe('status().backup names the one control Settings may render', () => {
 describe('origin is the payload\'s, never the metadata copy', () => {
   it('a raw-seed wallet stays raw32 after its metadata is re-stamped bip39', async () => {
     // `walletMeta()` falls back to `emptyMeta(…, 'bip39')` when meta is missing,
-    // and the next save writes that fallback down. If Settings read origin from
-    // there, a raw-seed wallet would be told its phrase was merely "sealed
-    // before the wallet could read one back" — and the user would go looking for
-    // twelve words that never existed.
+    // and the next save writes that fallback down. If the status read origin
+    // from there, a raw-seed wallet would be re-stamped as one sealed from a
+    // phrase — and the user would go looking for twelve words that never
+    // existed, or worse, be offered a control to show them.
     const store = new MemoryWalletStorage();
     const k = await openRaw32(store);
     expect((await k.status()).origin).toBe('raw32');
@@ -469,18 +477,25 @@ describe('the popup renders one control, never a dead one', () => {
     expect(SETTINGS).toContain(') : null}');
   });
 
-  it('the seed copy tells each wallet the truth about restoring it', () => {
-    // A raw-32 wallet's seed really does go back in through the import screen;
-    // a phrase-derived one does not, because that screen takes 32 bytes. One
-    // sentence covering both would be half wrong for each.
+  it('the seed copy promises the round trip that branch can actually deliver', () => {
+    // One kind of wallet reaches this branch — a raw-32 import — and its seed
+    // really does go back in through the import screen. The copy may promise
+    // that and nothing vaguer: no wallet here is being consoled for a phrase
+    // it cannot show, because no such wallet opens on this build.
     const seedBranch = SETTINGS.slice(SETTINGS.indexOf("backup === 'hdSeed'"));
-    expect(seedBranch).toContain("wallet.status?.origin === 'raw32'");
+    // The one reason a wallet has no phrase, rendered from the one string that
+    // states it — kept identical to the worker's own refusal by
+    // `tests/security/keyring-reveal.test.ts`.
+    expect(seedBranch).toContain('{noPhraseReason}');
+    expect(SETTINGS).toContain('raw 32-byte seed');
     expect(seedBranch).toContain('restores this wallet exactly');
-    expect(seedBranch).toContain('64 bytes');
+    expect(seedBranch).toContain('Raw seed');
     // And it never invites the phrase back in, which is the phishing script.
     expect(seedBranch.toLowerCase()).not.toContain('paste your');
     expect(seedBranch.toLowerCase()).not.toContain('enter your phrase');
-    expect(seedBranch).toContain('trying to steal it');
+    // Nor does it describe the state this build deleted.
+    expect(seedBranch).not.toContain('sealed before');
+    expect(seedBranch).not.toContain('older build');
   });
 
   it('neither reveal screen offers a clipboard button', () => {

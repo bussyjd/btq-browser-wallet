@@ -63,7 +63,8 @@ src/core/       pure, browser-safe: no Buffer, no node:, no chrome.*, no fetch
   tx/           serialize · parse (raw-tx decoder) · sighash (BIP341 tapscript)
                 fee (scale-16, dust) · coinselect · builder
   vault/        encrypt.ts (PBKDF2-SHA256 600k + AES-256-GCM)
-                payload.ts (v1; v2 seals the BIP39 entropy beside the HD seed)
+                payload.ts (one version, 2: seals the BIP39 entropy beside the
+                HD seed; a pre-2 payload is refused with VAULT_TOO_OLD)
   wallet/       keyring.ts (the state machine) derive gap storage destination format errors
   explorer/     parse · schema · utxo · history · broadcast (no I/O — pure parsers)
   connect/      permissions.ts (the per-origin allowlist)
@@ -85,7 +86,7 @@ src/ui/         React popup: App.tsx router, hooks/useWallet.ts, components/, sc
                 one would paint a legible phrase into a committed recording
 ```
 
-**Trust boundary:** the HD seed, and the BIP39 entropy a v2 vault seals beside it, exist
+**Trust boundary:** the HD seed, and the BIP39 entropy the vault seals beside it, exist
 only inside the service worker and only while unlocked. Content scripts and pages get a
 narrow allowlisted message API and no phrase or key material at all. The popup gets the
 words from exactly two methods, `wallet.create` and `wallet.revealPhrase`, and nothing
@@ -132,12 +133,15 @@ make a test pass** — a diff there means addresses or signatures changed.
 - **Reveal:** Settings → Security shows the phrase again on an unlocked wallet, and only
   after the password is re-typed against the sealed vault, sharing the unlock back-off in
   both directions. The words are regenerated from the sealed entropy per call, verified to
-  re-derive that vault's `hdSeedHex`, and never cached; a raw-seed or v1 vault answers
-  `NO_PHRASE` instead of inventing any. No copy button — not there, not anywhere.
+  re-derive that vault's `hdSeedHex`, and never cached; a raw-seed wallet answers
+  `NO_PHRASE` instead of inventing any, and is offered its HD seed instead — one control
+  or the other, never a disabled one. No copy button — not there, not anywhere.
 - **Import:** BIP39 mnemonic *and* raw 32-byte btq-core HD seed; validates checksum;
   rejects a bad seed with a clear message. A raw-seed wallet has no phrase, for good: the
   words are not recoverable from an HD seed, and pretending otherwise would hand the user
-  a phrase that restores a different wallet.
+  a phrase that restores a different wallet. Those two buttons are the *whole* taxonomy —
+  phrase wallets show their phrase, raw-seed wallets show their seed hex, and there is no
+  third kind of wallet to explain.
 - **Receive:** derived address, QR, copy, gap-limit scan so a restored wallet finds
   used addresses.
 - **Send:** UTXOs from the explorer, coin selection, scale-16 fee, sighash, sign,

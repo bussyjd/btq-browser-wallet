@@ -92,11 +92,17 @@ The popup⇄worker RPC surface is `wallet.*`; pages reach only `page.requestAcco
 
 **Phrase material crosses the worker boundary on exactly two methods** — `wallet.create`
 (onboarding) and `wallet.revealPhrase` (Settings → Security, on an unlocked wallet, after
-the password is re-typed against the sealed vault, sharing the unlock back-off). A v2
-vault seals the BIP39 entropy next to `hdSeedHex`; the words are regenerated per call,
-checked to re-derive that seed, and never cached — a raw-seed or v1 vault answers
-`NO_PHRASE` rather than invent any. A third such method would be a design change, not a
-convenience: keep the count at two.
+the password is re-typed against the sealed vault, sharing the unlock back-off). The vault
+seals the BIP39 entropy next to `hdSeedHex`; the words are regenerated per call, checked
+to re-derive that seed, and never cached — a raw-seed wallet answers `NO_PHRASE` rather
+than invent any, and is offered its HD seed instead. A third such method would be a design
+change, not a convenience: keep the count at two.
+
+**One vault payload version**, `2`, and the number never goes back to 1: a payload from
+the pre-2 development build is refused with `VAULT_TOO_OLD` and its own copy, after the
+password has opened the ciphertext and only once the payload is recognisably ours and
+intact. Corrupt or foreign bytes stay `NOT_A_VAULT`. There is no wallet this build opens
+that cannot show its own backup.
 
 **Connect lifecycle.** An unapproved origin's `page.requestAccounts` is *held*: the broker
 (`src/background/connect.ts`) parks `sendResponse` in a map keyed by canonical origin, each

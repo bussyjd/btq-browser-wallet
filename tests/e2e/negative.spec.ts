@@ -28,7 +28,7 @@ import { toHex } from './fixtures/bip341.js';
 import { decodeRaw } from './fixtures/tx-decode.js';
 import { verifyTransaction } from './fixtures/mock-node.js';
 import { scriptHexFor } from './fixtures/btq-address.js';
-import { SEED_HEX, expectRedacted } from './fixtures/redact.js';
+import { SEED_HEX, SEED_WORDS, expectRedacted } from './fixtures/redact.js';
 import { sealV1 } from '../helpers/v1-vault.js';
 import { addressFromHdSeed } from '../../src/core/wallet/derive.js';
 import { mnemonicToEntropy, mnemonicToHdSeed } from '../../src/core/crypto/mnemonic.js';
@@ -40,9 +40,10 @@ const MNEMONIC = 'zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo wrong';
 const PASSWORD = 'negative-pass-1';
 const NODE_USER = 'smoke';
 const NODE_PASSWORD = 'smoke-pass';
-/** The wallets with no phrase to show: one raw-32 import, one pre-reveal vault. */
+/** The one wallet with no phrase to show: a raw-32 import. */
 const RAW_SEED_HEX = 'a1'.repeat(32);
 const RAW_SEED_PASSWORD = 'raw-seed-pass';
+/** And the one vault this build will not open: the format the pre-2 build wrote. */
 const V1_MNEMONIC = 'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about';
 const V1_PASSWORD = 'v1-vault-pass';
 /** A valid testnet payee: the golden vector's own address. */
@@ -425,19 +426,20 @@ test('a raw-seed wallet is offered its seed, not a dead phrase button', async ()
   }
 });
 
-test('a vault sealed before the reveal existed is offered its seed too', async () => {
-  // The wallet in the bug report: a v1 vault, sealed by a build that stored no
-  // BIP39 entropy. `mnemonicToHdSeed` is one-way, so those words cannot be
-  // recovered by any amount of unlocking — and there is no in-place upgrade,
-  // because the only thing that could seal one is the phrase, and asking the
-  // user to paste their phrase "so we can upgrade the vault" is the phishing
-  // script. What the vault *can* still show is the seed itself.
+test('a vault from an older build says so at unlock, and offers the way out', async () => {
+  // Not a hypothetical: this format was written by this project's own builds
+  // yesterday. Nothing shipped, so the only blobs like it are development
+  // leftovers — but "your wallet is unreadable" and "your wallet is corrupt"
+  // are different sentences to the person reading them, and this is the one
+  // that has to appear. The password is correct throughout: what the wallet
+  // must not do is blame it, or blame the bytes.
   test.setTimeout(180_000);
   const v1 = await launchDevice({ name: 'device-v1-vault', explorerBase: backend.origin });
   try {
     // Built by the same helper the unit tests use, so the bytes under test are
-    // the bytes a pre-reveal build actually wrote — and sealed at the shipped
-    // iteration count, so the real extension opens it the way a user's does.
+    // the bytes a pre-2 build actually wrote — and sealed at the shipped
+    // iteration count, so the real extension opens the envelope the way a
+    // user's would before it refuses what is inside.
     const written: { vault?: string; meta?: unknown } = {};
     await sealV1(
       {
@@ -461,46 +463,53 @@ test('a vault sealed before the reveal existed is offered its seed too', async (
     );
 
     const page = await v1.popup();
+    // A sealed vault looks like any other from outside — the version is inside
+    // the ciphertext, so nothing is said until the password has been proved.
+    await expect(page.getByTestId('unlock-pw')).toBeVisible();
+    await expect(page.getByTestId('unlock-too-old')).toHaveCount(0);
+
     await unlock(page, V1_PASSWORD);
+
+    const notice = page.getByTestId('unlock-too-old');
+    await expect(notice).toBeVisible({ timeout: 30_000 });
+    await expect(notice).toContainText('older build');
+    await expect(notice).toContainText('import your recovery phrase');
+    // It is not reported as damage, and it is not reported as a bad password.
+    await expect(notice).not.toContainText('Not a BTQ vault');
+    await expect(notice).not.toContainText('Incorrect password');
+    await expect(page.getByTestId('error')).toHaveCount(0);
+    // No wallet was opened by the attempt, and nothing offers a phrase.
+    await expect(page.getByTestId('balance')).toHaveCount(0);
+    await expect(page.getByTestId('seed-word-1')).toHaveCount(0);
+    await expect(page.getByTestId('reveal-phrase')).toHaveCount(0);
+    await expect(page.getByTestId('reveal-seed')).toHaveCount(0);
+    // Nothing invites the phrase back in to "upgrade" anything, and no field
+    // to type it into is on this screen.
+    await expect(page.getByTestId('import-text')).toHaveCount(0);
+    // The vault is still on the device: refusing to read it is not deleting it.
+    const stored = await v1.storage();
+    expect(stored.vault).toBe(written.vault);
+
+    // The route the message names is on the same screen, behind DELETE.
+    await page.getByTestId('wipe-input').fill('DELETE');
+    await page.getByTestId('wipe-confirm').click();
+    await expect(page.getByTestId('welcome-import')).toBeVisible({ timeout: 30_000 });
+    expect((await v1.storage()).vault).toBeUndefined();
+
+    // And the phrase behind that old vault opens a wallet that works — and one
+    // that can show its own words again.
+    await importMnemonic(page, V1_MNEMONIC, V1_PASSWORD);
     await expect(page.getByTestId('balance')).toBeVisible({ timeout: 30_000 });
     await waitForScan(page);
-
     await openSettings(page);
-    await expect(page.getByTestId('reveal-phrase')).toHaveCount(0);
-    await expect(page.getByTestId('reveal-seed')).toBeEnabled();
-    const security = page.getByTestId('reveal-seed').locator('xpath=..');
-    await expect(security).toContainText('The phrase you wrote down still restores it');
-    // The honest path is named, and the phishing one is named as phishing. What
-    // is never offered is a field to type the phrase back into.
-    await expect(security).toContainText('trying to steal it');
-    await expect(page.getByTestId('import-text')).toHaveCount(0);
-
-    await page.getByTestId('reveal-seed').click();
-    await page.getByTestId('reveal-seed-pw').fill(V1_PASSWORD);
-    await page.getByTestId('reveal-seed-submit').click();
-    await expect(page.getByTestId('seed-hex')).toBeVisible();
-    await expectRedacted(page, SEED_HEX, 1);
-    const shown = ((await page.getByTestId('seed-hex').textContent()) ?? '').trim();
-    // The seed the user's own written-down phrase produces — 64 bytes of it.
-    expect(shown).toBe(toHex(mnemonicToHdSeed(V1_MNEMONIC)));
-    expect(shown).toHaveLength(128);
-    await expect(page.getByTestId('seed-word-1')).toHaveCount(0);
-
-    const storage = JSON.stringify(await v1.storage()).toLowerCase();
-    expect(storage).not.toContain(shown);
-    expect(storage).not.toContain(V1_MNEMONIC);
-    expect(storage).not.toContain(V1_PASSWORD);
-
-    // And the worker still refuses the phrase, in the same words the screen used.
-    const refused: { threw: boolean; message: string } = await v1
-      .rpc(page, 'wallet.revealPhrase', { password: V1_PASSWORD })
-      .then(
-        () => ({ threw: false, message: 'wallet.revealPhrase invented a phrase for a v1 vault' }),
-        (e: Error) => ({ threw: true, message: e.message }),
-      );
-    expect(refused.threw, refused.message).toBe(true);
-    expect(refused.message).toContain('NO_PHRASE');
-    expect(refused.message).toContain('sealed before');
+    await expect(page.getByTestId('reveal-seed')).toHaveCount(0);
+    await expect(page.getByTestId('reveal-phrase')).toBeEnabled();
+    await page.getByTestId('reveal-phrase').click();
+    await page.getByTestId('reveal-pw').fill(V1_PASSWORD);
+    await page.getByTestId('reveal-submit').click();
+    await expect(page.getByTestId('seed-word-1')).toBeVisible();
+    await expectRedacted(page, SEED_WORDS, 12);
+    await expect(page.getByTestId('seed-hex')).toHaveCount(0);
   } finally {
     await v1.close();
   }

@@ -30,9 +30,9 @@ export interface WalletStatus {
   lastScanAt?: number | null;
   /**
    * Which backup control Settings renders: the recovery phrase for a vault
-   * sealed from one, the HD seed for a wallet that has none (a raw-32 import,
-   * or a vault sealed before the reveal existed), and `null` for "render no
-   * control at all" — locked, or no vault.
+   * sealed from one, the HD seed for the wallet that has none — a raw-32
+   * import — and `null` for "render no control at all", which is locked or no
+   * vault.
    *
    * Optional, and absent means *unknown*, not "seed": an older worker omits
    * this field and has no `wallet.revealSeedHex` to call, so the UI falls back

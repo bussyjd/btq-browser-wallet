@@ -6,10 +6,10 @@
  * password. Two carry *phrase* material: `wallet.create`, the reveal during
  * onboarding, and `wallet.revealPhrase`, which re-shows the words for an
  * already-unlocked vault after the password is re-typed. The third,
- * `wallet.revealSeedHex`, carries the HD seed as hex — the backup for the
- * wallets that have no phrase to show (a raw-32 import, and a v1 vault whose
- * entropy is gone). It exists so Settings never has to render a control that
- * cannot do anything; it is offered instead of the phrase, never as well.
+ * `wallet.revealSeedHex`, carries the HD seed as hex — the backup for the one
+ * wallet that has no phrase to show, a raw-32 import. It exists so Settings
+ * never has to render a control that cannot do anything; it is offered instead
+ * of the phrase, never as well.
  *
  * There is still deliberately no `export*` method: the wallet writes neither
  * the seed nor the phrase to a file, a download or the clipboard. `reveal`

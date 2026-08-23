@@ -114,9 +114,9 @@ behind a second deliberate step: the button, then a warning, then your password,
 now** both take the grid off the screen. There is no copy button, and there never will be
 — a phrase on the clipboard is readable by everything else on the machine and outlives
 the screen that showed it. A wallet imported from a raw 32-byte seed has no phrase to
-show and says so instead of inventing one; so does a vault sealed before this existed.
-This is not the wallet giving anything away that the password did not already open
-([`SECURITY.md`](SECURITY.md) argues the trade in full).
+show, says so instead of inventing one, and is offered that seed hex instead — one control
+or the other, and never a disabled one. This is not the wallet giving anything away that
+the password did not already open ([`SECURITY.md`](SECURITY.md) argues the trade in full).
 
 ## Broadcast: the truth
 
@@ -212,8 +212,8 @@ reason and CI never notices it.
 |---|---|---|
 | `tests/unit/` | always | Derivation, P2MR scripts, bech32m, BIP341 sighash (a frozen digest plus nine mutations), scale-16 weight/vsize/fee/dust, the explorer parsers against recorded live bodies, and a real on-chain transaction rebuilt byte-for-byte |
 | `tests/vectors/` | always | `golden.json`, the frozen contract with consensus — addresses, scripts and tapleaf hashes cannot drift unnoticed |
-| `tests/security/` | always | The paths that leak secrets or move funds: the vault ciphertext holds no seed, no entropy and no words, a wrong password (with back-off) opens nothing, a locked wallet cannot sign, derive or show a phrase, the phrase reveal needs the password and shares that back-off in both directions, a raw-seed or pre-v2 vault refuses instead of inventing words, a page cannot reach `wallet.*` or storage, a foreign leaf script is refused, a hostile explorer cannot inject an amount or a script into the signing path, plus the connect state machine and the RPC contract |
-| `tests/e2e/` | `npm run test:e2e` | The extension as shipped: create → receive → lock/unlock → reveal the phrase behind the password → fund → node → send → restore on a second profile, site-connect approve/scope/revoke, and the negative cases — wrong password, refused destinations, a broken explorer, a node that rejects, a raw-seed wallet that has no phrase. The mock node re-verifies the signature and the sighash independently |
+| `tests/security/` | always | The paths that leak secrets or move funds: the vault ciphertext holds no seed, no entropy and no words, a wrong password (with back-off) opens nothing, a locked wallet cannot sign, derive or show a phrase, the phrase reveal needs the password and shares that back-off in both directions, a raw-seed wallet refuses instead of inventing words, a vault from the pre-2 build is refused by name rather than as corruption, a page cannot reach `wallet.*` or storage, a foreign leaf script is refused, a hostile explorer cannot inject an amount or a script into the signing path, plus the connect state machine and the RPC contract |
+| `tests/e2e/` | `npm run test:e2e` | The extension as shipped: create → receive → lock/unlock → reveal the phrase behind the password → fund → node → send → restore on a second profile, site-connect approve/scope/revoke, and the negative cases — wrong password, refused destinations, a broken explorer, a node that rejects, a raw-seed wallet that has no phrase, a vault from an older build that is refused by name and can be removed from that same screen. The mock node re-verifies the signature and the sighash independently |
 | `tests/integration/` | `BTQ_REGTEST=1` | btq-core itself: the node echoes our address, `scriptPubKey` and merkle root byte-for-byte, and `testmempoolaccept` accepts a transaction we signed (its real interpreter ran `OP_CHECKSIGDILITHIUM`) and rejects one signed over a tampered digest |
 
 [`tests/e2e/README.md`](tests/e2e/README.md) says exactly what is mocked, what each hostile

@@ -8,7 +8,6 @@ import { loadBackend, saveBackend } from '../../src/background/backend-store.js'
 import { Keyring } from '../../src/core/wallet/keyring.js';
 import { emptyMeta, parseActivity, parseMeta } from '../../src/core/wallet/storage.js';
 import { mnemonicToEntropy, mnemonicToHdSeed } from '../../src/core/crypto/mnemonic.js';
-import { encodePayload } from '../../src/core/vault/payload.js';
 import { encryptVault } from '../../src/core/vault/encrypt.js';
 import { bytesToHex } from '../../src/core/util/hex.js';
 import { FakeChrome, uninstallChrome } from '../helpers/fake-chrome.js';
@@ -133,32 +132,39 @@ describe('persisted extension storage', () => {
     expect((await restarted.receiveAddress()).address).toBe(before.address);
   });
 
-  it('a genuine v1 vault record opens, derives the right address, and shows no phrase', async () => {
+  it('a genuine v1 vault record is refused as too old, through the real storage class', async () => {
     // The test above writes a *current-build* vault, so it cannot notice a
-    // decoder that stopped accepting v1. This one writes the bytes a
-    // pre-reveal build actually produced: v1, no entropy field at all.
+    // decoder that quietly accepted an old one. This one writes the bytes the
+    // pre-2 build actually produced — v1, no entropy field at all — into the
+    // same `chrome.storage.local` the extension reads, and the refusal has to
+    // survive the whole round trip rather than only the in-memory one.
     const storage = new ChromeWalletStorage();
-    const plain = encodePayload({
-      v: 1,
-      network: 'testnet',
-      origin: 'bip39',
-      hdSeedHex: bytesToHex(mnemonicToHdSeed(MNEMONIC)),
-    });
+    const plain = new TextEncoder().encode(
+      JSON.stringify({
+        v: 1,
+        network: 'testnet',
+        origin: 'bip39',
+        hdSeedHex: bytesToHex(mnemonicToHdSeed(MNEMONIC)),
+      }),
+    );
     await storage.saveVault(await encryptVault(plain, PASSWORD, TEST_ENCRYPT));
     await storage.saveMeta(emptyMeta('testnet', 'bip39'));
 
     const keyring = new Keyring(new ChromeWalletStorage(), { encrypt: TEST_ENCRYPT, network: 'testnet' });
-    await keyring.unlock(PASSWORD);
-    const reference = new Keyring(new ChromeWalletStorage(), { encrypt: TEST_ENCRYPT, network: 'testnet' });
-    expect((await keyring.receiveAddress()).address).toMatch(/^tbtq1z/);
-    expect((await keyring.status()).canRevealPhrase).toBe(false);
-    await expect(keyring.revealPhrase(PASSWORD)).rejects.toMatchObject({ code: 'NO_PHRASE' });
-    // …and the address is the one this mnemonic derives, not merely some address.
+    await expect(keyring.unlock(PASSWORD)).rejects.toMatchObject({ code: 'VAULT_TOO_OLD' });
+    expect((await keyring.status()).unlocked).toBe(false);
+    await expect(keyring.receiveAddress()).rejects.toThrow(/locked/i);
+    // Nothing was destroyed on the way past: the record is still in storage for
+    // the user to remove deliberately, and it is still the old one.
+    expect(await new ChromeWalletStorage().loadVault()).not.toBeNull();
+
+    // Once removed, the phrase behind it imports into a wallet that works — the
+    // route the refusal actually names.
     await storage.clear();
+    const reference = new Keyring(new ChromeWalletStorage(), { encrypt: TEST_ENCRYPT, network: 'testnet' });
     await reference.importMnemonic(MNEMONIC, PASSWORD);
-    expect((await reference.receiveAddress()).address).toBe(
-      (await keyring.receiveAddress()).address,
-    );
+    expect((await reference.receiveAddress()).address).toMatch(/^tbtq1z/);
+    expect((await reference.status()).canRevealPhrase).toBe(true);
   });
 });
 

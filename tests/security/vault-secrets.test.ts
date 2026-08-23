@@ -11,12 +11,15 @@ const PASSWORD = 'correct horse battery';
 describe('vault ciphertext does not leak secrets', () => {
   it('encrypted blob does not contain the HD seed bytes or mnemonic words in order', async () => {
     // Attacker gain: reading chrome.storage.local would recover the seed.
+    // Sealed exactly as the wallet seals one — one payload version, entropy
+    // beside the seed — so the scan is over the bytes a real vault holds.
     const hdSeed = mnemonicToHdSeed(MNEMONIC);
     const plain = encodePayload({
-      v: 1,
+      v: 2,
       network: 'testnet',
       origin: 'bip39',
       hdSeedHex: bytesToHex(hdSeed),
+      entropyHex: bytesToHex(mnemonicToEntropy(MNEMONIC)),
     });
     const blob = await encryptVault(plain, PASSWORD, { iterations: 1_000 });
     const asLatin = new TextDecoder('latin1').decode(blob);
@@ -26,7 +29,7 @@ describe('vault ciphertext does not leak secrets', () => {
     expect(DEFAULT_PBKDF2_ITERATIONS).toBeGreaterThanOrEqual(210_000);
   });
 
-  it('a v2 blob hides the BIP39 entropy as thoroughly as the seed', async () => {
+  it('the blob hides the BIP39 entropy as thoroughly as the seed', async () => {
     // Attacker gain: the entropy is the phrase's preimage — sixteen bytes that
     // regenerate all twelve words. It is sealed in the same ciphertext as the
     // HD seed, and reading storage must recover neither.
@@ -66,7 +69,7 @@ describe('vault ciphertext does not leak secrets', () => {
   });
 
   it('round-trips and never returns a mutated original plaintext buffer', async () => {
-    const plain = new TextEncoder().encode('{"v":1}');
+    const plain = new TextEncoder().encode('{"v":2}');
     const copy = new Uint8Array(plain);
     const blob = await encryptVault(plain, PASSWORD, { iterations: 1_000 });
     const out = await decryptVault(blob, PASSWORD);

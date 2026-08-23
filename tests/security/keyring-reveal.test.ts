@@ -12,10 +12,12 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { Keyring, UNLOCK_ATTEMPTS_BEFORE_BACKOFF, noPhraseMessage } from '../../src/core/wallet/keyring.js';
+import { Keyring, UNLOCK_ATTEMPTS_BEFORE_BACKOFF, NO_PHRASE_MESSAGE } from '../../src/core/wallet/keyring.js';
 import { WalletError } from '../../src/core/wallet/errors.js';
 import { addressFromHdSeed } from '../../src/core/wallet/derive.js';
 import { generateMnemonic, mnemonicToHdSeed } from '../../src/core/crypto/mnemonic.js';
+import { bytesToHex } from '../../src/core/util/hex.js';
+import { OLD_VAULT_MESSAGE } from '../../src/core/vault/payload.js';
 import { MemoryWalletStorage, TEST_ENCRYPT } from '../helpers/memory-store.js';
 import { sealV1 as buildV1Vault } from '../helpers/v1-vault.js';
 
@@ -31,7 +33,7 @@ function ring(store = new MemoryWalletStorage(), clock?: { t: number }) {
   });
 }
 
-/** The pre-reveal vault, built in `tests/helpers/v1-vault.ts` and nowhere else. */
+/** The pre-2 vault, built in `tests/helpers/v1-vault.ts` and nowhere else. */
 async function sealV1(store: MemoryWalletStorage, mnemonic: string): Promise<void> {
   await buildV1Vault(store, mnemonic, PASSWORD);
 }
@@ -215,34 +217,80 @@ describe('wallets that have no phrase say so, and never invent one', () => {
     await expect(k.revealPhrase('not-the-password')).rejects.toMatchObject({ code: 'WRONG_PASSWORD' });
   });
 
-  it('a v1 vault refuses with NO_PHRASE — there is no in-place upgrade', async () => {
-    // PBKDF2 is one-way and generateMnemonic discarded the entropy, so no
-    // re-seal and no lazy fill-in at unlock can recover it. The only honest
-    // path is a user-initiated wipe and re-import; asking the user to paste
-    // their phrase "so we can upgrade the vault" is the phishing script.
+  it('the raw-seed refusal is the only one — nothing else can reach NO_PHRASE', async () => {
+    // The decoder holds `origin === 'bip39'` and "carries entropy" together, so
+    // a wallet that says it came from a phrase can always produce one. That is
+    // why this refusal has a single sentence and not a table of them.
+    expect(NO_PHRASE_MESSAGE).toContain('raw 32-byte seed');
+    const k = ring();
+    await k.importMnemonic(MNEMONIC, PASSWORD);
+    expect((await k.revealPhrase(PASSWORD)).words.join(' ')).toBe(MNEMONIC);
+  });
+});
+
+describe('a vault from the older build is refused, not opened', () => {
+  it('unlock fails with VAULT_TOO_OLD and the actionable message', async () => {
+    // The bytes the pre-2 build wrote, sealed with the same envelope and the
+    // same KDF. The password is right — decryption succeeds — and what fails is
+    // the payload version, so the error must not read as a wrong password or as
+    // a corrupt vault. Both would send the user looking for the wrong problem.
     const store = new MemoryWalletStorage();
     await sealV1(store, MNEMONIC);
     const k = ring(store);
-    await k.unlock(PASSWORD);
     try {
-      await k.revealPhrase(PASSWORD);
+      await k.unlock(PASSWORD);
       throw new Error('should have thrown');
     } catch (e) {
-      expect((e as WalletError).code).toBe('NO_PHRASE');
-      expect((e as WalletError).message).toContain('sealed before');
+      expect((e as WalletError).code).toBe('VAULT_TOO_OLD');
+      expect((e as WalletError).message).toBe(OLD_VAULT_MESSAGE);
+      expect((e as WalletError).message).not.toBe('Not a BTQ vault.');
+      expect((e as WalletError).message).not.toContain('assword');
       expect((e as WalletError).message).not.toContain('abandon');
     }
   });
 
-  it('a v1 vault still unlocks and derives the right address', async () => {
-    // The migration is "the reveal refuses", not "old vaults are corrupt".
+  it('no wallet is opened by the attempt, and no key material is kept', async () => {
     const store = new MemoryWalletStorage();
     await sealV1(store, MNEMONIC);
     const k = ring(store);
-    await k.unlock(PASSWORD);
+    await expect(k.unlock(PASSWORD)).rejects.toMatchObject({ code: 'VAULT_TOO_OLD' });
+    const status = await k.status();
+    expect(status.unlocked).toBe(false);
+    expect(status.hasVault).toBe(true);
+    expect(status.backup).toBeNull();
+    await expect(k.receiveAddress()).rejects.toThrow(/locked/i);
+    await expect(k.revealPhrase(PASSWORD)).rejects.toThrow(/locked/i);
+    await expect(k.revealSeedHex(PASSWORD)).rejects.toThrow(/locked/i);
+    expect(JSON.stringify(k)).not.toContain(bytesToHex(mnemonicToHdSeed(MNEMONIC)));
+  });
+
+  it('the refusal deletes nothing — removing the wallet stays the user\'s decision', async () => {
+    // A build that quietly wiped what it could not read would destroy a wallet
+    // whose owner had not yet found their phrase. The blob is still there after
+    // the refusal, byte for byte.
+    const store = new MemoryWalletStorage();
+    await sealV1(store, MNEMONIC);
+    const before = new Uint8Array((await store.loadVault())!);
+    const k = ring(store);
+    await expect(k.unlock(PASSWORD)).rejects.toMatchObject({ code: 'VAULT_TOO_OLD' });
+    expect(await store.loadVault()).toEqual(before);
+    // And the way out is the one the message names, on a device the user cleared.
+    await k.wipe('DELETE');
+    expect(await store.loadVault()).toBeNull();
+    const fresh = ring(store);
+    await fresh.importMnemonic(MNEMONIC, PASSWORD);
     const expected = addressFromHdSeed(mnemonicToHdSeed(MNEMONIC), 'external', 0, 'testnet');
-    expect((await k.receiveAddress()).address).toBe(expected.address);
-    expect((await k.status()).unlocked).toBe(true);
+    expect((await fresh.receiveAddress()).address).toBe(expected.address);
+    expect((await fresh.revealPhrase(PASSWORD)).words.join(' ')).toBe(MNEMONIC);
+  });
+
+  it('a wrong password on an old vault is still just a wrong password', async () => {
+    // The version is inside the ciphertext, so it cannot be reported before the
+    // password is proved: VAULT_TOO_OLD must never become an unlock oracle.
+    const store = new MemoryWalletStorage();
+    await sealV1(store, MNEMONIC);
+    const k = ring(store);
+    await expect(k.unlock('not-the-password')).rejects.toMatchObject({ code: 'WRONG_PASSWORD' });
   });
 });
 
@@ -290,16 +338,13 @@ describe('canRevealPhrase is a UI affordance that never over-promises', () => {
     expect((await k.status()).canRevealPhrase).toBe(false);
   });
 
-  it('is false for a raw-seed wallet and for a v1 vault', async () => {
+  it('is false for a raw-seed wallet, which is the only wallet without a phrase', async () => {
     const raw = ring();
     await raw.importSeed(RAW_SEED_HEX, PASSWORD);
-    expect((await raw.status()).canRevealPhrase).toBe(false);
-
-    const store = new MemoryWalletStorage();
-    await sealV1(store, MNEMONIC);
-    const old = ring(store);
-    await old.unlock(PASSWORD);
-    expect((await old.status()).canRevealPhrase).toBe(false);
+    const status = await raw.status();
+    expect(status.canRevealPhrase).toBe(false);
+    expect(status.backup).toBe('hdSeed');
+    expect(status.origin).toBe('raw32');
   });
 });
 
@@ -333,15 +378,24 @@ describe('a reveal leaves nothing behind on disk', () => {
 describe('the popup and the worker refuse in the same words', () => {
   it('Settings renders the worker\'s own no-phrase copy verbatim', () => {
     // The popup cannot import the keyring (source-boundary.test.ts), so the
-    // disabled-button explanation is a second copy of these two sentences.
+    // explanation beside the seed control is a second copy of this sentence.
     // Without this, the two drift and a raw-seed wallet is told one thing on
     // screen and another by the error it would get.
     const settings = readFileSync(
       join(dirname(fileURLToPath(import.meta.url)), '../../src/ui/screens/Settings.tsx'),
       'utf8',
     );
-    expect(settings).toContain(noPhraseMessage('raw32'));
-    expect(settings).toContain(noPhraseMessage('bip39'));
-    expect(noPhraseMessage('raw32')).not.toBe(noPhraseMessage('bip39'));
+    expect(settings).toContain(NO_PHRASE_MESSAGE);
+  });
+
+  it('the popup never describes a wallet that cannot show its phrase', () => {
+    // The third state, gone from the screen as well as from the decoder: there
+    // is no vault this build opens that has to be told its words are lost.
+    const settings = readFileSync(
+      join(dirname(fileURLToPath(import.meta.url)), '../../src/ui/screens/Settings.tsx'),
+      'utf8',
+    );
+    expect(settings).not.toContain('sealed before');
+    expect(settings).not.toMatch(/cannot produce it/);
   });
 });

@@ -30,6 +30,9 @@ const REQUIRED = [
   'import-submit',
   'unlock-pw',
   'unlock-submit',
+  // The vault this build cannot read: a screen of its own, not an error under
+  // the password field, because the password was right.
+  'unlock-too-old',
   'balance',
   'receive-address',
   'receive-path',

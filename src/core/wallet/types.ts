@@ -10,10 +10,12 @@ export interface AccountSummary {
 
 /**
  * The one backup this wallet can put on screen — and therefore the one control
- * Settings renders. A wallet sealed from a phrase can show the phrase; a raw-32
- * import and a v1 vault have no phrase to show but do have the HD seed, which
- * restores them just as completely. There is no third state and no "neither":
- * an unlocked vault always has exactly one of these to offer.
+ * Settings renders. It follows from the two buttons on the import screen and
+ * nothing else: a wallet sealed from a phrase shows the phrase; a wallet
+ * imported from a raw 32-byte seed has no phrase and shows that seed, which
+ * restores it just as completely. There is no third state and no "neither":
+ * an unlocked vault always has exactly one of these to offer, and neither is
+ * ever rendered as a control that cannot do anything.
  *
  * The names are not the two obvious ones. `phrase` and `seed` are both words in
  * the BIP39 list, and `tests/security/rpc.test.ts` checks every non-reveal

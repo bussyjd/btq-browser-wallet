@@ -34,8 +34,8 @@ protocol constant from memory — cite the reference.
   - reachable by a page — `wallet.*` on the relay allowlist, or a `page.*` alias for it;
   - the phrase cached anywhere: on the keyring, in a module variable, in `useWallet`
     state, in storage, in a log line, in an error message, or surviving lock;
-  - words manufactured for a wallet that has none — a raw-32-byte-seed import or a v1
-    vault must answer `NO_PHRASE`, never run words back out of an HD seed;
+  - words manufactured for a wallet that has none — a raw-32-byte-seed import must answer
+    `NO_PHRASE`, never run words back out of an HD seed;
   - words returned that do not re-derive this vault's own `hdSeedHex` (a phrase restoring a
     *different* wallet is worse than no phrase at all);
   - a copy button anywhere near a phrase — the clipboard is readable by everything else on
