@@ -52,17 +52,19 @@ export function Home({
             </span>
             {firstScan ? null : <span className="balance-unit">tBTQ</span>}
           </p>
+          {/* How fresh the number above is, and what it was measured against —
+              which is what someone looking at a balance actually wants. The
+              per-chain address counts this used to show are wallet internals;
+              they live in Settings, not over the balance. */}
           <p className="small mt-8">
             {scanning ? (
               <>
                 <span className="spinner" aria-hidden="true" /> Scanning the explorer…
               </>
-            ) : status && status.usedExternal + status.usedInternal > 0 ? (
-              `${status.usedExternal} receive · ${status.usedInternal} change addresses in use`
             ) : status?.lastScanAt ? (
-              `Checked ${relativeTime(status.lastScanAt)}`
+              `Checked ${relativeTime(status.lastScanAt)}${tipHeight !== null ? ` · block ${tipHeight}` : ''}`
             ) : (
-              'No addresses used yet.'
+              'Not checked yet.'
             )}
           </p>
           {waiting !== null && waiting > 0n ? (
@@ -71,7 +73,6 @@ export function Home({
               a block
             </p>
           ) : null}
-          {tipHeight !== null ? <p className="hint">Explorer tip {tipHeight}</p> : null}
           {syncError ? (
             <>
               <InlineError message={syncError} testId="sync-error" />

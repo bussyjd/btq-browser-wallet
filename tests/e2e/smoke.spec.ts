@@ -163,6 +163,11 @@ test('receive: the address on screen is the one the seed derives', async () => {
   for (let y = 0; y < qr.size; y++) {
     for (let x = 0; x < qr.size; x++) if (qr.data[y]?.[x]) expectedCells.push(`${x},${y}`);
   }
+  // Collapsed by default: the address is the thing people use, the QR is asked
+  // for. Assert that, then open it — a QR that renders only after a click is
+  // still a QR that has to be correct.
+  await expect(popup.getByTestId('receive-qr')).toHaveCount(0);
+  await popup.getByTestId('toggle-qr').click();
   await expect(popup.getByTestId('receive-qr')).toBeVisible();
   await expect(popup.getByTestId('receive-qr')).toHaveAttribute('viewBox', `0 0 ${qr.size} ${qr.size}`);
   expect(await qrCells(popup, 'receive-qr')).toBe(expectedCells.join(' '));

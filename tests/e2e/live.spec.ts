@@ -249,7 +249,8 @@ test("scene 2 · Alice's phrase restores her coins from the public explorer", as
     balanceBefore >= cfg.amountSats,
     `the wallet shows ${shown} tBTQ, which will not cover the ${cfg.amountBtq} tBTQ this take sends`,
   ).toBe(true);
-  await expect(popup.locator('.app-body')).toContainText(/addresses in use/);
+  // The balance line says how fresh it is and what height it was measured at.
+  await expect(popup.locator('.app-body')).toContainText(/block \d+/);
   await dwell(popup, 2600);
 });
 
@@ -275,6 +276,8 @@ test('scene 3 · the receive address is the one the seed derives', async () => {
     'testnet',
   ).address;
   expect(await receiveAddress(popup)).toBe(expected);
+  await dwell(popup, 1800);
+  await popup.getByTestId('toggle-qr').click();
   await expect(popup.getByTestId('receive-qr')).toBeVisible();
   await dwell(popup, 2600);
 

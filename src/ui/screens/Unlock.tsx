@@ -123,12 +123,11 @@ export function Unlock({
   return (
     <div className="stack">
       <form className="stack" onSubmit={submit} aria-busy={unlockAction.busy}>
-        <div>
-          <h1>Unlock</h1>
-          <p className="lede" style={{ marginBottom: 0 }}>
-            The vault is sealed. Keys decrypt only for this session, only inside the extension.
-          </p>
-        </div>
+        {/* No security prose here. The property it described is true and is stated
+            in Settings and SECURITY.md, where it is read once — this screen is read
+            every single unlock, and a wallet that lectures on each one reads as
+            nervous rather than careful. */}
+        <h1>Unlock</h1>
         {note ? (
           <p className="note" role="status">
             {note}

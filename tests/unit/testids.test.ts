@@ -47,6 +47,9 @@ const REQUIRED = [
   'receive-address',
   'receive-path',
   'receive-qr',
+  // The QR is opened on demand, so the control that opens it is part of the
+  // contract too — a rename would otherwise silently skip the QR in every test.
+  'toggle-qr',
   'copy-address',
   'refresh',
   // waitForLiveScan's whole value rests on this one: a failed live scan still

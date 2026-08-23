@@ -897,6 +897,31 @@ textarea.input {
 
 /* ------------------------------------------------------- address and QR -- */
 
+/* Disclosure control — a plain text button that opens a panel below it.
+   Reads as a control rather than a link because it carries a caret and takes
+   the same focus ring as every other button. */
+.disclosure {
+  background: none;
+  border: 0;
+  padding: 6px 2px;
+  font: inherit;
+  font-size: 13px;
+  color: var(--accent);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  align-self: center;
+}
+.disclosure:disabled {
+  color: var(--muted);
+  cursor: default;
+}
+.disclosure-caret {
+  font-size: 10px;
+  line-height: 1;
+}
+
 .qr-tile {
   background: #ffffff;
   border-radius: var(--radius);
