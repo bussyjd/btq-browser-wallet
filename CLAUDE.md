@@ -66,6 +66,19 @@ the wallet.
 - The repo ships the product and nothing else. Working notes and scratch files stay
   outside it (`.gitignore` covers `*.pdf`); anything committed is something a reader of
   the wallet is meant to read.
+- **Copy budget: technical truth stays available; it stops being mandatory.** A screen
+  shows the one sentence somebody needs in order to act, and the reasoning goes behind a
+  disclosure, into Settings, or into the docs. **Any note inside a panel or dropdown is
+  ~25 words**; longer belongs behind a disclosure, and the disclosure is the existing
+  `.disclosure` control (`src/ui/styles.css`), never a new component. Nothing is deleted
+  by this rule — a claim worth making is worth keeping, one click away. Three instances,
+  which is what makes it a rule rather than a preference:
+  - the balance line: the per-chain address counts moved out from under the balance, which
+    now says only how fresh the number is and what it was measured against;
+  - the receive tab: the QR moved behind `▸ Show QR code`, because the address is what
+    gets used and a second device is the rarer case;
+  - the account switcher: the restore explanation moved behind `▸ Why?`, leaving the one
+    sentence that changes what the user does next.
 
 ## Architecture
 
@@ -78,11 +91,12 @@ src/content/       isolated-world relay — allowlisted page.* only
 src/inpage/        btq-provider.js — MAIN world, frozen surface, no chrome.*
 src/ui/            App.tsx router · hooks/useWallet.ts (the only caller of rpc())
                    components/ (Button Card Field Header Toast TabBar AddressBlock
-                   SeedGrid qr …) — SeedGrid is the only renderer of `seed-word-N`
-                   and must stay so; the recording redaction keys on that prefix
+                   SeedGrid SeedHex qr …) — SeedGrid is the only renderer of
+                   `seed-word-N` and SeedHex the only renderer of `seed-hex`, and
+                   both must stay so; the recording redaction keys on those ids
                    screens/ (Welcome Onboarding CreatePassword ShowSeed ConfirmSeed
-                   ImportChoice ImportMnemonic ImportRawSeed Unlock Home Settings
-                   ConnectApproval)
+                   ImportChoice ImportMnemonic ImportRawSeed ImportBackup Unlock Home
+                   Settings ConnectApproval)
                    screens/home/ (Receive Send Activity) · types.ts = RPC result shapes
 ```
 
@@ -90,13 +104,31 @@ The popup⇄worker RPC surface is `wallet.*`; pages reach only `page.requestAcco
 `page.getAccounts`, `page.disconnect` through the relay. Add a method in
 `src/core/rpc/protocol.ts` + `dispatch.ts`, its result shape in `src/ui/types.ts`.
 
-**Phrase material crosses the worker boundary on exactly two methods** — `wallet.create`
-(onboarding) and `wallet.revealPhrase` (Settings → Security, on an unlocked wallet, after
-the password is re-typed against the sealed vault, sharing the unlock back-off). The vault
-seals the BIP39 entropy next to `hdSeedHex`; the words are regenerated per call, checked
-to re-derive that seed, and never cached — a raw-seed wallet answers `NO_PHRASE` rather
-than invent any, and is offered its HD seed instead. A third such method would be a design
-change, not a convenience: keep the count at two.
+**Cleartext secret material crosses the worker boundary on exactly three methods.** The
+invariant is about *secret material*, not about phrases: counting only the phrase methods
+gave a number that stayed true while the thing it was meant to bound grew.
+
+Two carry *phrase* material: `wallet.create` (onboarding) and `wallet.revealPhrase`
+(Settings → Security, on an unlocked wallet, after the password is re-typed against the
+sealed vault, sharing the unlock back-off). The vault seals the BIP39 entropy next to
+`hdSeedHex`; the words are regenerated per call, checked to re-derive that seed, and never
+cached — a raw-seed wallet answers `NO_PHRASE` rather than invent any, and is offered its
+HD seed instead.
+
+The third, `wallet.revealSeedHex`, carries the **HD seed itself** — the master secret the
+phrase merely encodes, and therefore the most valuable thing that crosses this boundary.
+It sits behind the identical controls, by reusing the same code: unlocked wallet, password
+re-proved against the sealed vault, the same shared back-off, not on the relay allowlist,
+and the hex checked against the seed the worker is actually deriving from before it is
+returned. Settings offers it *instead of* the phrase control, never as well
+(`wallet.status.backup` names the one control the popup may render) — but that is a UI
+choice, and the method does not enforce it.
+
+`wallet.exportBackup` and `wallet.importBackup` are not a fourth and fifth: what crosses
+there is the sealed `BTQ1` envelope, ciphertext under the same password. A **fourth
+cleartext one** would be a design change, not a convenience: keep the count at three, and
+`SECRET_RESULT_KEYS` plus `tests/security/rpc.test.ts` are what hold it there — that test
+scans every non-reveal result for the phrase *and* for the HD seed hex.
 
 **One vault payload version**, `2`, and the number never goes back to 1: a payload from
 the pre-2 development build is refused with `VAULT_TOO_OLD` and its own copy, after the

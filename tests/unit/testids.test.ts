@@ -134,9 +134,15 @@ const REQUIRED = [
   'account-row-0',
   'account-rename',
   'account-name',
-  // The sentence that says extra accounts are this wallet's own convention,
-  // rendered where the account is created. tests/e2e/accounts.spec.ts reads it.
+  // The one sentence that says extra accounts do not come back from the phrase,
+  // rendered where the account is created — plus the disclosure that carries the
+  // reasoning and the paragraph behind it. All three are on this list because the
+  // note is deliberately short now: a refactor that dropped the disclosure would
+  // leave the short sentence passing every test with its explanation gone.
+  // tests/e2e/accounts.spec.ts drives all three.
   'account-note',
+  'toggle-account-why',
+  'account-why',
   // How old a non-active account's balance is. A routine refresh scans only the
   // account on screen, so every other row has to date the number it shows.
   'account-age-0',

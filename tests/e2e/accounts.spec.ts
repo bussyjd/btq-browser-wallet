@@ -162,15 +162,34 @@ test('Add account moves the wallet to m/1’/0’/0’, and switching back retur
   await openSwitcher(popup);
   await expect(popup.getByTestId('account-row-0')).toContainText('Account 1');
 
-  // The honest sentence, at the point the account is created — btq-core cannot
-  // derive this account from the seed, and the wallet will not go asking a
-  // public explorer how many accounts there were: the user writes that down and
-  // presses Add account again.
+  // The honest sentence, at the point the account is created — and only the
+  // sentence. What the user has to do about it (back up the file) is here; why
+  // it is true is one click away and not in the way of switching account.
   const note = popup.getByTestId('account-note');
   await expect(note).toBeVisible();
-  await expect(note).toContainText('btq-core');
-  await expect(note).toContainText('Add account');
-  await expect(note).toContainText('Write down how many you made');
+  await expect(note).toContainText('Only Account 1 restores from your recovery phrase');
+  await expect(note).toContainText('Back up your wallet file');
+  // The budget is the point of the disclosure, so it is asserted rather than
+  // trusted: a paragraph that creeps back into the panel fails here.
+  const words = ((await note.innerText()).trim().match(/\S+/g) ?? []).length;
+  expect(words).toBeLessThanOrEqual(25);
+  await expect(note).not.toContainText('btq-core');
+
+  // …and the reasoning is still reachable, in full. Dropping the disclosure
+  // would otherwise leave the short sentence passing and the explanation gone.
+  const why = popup.getByTestId('toggle-account-why');
+  await expect(why).toHaveAttribute('aria-expanded', 'false');
+  await expect(popup.getByTestId('account-why')).toHaveCount(0);
+  await why.click();
+  const detail = popup.getByTestId('account-why');
+  await expect(detail).toBeVisible();
+  await expect(detail).toContainText('btq-core');
+  await expect(detail).toContainText('scriptpubkeyman.cpp:1252');
+  await expect(detail).toContainText('Add account');
+  await expect(detail).toContainText('Write down how many you made');
+  await expect(detail).toContainText('will not ask a public explorer');
+  await why.click();
+  await expect(popup.getByTestId('account-why')).toHaveCount(0);
 
   await popup.getByTestId('account-add').click();
   await expectAddress(popup, A1);

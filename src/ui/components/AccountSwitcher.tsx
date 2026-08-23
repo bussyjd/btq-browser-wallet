@@ -42,6 +42,10 @@ export function AccountSwitcher({
   const rename = useAction();
   const [editing, setEditing] = useState<number | null>(null);
   const [draft, setDraft] = useState('');
+  // The panel says the one thing a user has to act on; the reasoning behind it
+  // is real and stays available, but it is not made compulsory reading for
+  // somebody who opened this to switch account. See CLAUDE.md, "Copy budget".
+  const [showWhy, setShowWhy] = useState(false);
   const busy = create.busy || switchTo.busy || rename.busy;
 
   return (
@@ -161,22 +165,42 @@ export function AccountSwitcher({
           >
             Add account
           </Button>
-          {/* Said here, where the decision is made, and not only in the docs.
-              Account 1 is btq-core's own path; everything below it is this
-              wallet's convention, and how many there are is something only the
-              user can record — the chain does not know, and a phrase carries
-              keys, not a list. The backup file is named because it is the one
-              thing that does carry the list, and this is the moment somebody
-              first has something to lose by not having one. */}
+          {/* Said here, where the decision is made, and not only in the docs —
+              but as the one sentence that changes what the user does next. Why
+              it is true (btq-core's hardcoded `0'`, what a phrase can and
+              cannot carry, and why this wallet will not ask an explorer) is a
+              paragraph, and a paragraph belongs behind the disclosure. */}
           <p className="small" data-testid="account-note">
-            Account 1 is the only account btq-core can derive from this seed. The others are
-            this wallet's own, and the seed does not record how many you made. Save a backup
-            file — Settings → Wallet backup file — and the list comes back with your keys.
-            Without one, restoring is exact but manual: press Add account the same number of
-            times, in order, and the same seed re-derives the same addresses, so the coins
-            reappear. Write down how many you made — this wallet will not go asking a public
-            explorer to guess.
+            Only Account 1 restores from your recovery phrase. Back up your wallet file to keep
+            the others.
           </p>
+          <button
+            type="button"
+            className="disclosure"
+            data-testid="toggle-account-why"
+            aria-expanded={showWhy}
+            aria-controls="account-why-panel"
+            onClick={() => setShowWhy((open) => !open)}
+          >
+            <span className="disclosure-caret" aria-hidden="true">
+              {showWhy ? '▾' : '▸'}
+            </span>
+            Why?
+          </button>
+          {showWhy ? (
+            <p id="account-why-panel" className="small" data-testid="account-why">
+              btq-core hardcodes the account level to 0&rsquo; (scriptpubkeyman.cpp:1252), so
+              Account 1 is the only account it can derive from this seed. The others are this
+              wallet&rsquo;s own convention, and the seed does not record how many you made — a
+              phrase carries entropy and says nothing about what was done with it. The backup
+              file carries the list, and restores your accounts and their names exactly. Without
+              one, restoring is exact but manual: press Add account the same number of times, in
+              order, and the same seed re-derives the same addresses, so the coins reappear.
+              Write down how many you made. This wallet will not ask a public explorer to guess,
+              because that hands a third party a batch of your unused addresses and ties them
+              together in its logs.
+            </p>
+          ) : null}
         </div>
         <InlineError message={create.error ?? switchTo.error ?? rename.error} />
       </div>
