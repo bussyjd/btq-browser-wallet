@@ -50,6 +50,13 @@ function sats(v: unknown): bigint {
   throw new WalletError('BAD_PARAMS', 'Amount must be a satoshi integer string.');
 }
 
+function nat(v: unknown, name: string): number {
+  if (typeof v !== 'number' || !Number.isInteger(v) || v < 0) {
+    throw new WalletError('BAD_PARAMS', `Missing ${name}.`);
+  }
+  return v;
+}
+
 function feeRate(v: unknown): number | undefined {
   if (v === undefined || v === null) return undefined;
   if (typeof v !== 'number' || !Number.isInteger(v)) {
@@ -157,6 +164,11 @@ export async function dispatch(keyring: Keyring, request: RpcRequest, ctx: Dispa
       // The keyring re-proves the password against the sealed vault and shares
       // the unlock back-off; a missing one is BAD_PARAMS before it is touched.
       return keyring.revealPhrase(str(p.password, 'password'));
+    case 'wallet.revealSeedHex':
+      // Same door, same password, same back-off — the backup for a wallet that
+      // has no phrase to show. Unreachable from a page: `fromTab` was refused
+      // at the top of this function, before the switch.
+      return keyring.revealSeedHex(str(p.password, 'password'));
     case 'wallet.maxSpendable': {
       if (!ctx.fetchUtxos) throw new WalletError('EXPLORER_UNAVAILABLE', 'Explorer is not configured.');
       return keyring.maxSpendable({
@@ -215,6 +227,12 @@ export async function dispatch(keyring: Keyring, request: RpcRequest, ctx: Dispa
       // settles that request and no other.
       await keyring.denyConnect(typeof p.origin === 'string' ? p.origin : undefined);
       return { ok: true as const };
+    case 'wallet.createAccount':
+      return keyring.createAccount();
+    case 'wallet.switchAccount':
+      return keyring.switchAccount(nat(p.index, 'index'));
+    case 'wallet.renameAccount':
+      return keyring.renameAccount(nat(p.index, 'index'), str(p.name, 'name'));
     case 'wallet.connectedSites':
       return { origins: await keyring.connectedSites() };
     case 'wallet.revokeSite':

@@ -29,11 +29,43 @@ export interface WalletStatus {
   /** ms epoch of the last successful scan. */
   lastScanAt?: number | null;
   /**
+   * Which backup control Settings renders: the recovery phrase for a vault
+   * sealed from one, the HD seed for a wallet that has none (a raw-32 import,
+   * or a vault sealed before the reveal existed), and `null` for "render no
+   * control at all" — locked, or no vault.
+   *
+   * Optional, and absent means *unknown*, not "seed": an older worker omits
+   * this field and has no `wallet.revealSeedHex` to call, so the UI falls back
+   * to `canRevealPhrase` and otherwise offers nothing. Never render a control
+   * whose only possible outcome is an error.
+   */
+  backup?: BackupKind | null;
+  /**
    * True only when the vault is unlocked and holds a phrase this build can read
    * back. Optional: an older worker omits it, which the UI must read as "no",
    * so gate on `=== true` and never on `!== false`.
+   *
+   * The worker derives this from `backup`; the two cannot disagree.
    */
   canRevealPhrase?: boolean;
+  /** HD account currently driving receive/send/scan. Optional for older workers. */
+  activeAccount?: number;
+  accounts?: AccountInfo[];
+}
+
+/**
+ * The one backup an unlocked wallet can put on screen. Mirrors the worker's,
+ * including the deliberately unobvious spelling — `phrase` and `seed` are both
+ * BIP39 words, and a status value that is one makes a security assertion in
+ * `tests/security/rpc.test.ts` collide with a freshly generated mnemonic.
+ */
+export type BackupKind = 'recoveryPhrase' | 'hdSeed';
+
+export interface AccountInfo {
+  index: number;
+  name: string;
+  lastBalanceSats: string;
+  address: string | null;
 }
 
 export interface ScanResult {
@@ -53,6 +85,7 @@ export interface ReceiveInfo {
   index: number;
   chain?: string;
   network?: string;
+  account?: number;
 }
 
 export interface CreateReveal {
@@ -69,6 +102,17 @@ export interface CreateReveal {
  */
 export interface PhraseReveal {
   words: string[];
+}
+
+/**
+ * The result of `wallet.revealSeedHex` — the 64-character HD seed of a wallet
+ * that has no phrase to show, after the password is re-typed on an unlocked
+ * vault. Key material, handled exactly like `PhraseReveal`: rendered by one
+ * screen, never put in `useWallet` state, never persisted, never copied to the
+ * clipboard.
+ */
+export interface SeedReveal {
+  seedHex: string;
 }
 
 export interface SendPreview {

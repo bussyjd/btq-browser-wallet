@@ -15,12 +15,9 @@ import { fileURLToPath } from 'node:url';
 import { Keyring, UNLOCK_ATTEMPTS_BEFORE_BACKOFF, noPhraseMessage } from '../../src/core/wallet/keyring.js';
 import { WalletError } from '../../src/core/wallet/errors.js';
 import { addressFromHdSeed } from '../../src/core/wallet/derive.js';
-import { emptyMeta } from '../../src/core/wallet/storage.js';
 import { generateMnemonic, mnemonicToHdSeed } from '../../src/core/crypto/mnemonic.js';
-import { encodePayload } from '../../src/core/vault/payload.js';
-import { encryptVault } from '../../src/core/vault/encrypt.js';
-import { bytesToHex } from '../../src/core/util/hex.js';
 import { MemoryWalletStorage, TEST_ENCRYPT } from '../helpers/memory-store.js';
+import { sealV1 as buildV1Vault } from '../helpers/v1-vault.js';
 
 const MNEMONIC = 'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about';
 const PASSWORD = 'testnet-ok';
@@ -34,16 +31,9 @@ function ring(store = new MemoryWalletStorage(), clock?: { t: number }) {
   });
 }
 
-/** A vault exactly as a pre-reveal build wrote it: v1, no entropy anywhere. */
+/** The pre-reveal vault, built in `tests/helpers/v1-vault.ts` and nowhere else. */
 async function sealV1(store: MemoryWalletStorage, mnemonic: string): Promise<void> {
-  const plain = encodePayload({
-    v: 1,
-    network: 'testnet',
-    origin: 'bip39',
-    hdSeedHex: bytesToHex(mnemonicToHdSeed(mnemonic)),
-  });
-  await store.saveVault(await encryptVault(plain, PASSWORD, TEST_ENCRYPT));
-  await store.saveMeta(emptyMeta('testnet', 'bip39'));
+  await buildV1Vault(store, mnemonic, PASSWORD);
 }
 
 describe('revealPhrase returns the phrase that restores this wallet', () => {

@@ -14,10 +14,11 @@ export class MemoryWalletStorage implements WalletStorage {
     this.vault = new Uint8Array(blob);
   }
   async loadMeta(): Promise<WalletMeta | null> {
-    return this.meta ? { ...this.meta } : null;
+    if (!this.meta) return null;
+    return { ...this.meta, accounts: (this.meta.accounts ?? []).map((a) => ({ ...a })) };
   }
   async saveMeta(meta: WalletMeta): Promise<void> {
-    this.meta = { ...meta };
+    this.meta = { ...meta, accounts: (meta.accounts ?? []).map((a) => ({ ...a })) };
   }
   async loadOrigins(): Promise<string[]> {
     return [...this.origins];

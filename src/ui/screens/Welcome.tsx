@@ -12,9 +12,7 @@ export function Welcome({
 }) {
   return (
     <div className="stack">
-      <div style={{ color: 'var(--accent)' }}>
-        <Mark size={44} />
-      </div>
+      <Mark size={44} />
       <div>
         <h1>Hold your own quantum-safe keys.</h1>
         <p className="lede" style={{ marginBottom: 0 }}>

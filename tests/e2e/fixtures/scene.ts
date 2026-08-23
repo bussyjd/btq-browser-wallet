@@ -30,7 +30,15 @@ const ROOT_ID = 'btq-scene';
  * Each one is asserted to still be `type="password"` — that is what catches a
  * stray click on the Show/Hide toggle in `components/Field.tsx`.
  */
-export const PASSWORD_FIELDS = ['pw', 'pw2', 'unlock-pw', 'node-pw', 'send-pw', 'reveal-pw'];
+export const PASSWORD_FIELDS = [
+  'pw',
+  'pw2',
+  'unlock-pw',
+  'node-pw',
+  'send-pw',
+  'reveal-pw',
+  'reveal-seed-pw',
+];
 
 /** A value that must never reach a frame, with a name that is safe to print. */
 export interface Secret {

@@ -39,6 +39,7 @@ describe('wallet RPC contract v2', () => {
       'wallet.confirmSend',
       'wallet.history',
       'wallet.revealPhrase',
+      'wallet.revealSeedHex',
     ]) {
       expect(WALLET_METHODS.includes(m as never), m).toBe(true);
     }
@@ -61,7 +62,10 @@ describe('wallet RPC contract v2', () => {
       'confirmedBalanceSats',
       'tipHeight',
       'lastScanAt',
+      'backup',
       'canRevealPhrase',
+      'activeAccount',
+      'accounts',
     ]) {
       expect(Object.hasOwn(status, key), key).toBe(true);
     }
@@ -71,6 +75,9 @@ describe('wallet RPC contract v2', () => {
     // The popup gates the reveal button on `=== true`, so an omitted or
     // truthy-by-accident value would offer a button that can only fail.
     expect(status.canRevealPhrase).toBe(false);
+    // …and `backup` must answer "render no control", not "render the seed one":
+    // null is the locked answer, and the popup draws nothing for it.
+    expect(status.backup).toBeNull();
   });
 
   it('wallet.prepareSend returns vsize and weight alongside the fee', async () => {

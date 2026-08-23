@@ -167,6 +167,53 @@ describe('storage validators in isolation', () => {
     const meta = parseMeta({ network: 'testnet', origin: 'bip39', externalNext: 3, usedExternal: 2 });
     expect(meta).toMatchObject({ externalNext: 3, usedExternal: 2, confirmedBalanceSats: '0', tipHeight: null });
     expect(meta?.scannedExternal).toBe(-1);
+    expect(meta?.activeAccount).toBe(0);
+    expect(meta?.accounts).toHaveLength(1);
+    expect(meta?.accounts[0]).toMatchObject({ index: 0, name: 'Account 1', externalNext: 3, usedExternal: 2 });
+  });
+
+  it('parseMeta keeps extra accounts and mirrors the active one onto the top-level cursors', () => {
+    const meta = parseMeta({
+      network: 'testnet',
+      origin: 'bip39',
+      externalNext: 0,
+      activeAccount: 1,
+      accounts: [
+        { index: 0, name: 'Savings', externalNext: 2 },
+        { index: 1, name: 'Spending', externalNext: 4, lastBalanceSats: '123' },
+      ],
+    });
+    expect(meta?.activeAccount).toBe(1);
+    expect(meta?.externalNext).toBe(4);
+    expect(meta?.lastBalanceSats).toBe('123');
+    expect(meta?.accounts.map((a) => a.name)).toEqual(['Savings', 'Spending']);
+  });
+
+  it('parseMeta drops a huge or duplicate accounts list instead of deriving it', () => {
+    const raw = {
+      network: 'testnet',
+      origin: 'bip39',
+      accounts: Array.from({ length: 50 }, (_, i) => ({ index: i, name: `A${i}`, externalNext: 9e12 })),
+    };
+    const meta = parseMeta(raw);
+    expect(meta?.accounts.length).toBeLessThanOrEqual(20);
+    expect(meta?.accounts.every((a) => a.externalNext === 0)).toBe(true);
+  });
+
+  it('parseMeta inserts account 0 when a poisoned list omits it', () => {
+    // Attacker gain: hiding m/0'/… behind a lone index-19 record makes the
+    // wallet look empty and, with nextIndex already at the cap, unrecoverable
+    // without a wipe-and-restore.
+    const meta = parseMeta({
+      network: 'testnet',
+      origin: 'bip39',
+      activeAccount: 19,
+      accounts: [{ index: 19, name: 'Trap', externalNext: 4, lastBalanceSats: '9' }],
+    });
+    expect(meta?.accounts.map((a) => a.index)).toEqual([0, 19]);
+    expect(meta?.accounts.find((a) => a.index === 0)?.externalNext).toBe(0);
+    expect(meta?.activeAccount).toBe(19);
+    expect(meta?.externalNext).toBe(4);
   });
 
   it('parseActivity keeps hex, broadcast fields and reserved outpoints', () => {
@@ -188,5 +235,40 @@ describe('storage validators in isolation', () => {
     expect(rows[0]!.hex).toBe('deadBEEF');
     expect(rows[0]!.broadcastVia).toBe('node');
     expect(rows[0]!.spends).toEqual(['aa'.repeat(32) + ':0']);
+    expect(rows[0]!.accountIndex).toBe(0);
+  });
+
+  it('parseActivity keeps a well-formed accountIndex and defaults a missing one to 0', () => {
+    const rows = parseActivity([
+      {
+        txid: 'aa'.repeat(32),
+        status: 'pending',
+        destination: 'x',
+        amountSats: '1',
+        feeSats: '1',
+        at: 1,
+        accountIndex: 3,
+      },
+      {
+        txid: 'bb'.repeat(32),
+        status: 'signed',
+        destination: 'x',
+        amountSats: '1',
+        feeSats: '1',
+        at: 1,
+      },
+      {
+        txid: 'cc'.repeat(32),
+        status: 'pending',
+        destination: 'x',
+        amountSats: '1',
+        feeSats: '1',
+        at: 1,
+        accountIndex: 99,
+      },
+    ]);
+    expect(rows[0]!.accountIndex).toBe(3);
+    expect(rows[1]!.accountIndex).toBe(0);
+    expect(rows[2]!.accountIndex).toBe(0);
   });
 });

@@ -1,5 +1,10 @@
 /** Presentation helpers used only by the popup. No protocol logic lives here. */
 
+export function shortAddress(address: string): string {
+  if (address.length <= 20) return address;
+  return `${address.slice(0, 10)}…${address.slice(-6)}`;
+}
+
 export function shortTxid(txid: string): string {
   if (txid.length <= 22) return txid;
   return `${txid.slice(0, 10)}…${txid.slice(-8)}`;

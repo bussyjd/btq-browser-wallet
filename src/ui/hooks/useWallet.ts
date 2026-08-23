@@ -11,6 +11,7 @@ import type {
   PhraseReveal,
   ReceiveInfo,
   ScanResult,
+  SeedReveal,
   SendPreview,
   SendResult,
   TipInfo,
@@ -28,11 +29,12 @@ export interface BackendDraft {
  * Every service-worker call the popup makes, in one place. Screens get data and
  * actions as props and none of them talk to `rpc()` directly.
  *
- * Two calls return phrase material and only those two: `create`, the onboarding
- * reveal, and `revealPhrase`, the re-display behind the password. Both hand the
- * result straight back to the caller and put nothing into this hook's state, so
- * the words live in one screen's component state and die when it unmounts.
- * Every other call returns addresses, amounts and hex.
+ * Three calls return secret material and only those three: `create`, the
+ * onboarding reveal, `revealPhrase`, the re-display behind the password, and
+ * `revealSeedHex`, the same re-display for a wallet that has no phrase. All
+ * three hand the result straight back to the caller and put nothing into this
+ * hook's state, so the secret lives in one screen's component state and dies
+ * when it unmounts. Every other call returns addresses, amounts and hex.
  */
 export function useWallet() {
   const [status, setStatus] = useState<WalletStatus | null>(null);
@@ -98,8 +100,11 @@ export function useWallet() {
       } catch {
         /* connected sites are not worth failing a refresh over */
       }
-      const scan = await rpc<ScanResult>('wallet.scan', full ? { full: true } : undefined);
-      setStatus((s) => (s ? { ...s, ...scan, hasVault: true, unlocked: true } : s));
+      await rpc<ScanResult>('wallet.scan', full ? { full: true } : undefined);
+      // Full status after scan — not a field-wise merge. Spreading the scan
+      // onto the last status left `canRevealPhrase` however it happened to
+      // be before the refresh, and Settings gates the phrase button on it.
+      await loadStatus();
       const next = await rpc<ReceiveInfo>('wallet.receive');
       if (next.index !== first.index) {
         setReceive(next);
@@ -123,7 +128,7 @@ export function useWallet() {
       setScanning(false);
       refreshing.current = false;
     }
-  }, [loadSites, refreshHistory]);
+  }, [loadSites, refreshHistory, loadStatus]);
 
   const create = useCallback(
     (password: string) => rpc<CreateReveal>('wallet.create', { password }),
@@ -167,6 +172,16 @@ export function useWallet() {
    */
   const revealPhrase = useCallback(
     (password: string) => rpc<PhraseReveal>('wallet.revealPhrase', { password }),
+    [],
+  );
+
+  /**
+   * The HD seed hex, for the wallets that have no phrase to show. Same rule as
+   * `revealPhrase` and for the same reason: the result is key material, so it
+   * is handed straight back to the caller and never lands in this hook's state.
+   */
+  const revealSeedHex = useCallback(
+    (password: string) => rpc<SeedReveal>('wallet.revealSeedHex', { password }),
     [],
   );
 
@@ -240,6 +255,36 @@ export function useWallet() {
     setSites((s) => s.filter((o) => o !== origin));
   }, []);
 
+  const createAccount = useCallback(async () => {
+    const created = await rpc<{ index: number; name: string; address: string }>('wallet.createAccount');
+    setReceive(null);
+    setHistory([]);
+    setScanned(false);
+    await loadStatus();
+    await refresh();
+    return created;
+  }, [loadStatus, refresh]);
+
+  const switchAccount = useCallback(
+    async (index: number) => {
+      await rpc('wallet.switchAccount', { index });
+      setReceive(null);
+      setHistory([]);
+      setScanned(false);
+      await loadStatus();
+      await refresh();
+    },
+    [loadStatus, refresh],
+  );
+
+  const renameAccount = useCallback(
+    async (index: number, name: string) => {
+      await rpc('wallet.renameAccount', { index, name });
+      await loadStatus();
+    },
+    [loadStatus],
+  );
+
   const saveBackend = useCallback(async (draft: BackendDraft) => {
     const saved = await rpc<BackendInfo>('wallet.setBackend', draft);
     setBackend(saved);
@@ -278,6 +323,7 @@ export function useWallet() {
     unlock,
     lock,
     revealPhrase,
+    revealSeedHex,
     wipe,
     prepareSend,
     confirmSend,
@@ -287,6 +333,9 @@ export function useWallet() {
     revokeSite,
     saveBackend,
     testBackend,
+    createAccount,
+    switchAccount,
+    renameAccount,
   };
 }
 

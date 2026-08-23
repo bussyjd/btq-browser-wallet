@@ -355,6 +355,17 @@ async function handleMessage(
   if (fromTab && method === 'page.disconnect' && pageOrigin) {
     broadcastAccountsChanged(pageOrigin, []);
   }
+  if (!fromTab && (method === 'wallet.switchAccount' || method === 'wallet.createAccount')) {
+    const address =
+      typeof result === 'object' && result !== null && typeof (result as { address?: unknown }).address === 'string'
+        ? (result as { address: string }).address
+        : null;
+    if (address) {
+      for (const origin of await keyring.connectedSites()) {
+        broadcastAccountsChanged(origin, [address]);
+      }
+    }
+  }
   sendResponse({ result });
 }
 

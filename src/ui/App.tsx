@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { AccountSwitcher } from './components/AccountSwitcher.js';
 import { Button } from './components/Button.js';
 import { Header } from './components/Header.js';
 import { InlineError } from './components/InlineError.js';
@@ -70,6 +71,7 @@ export function App() {
   const [seedNotice, setSeedNotice] = useState<string | null>(null);
   const [bootError, setBootError] = useState<string | null>(null);
   const [returnTo, setReturnTo] = useState<Screen | null>(null);
+  const [accountsOpen, setAccountsOpen] = useState(false);
   const screenRef = useRef<Screen>('boot');
   // The auto-lock handler below is registered once and fires from an RPC
   // response, always after a commit — so tracking the screen in an effect is
@@ -264,6 +266,13 @@ export function App() {
     <div className="app">
       <Header
         networkLabel={`Testnet${wallet.backend?.nodeUrl ? ' · node' : ''}`}
+        accountName={
+          showHeaderTools
+            ? (wallet.status?.accounts ?? []).find((a) => a.index === (wallet.status?.activeAccount ?? 0))?.name ??
+              'Account 1'
+            : undefined
+        }
+        onOpenAccounts={screen === 'home' ? () => setAccountsOpen(true) : undefined}
         onBack={screen === 'settings' ? () => setScreen('home') : undefined}
         onRefresh={showHeaderTools ? () => void wallet.refresh() : undefined}
         refreshing={wallet.scanning}
@@ -271,17 +280,26 @@ export function App() {
           showHeaderTools
             ? () =>
                 void (async () => {
+                  setAccountsOpen(false);
                   await wallet.lock();
                   setSendResult(null);
                   setScreen('unlock');
                 })()
             : undefined
         }
-        onSettings={showHeaderTools ? () => setScreen('settings') : undefined}
+        onSettings={
+          showHeaderTools
+            ? () => {
+                setAccountsOpen(false);
+                setScreen('settings');
+              }
+            : undefined
+        }
       />
 
       {screen === 'home' ? (
         <Home
+          key={wallet.status?.activeAccount ?? 0}
           wallet={wallet}
           tab={tab}
           onTab={setTab}
@@ -309,6 +327,23 @@ export function App() {
           {screenBody()}
         </main>
       )}
+
+      {accountsOpen && screen === 'home' ? (
+        <AccountSwitcher
+          accounts={wallet.status?.accounts ?? []}
+          activeAccount={wallet.status?.activeAccount ?? 0}
+          onSwitch={async (index) => {
+            setSendResult(null);
+            await wallet.switchAccount(index);
+          }}
+          onCreate={async () => {
+            setSendResult(null);
+            await wallet.createAccount();
+          }}
+          onRename={(index, name) => wallet.renameAccount(index, name)}
+          onClose={() => setAccountsOpen(false)}
+        />
+      ) : null}
 
       <Toast message={toast} />
     </div>

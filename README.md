@@ -64,6 +64,11 @@ They are different wallets from different inputs, not two spellings of one. See
 [`docs/HD_IMPORT.md`](docs/HD_IMPORT.md) for why BTQ has no published HD standard and what
 this wallet does about it.
 
+**Accounts.** The header name opens an account switcher. **Add account** derives the next
+HD account from the same seed (`m/1'/…`, `m/2'/…`); Account 1 stays on Core's path
+`m/0'/…`. Receive, send, history and `window.btq` follow whichever account is active —
+a connected site sees `accountsChanged` when you switch.
+
 **Receive.** The *Receive* tab shows the next unused external address (`tbtq1z…`), its
 derivation path, a QR of exactly that string, and **Copy address**. Balance is the sum
 of the **unspent outputs** of every derived address — not the explorer's `balance` field,
@@ -293,8 +298,10 @@ loses its `seed-word-N` id fails the recording run rather than quietly appearing
   and `MAX_STANDARD_TX_WEIGHT` caps a transaction at ~90 inputs.
 - **Dust** for a P2MR output is **270 sats** (a 43-byte output plus a 47-byte spend
   estimate × 3000 sat/kvB) — the node's own rule, not a stricter guess.
-- **Derivation** is hardened-only over the 32-byte ML-DSA seed — `m/0'/0'/n'` external,
-  `m/0'/1'/n'` internal. There is no xpub and no watch-only derivation.
+- **Derivation** is hardened-only over the 32-byte ML-DSA seed — `m/k'/0'/n'` external,
+  `m/k'/1'/n'` internal. Account 0 (`m/0'/…`) is btq-core's legacy path; extra
+  accounts are `m/1'/…`, `m/2'/…` from the same seed. There is no xpub and no
+  watch-only derivation.
 
 Every constant with its `btq-core` source line: [`docs/REFERENCE.md`](docs/REFERENCE.md).
 The import-from-seed design, byte by byte: [`docs/HD_IMPORT.md`](docs/HD_IMPORT.md). The

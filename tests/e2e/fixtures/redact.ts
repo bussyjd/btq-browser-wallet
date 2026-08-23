@@ -1,15 +1,17 @@
 /**
- * Recording-only redaction of the recovery phrase.
+ * Recording-only redaction of the wallet's master secrets.
  *
  * Both demo videos are real recordings of the extension, so every screen the
- * tests walk through is painted for real — including the four that put a phrase
- * on screen: the twelve-word grid during onboarding, that same grid again in the
- * Settings reveal, the three confirmation fields, and the import textarea the
- * phrase is typed back into. Three selectors cover all four, because the two
- * grids are one component. A wallet repository must not ship a legible recovery
- * phrase, so when `RECORD_VIDEO` is set those surfaces are covered *before the
- * first frame is painted*: the glyphs never reach a pixel, and the bars that
- * replace them are one fixed width, so the word lengths do not survive either
+ * tests walk through is painted for real — including the five that put a master
+ * secret on screen: the twelve-word grid during onboarding, that same grid again
+ * in the Settings reveal, the three confirmation fields, the import textarea the
+ * phrase (or a raw seed) is typed back into, and the Settings HD-seed reveal that
+ * a wallet with no phrase offers instead. Four selectors cover all five, because
+ * the two grids are one component. A wallet repository must not ship a legible
+ * recovery phrase, or the HD seed hex that every key in the same wallet comes
+ * out of, so when `RECORD_VIDEO` is set those surfaces are covered *before
+ * the first frame is painted*: the glyphs never reach a pixel, and the bars that
+ * replace them are one fixed size, so the word lengths do not survive either
  * (per-word widths would leak all twelve).
  *
  * This changes pixels and nothing else. The DOM keeps the real words, so the
@@ -27,6 +29,12 @@ export const SEED_WORDS = '[data-testid^="seed-word-"]';
 export const SEED_CHALLENGE = '[data-word]';
 /** The textarea a phrase (or a raw HD seed) is imported through. */
 export const SEED_INPUT = '[data-testid="import-text"]';
+/**
+ * The HD seed hex — Settings → Security, on a wallet that has no phrase to show.
+ * `components/SeedHex.tsx` is the only element that may carry this id, for the
+ * same reason SeedGrid owns `seed-word-N`: this selector is the whole redaction.
+ */
+export const SEED_HEX = '[data-testid="seed-hex"]';
 
 /**
  * Cover the phrase in every page this context opens, for the whole of its life.
@@ -58,6 +66,22 @@ export async function installRedaction(context: BrowserContext): Promise<void> {
         display: inline-block;
         width: 62px;
         height: 10px;
+        border-radius: 3px;
+        background: ${BAR};
+      }
+      /* The 64-character HD seed. Same treatment, one block instead of twelve
+         cells: a fixed height, so neither the characters nor how many lines
+         they wrapped onto survive. */
+      [data-testid="seed-hex"] {
+        font-size: 0 !important;
+        color: transparent !important;
+        -webkit-text-fill-color: transparent !important;
+      }
+      [data-testid="seed-hex"]::after {
+        content: '';
+        display: block;
+        width: 100%;
+        height: 34px;
         border-radius: 3px;
         background: ${BAR};
       }
@@ -120,15 +144,23 @@ export async function installRedaction(context: BrowserContext): Promise<void> {
 }
 
 /**
- * Fail the run if a phrase surface would paint its characters.
+ * Fail the run if a secret surface would paint its characters.
  *
- * Without this a renamed test id would put a legible phrase back into the demo
- * video and nothing would say so — the tests would still pass, because they
- * read the DOM and the DOM is untouched. Recording-only, like everything else
- * in this file.
+ * Without this a renamed test id would put a legible phrase — or a legible HD
+ * seed — back into the demo video and nothing would say so: the tests would
+ * still pass, because they read the DOM and the DOM is untouched. Recording
+ * only, like everything else in this file.
  */
 export async function expectRedacted(page: Page, selector: string, count: number): Promise<void> {
   if (!RECORDING) return;
+  // A surface nobody thought to cover is the failure this function exists to
+  // catch, so the covered set is enumerated here rather than trusted to the
+  // caller: asking about a selector that is not one of them is a bug in the
+  // test, not a pass.
+  expect(
+    [SEED_WORDS, SEED_CHALLENGE, SEED_INPUT, SEED_HEX],
+    `RECORD_VIDEO: "${selector}" is not a redacted surface — add it to redact.ts`,
+  ).toContain(selector);
   const cells = await page.locator(selector).evaluateAll((els) =>
     els.map((el) => {
       const s = getComputedStyle(el);

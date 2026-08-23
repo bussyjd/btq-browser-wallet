@@ -143,6 +143,7 @@ a {
 /* ---------------------------------------------------------------- shell -- */
 
 .app {
+  position: relative;
   display: flex;
   flex-direction: column;
   min-height: 560px;
@@ -190,8 +191,18 @@ a {
 }
 
 .mark {
-  color: var(--accent);
   display: block;
+  flex: 0 0 auto;
+}
+
+.mark-letter {
+  fill: #ffffff;
+}
+
+@media (prefers-color-scheme: light) {
+  .mark-letter {
+    fill: #17140f;
+  }
 }
 
 .wordmark {
@@ -200,6 +211,155 @@ a {
   font-size: 14px;
   letter-spacing: -0.01em;
   white-space: nowrap;
+}
+
+.account-switcher {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+  max-width: 132px;
+  margin: 0;
+  padding: 4px 6px 4px 8px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--ink);
+  font-family: var(--display);
+  font-weight: 600;
+  font-size: 13px;
+  letter-spacing: -0.01em;
+}
+
+.account-switcher:hover {
+  background: var(--line-2);
+}
+
+.account-switcher-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.account-switcher-chevron {
+  width: 12px;
+  height: 12px;
+  flex: 0 0 auto;
+  color: var(--ink-3);
+}
+
+.account-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-start;
+  padding: 48px 12px 12px;
+}
+
+.account-overlay-dismiss {
+  position: absolute;
+  inset: 0;
+  border: 0;
+  background: rgba(0, 0, 0, 0.45);
+  padding: 0;
+}
+
+.account-panel {
+  position: relative;
+  z-index: 1;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  max-height: calc(100% - 8px);
+  overflow: auto;
+}
+
+.account-rows {
+  list-style: none;
+  margin: 0;
+  padding: 0 8px 8px;
+}
+
+.account-rows > li {
+  margin: 0 0 4px;
+}
+
+.account-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  margin: 0;
+  padding: 10px 10px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  text-align: left;
+}
+
+.account-row:hover:not(:disabled) {
+  background: var(--surface-2);
+}
+
+.account-row.is-active {
+  border-color: var(--line);
+  background: var(--accent-soft);
+}
+
+.account-row-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.account-row-name {
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.account-row-addr {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--ink-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.account-row-bal {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--ink-2);
+  flex: 0 0 auto;
+}
+
+.account-rename {
+  padding: 8px 10px;
+}
+
+.account-rename-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.account-rename-btn {
+  display: block;
+  margin: 0 10px 8px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent-ink);
+  font-size: 12px;
+}
+
+.account-add {
+  padding: 8px 12px 12px;
 }
 
 .header-tools {
@@ -782,6 +942,32 @@ textarea.input {
   text-align: right;
   color: var(--ink-3);
   font-size: 11px;
+}
+
+/* --------------------------------------------------------------- seed hex -- */
+
+/* The 64-character HD seed, in the same monospace block treatment as the seed
+   grid so the two reveals read as one feature. Clustered in fours, which is how
+   a person checks 64 characters against a piece of paper without losing their
+   place. */
+.seed-hex {
+  margin: 0;
+  padding: 10px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-2);
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.8;
+  word-break: break-all;
+  /* Deliberately no `user-select: all`. There is no copy button on this screen
+     or on the phrase grid for the same reason — the clipboard is readable by
+     anything else on the machine and outlives the screen. One click and a copy
+     shortcut is that same exposure with an extra step, and the two surfaces
+     that show key material must enforce one rule, not two. */
+}
+
+.seed-hex .grp {
+  margin-right: 0.45em;
 }
 
 /* ------------------------------------------------------------- fee chips -- */

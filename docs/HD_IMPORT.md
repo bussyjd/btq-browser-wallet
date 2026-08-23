@@ -33,7 +33,7 @@ flowchart TD
     I0 -- "I_L (32)" --> MS["master ML-DSA seed"]
     I0 -- "I_R (32)" --> MC["master chaincode"]
 
-    MS --> D0["derive 0' (account)"]
+    MS --> D0["derive k' (account; 0 is Core's path)"]
     MC --> D0
     D0 --> D1e["derive 0' → external chain"]
     D0 --> D1i["derive 1' → internal chain"]
@@ -54,8 +54,14 @@ child_chaincode = I[32..64]
 ```
 
 — byte-for-byte btq-core's `CDilithiumExtKey::Derive`. The full path for the address at
-index *n* is `m/0'/0'/n'` (receive) or `m/0'/1'/n'` (change), mirroring
-`DeriveNewDilithiumChildKey` in `src/wallet/scriptpubkeyman.cpp`.
+index *n* is `m/k'/0'/n'` (receive) or `m/k'/1'/n'` (change). Account `k = 0`
+is byte-for-byte `DeriveNewDilithiumChildKey` in
+`src/wallet/scriptpubkeyman.cpp` — that is the golden-vector path. Extra
+accounts in this wallet walk the same hardened split one level up
+(`m/1'/…`, `m/2'/…`), the way MetaMask walks `m/44'/60'/k'`. btq-core has no
+RPC for a second Dilithium account; these extra accounts are this wallet's,
+restored by adding them again after an import (the gap scan covers one
+account at a time).
 
 ## Where the standard actually lives (and doesn't)
 

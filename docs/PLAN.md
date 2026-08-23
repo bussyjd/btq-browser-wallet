@@ -20,7 +20,7 @@ variant over the 32-byte ML-DSA seed:
 | Master | `I = HMAC-SHA512(key="Dilithium seed", msg=hd_seed)` → `I_L`=seed(32), `I_R`=chaincode(32) | `src/crypto/dilithium_key.cpp` `CDilithiumExtKey::SetSeed` |
 | Child | `I = HMAC-SHA512(key=parent_chaincode, msg=0x00 ‖ parent_seed(32) ‖ ser32BE(index))` | `CDilithiumExtKey::Derive` |
 | Hardening | **Hardened only** — non-hardened indices are refused by design | same |
-| Path | `m/0'/0'/n'` external, `m/0'/1'/n'` internal (mirrors Core's legacy HD split) | `src/wallet/scriptpubkeyman.cpp` `DeriveNewDilithiumChildKey` |
+| Path | `m/k'/0'/n'` external, `m/k'/1'/n'` internal (`k = 0` is Core's legacy HD split) | `src/wallet/scriptpubkeyman.cpp` `DeriveNewDilithiumChildKey` |
 | Keypair | `ML-DSA-44 KeyGen(ξ = seed)` — standard FIPS 204: `H(ξ ‖ k ‖ ℓ, 128)` → ρ, ρ′, K | `src/crypto/dilithium/ref/sign.c` `crypto_sign_keypair_from_seed` |
 | Ext key | 73 bytes = depth(1) ‖ fingerprint(4) ‖ child(4 BE) ‖ chaincode(32) ‖ seed(32) | `Encode`/`Decode` |
 
@@ -228,8 +228,6 @@ hostile case would otherwise miss.
 
 Each of these was considered and left out on purpose; none is blocked on an unknown.
 
-- **Multiple accounts.** The keyring derives one account (`m/0'/…`) and no BTQ RPC exposes
-  a second account concept, so a second account would have been UI over nothing.
 - **Encrypted vault backup file.** Recovery is the phrase or the raw seed. A second export
   path is a second thing that can leak. Showing the phrase on screen behind the password
   is not the same decision and does not reopen this one: a file is an artefact that leaves

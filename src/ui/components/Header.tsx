@@ -38,6 +38,8 @@ function BackIcon() {
 
 export function Header({
   networkLabel,
+  accountName,
+  onOpenAccounts,
   onBack,
   onRefresh,
   refreshing,
@@ -45,6 +47,8 @@ export function Header({
   onSettings,
 }: {
   networkLabel: string;
+  accountName?: string | undefined;
+  onOpenAccounts?: (() => void) | undefined;
   onBack?: (() => void) | undefined;
   onRefresh?: (() => void) | undefined;
   refreshing?: boolean;
@@ -66,7 +70,23 @@ export function Header({
       ) : null}
       <span className="brand">
         <Mark />
-        <span className="wordmark">BTQ Wallet</span>
+        {onOpenAccounts && accountName ? (
+          <button
+            type="button"
+            className="account-switcher"
+            data-testid="account-switcher"
+            aria-haspopup="dialog"
+            aria-label={`Account ${accountName}`}
+            onClick={onOpenAccounts}
+          >
+            <span className="account-switcher-name">{accountName}</span>
+            <svg className="account-switcher-chevron" viewBox="0 0 12 12" aria-hidden="true">
+              <path d="M2.4 4.2 6 8l3.6-3.8" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+            </svg>
+          </button>
+        ) : (
+          <span className="wordmark">BTQ Wallet</span>
+        )}
       </span>
       <span className="header-tools">
         <span className="pill" data-testid="network-pill">

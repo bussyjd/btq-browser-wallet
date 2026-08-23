@@ -4,8 +4,10 @@ import { Card } from '../components/Card.js';
 import { Field, PasswordField } from '../components/Field.js';
 import { InlineError } from '../components/InlineError.js';
 import { SeedGrid } from '../components/SeedGrid.js';
+import { SeedHex } from '../components/SeedHex.js';
 import { useAction } from '../hooks/useAction.js';
 import type { Wallet } from '../hooks/useWallet.js';
+import type { BackupKind } from '../types.js';
 
 type BackendField = 'explorerBase' | 'nodeUrl' | 'nodeUser';
 
@@ -20,14 +22,16 @@ export function Settings({
   onWiped: () => void;
   onToast: (message: string) => void;
 }) {
-  const { backend, loadSites } = wallet;
+  const { backend, loadSites, loadStatus } = wallet;
   // The connected-sites list is loaded by a refresh, so it can be older than
   // this panel: a site may have been approved in the connect window while this
   // popup was already open. You cannot revoke a connection you cannot see, so
-  // re-read it whenever Settings opens.
+  // re-read it whenever Settings opens. Same for `backup`: a scan merge on Home
+  // can leave it stale, and it decides which control this panel renders.
   useEffect(() => {
     void loadSites().catch(() => undefined);
-  }, [loadSites]);
+    void loadStatus().catch(() => undefined);
+  }, [loadSites, loadStatus]);
   // The three network fields show whatever the worker has saved until the user
   // types over them; from then on the edit wins. Deriving them beats copying
   // `backend` into state inside an effect, which races a slow first load and
@@ -49,9 +53,10 @@ export function Settings({
   // auto-lock all unmount this component and take the words with them. That is
   // the mechanism; a useEffect cleanup would be theatre on top of it. The
   // property is asserted end to end instead (reveal → lock-now → no grid).
-  const [askingPhrase, setAskingPhrase] = useState(false);
+  const [asking, setAsking] = useState(false);
   const [revealPassword, setRevealPassword] = useState('');
   const [phrase, setPhrase] = useState<string[] | null>(null);
+  const [seedHex, setSeedHex] = useState<string | null>(null);
 
   const test = useAction();
   const rescan = useAction();
@@ -61,22 +66,37 @@ export function Settings({
   const revoke = useAction();
   const reveal = useAction();
 
-  // `=== true`, never `!== false`: an older service worker omits the field
-  // entirely, and "unknown" must read as "no" rather than offering a button
-  // that can only fail.
-  const canReveal = wallet.status?.canRevealPhrase === true;
-  // Why not, in the wallet's own words. The same two sentences the worker
-  // throws with (keyring.ts noPhraseMessage), so the disabled state and the
-  // refusal cannot drift into saying different things.
+  // Which backup control this panel offers — the worker's answer, not a second
+  // opinion formed here. Every wallet that is open has one: the phrase when the
+  // vault was sealed from a phrase, the HD seed otherwise. A disabled control is
+  // never the answer; a control that cannot do anything is not put on screen.
+  //
+  // `undefined` is "this worker does not say", which happens for exactly one
+  // popup-older-than-worker case: a build that predates `backup` also has no
+  // `wallet.revealSeedHex` to call. So fall back to the old flag — `=== true`,
+  // never `!== false` — and otherwise render nothing rather than a button whose
+  // only possible outcome is an error.
+  const reported = wallet.status?.backup;
+  const backup: BackupKind | null =
+    reported === undefined
+      ? wallet.status?.canRevealPhrase === true
+        ? 'recoveryPhrase'
+        : null
+      : reported;
+  // Why there is no phrase, in the wallet's own words: the same two sentences
+  // the worker throws with (keyring.ts `noPhraseMessage`), so the screen and the
+  // refusal cannot drift into saying different things. `origin` is the vault
+  // payload's own, not the metadata copy that a lost `meta` re-stamps.
   const noPhraseReason =
     wallet.status?.origin === 'raw32'
       ? 'This wallet was imported from a raw 32-byte seed. It has no recovery phrase — the seed hex you imported is its backup.'
       : 'This wallet was sealed before the wallet could read a phrase back. The phrase you wrote down still restores it; the vault cannot produce it.';
 
   function closeReveal() {
-    setAskingPhrase(false);
+    setAsking(false);
     setRevealPassword('');
     setPhrase(null);
+    setSeedHex(null);
     reveal.setError(null);
   }
 
@@ -253,75 +273,177 @@ export function Settings({
         </div>
         <InlineError message={lock.error} testId="lock-error" />
 
-        <div className="mt-8">
-          {phrase ? (
-            <div className="stack-sm">
-              <p className="note note-warn" role="status">
-                Anyone who reads these words owns this wallet. Nobody legitimate will ever ask
-                you for them.
-              </p>
-              <SeedGrid words={phrase} />
-              <Button variant="secondary" data-testid="reveal-hide" onClick={closeReveal}>
-                Hide phrase
-              </Button>
-            </div>
-          ) : askingPhrase ? (
-            <form
-              className="stack-sm"
-              onSubmit={(e) => {
-                e.preventDefault();
-                void reveal.run(async () => {
-                  const result = await wallet.revealPhrase(revealPassword);
-                  // Spent — clear it the instant it has been used. A failure
-                  // keeps it, so a typo can be fixed without retyping.
-                  setRevealPassword('');
-                  setPhrase(result.words);
-                });
-              }}
-            >
-              {/* The warning goes before the field, so it is read before the
-                  password is typed rather than after the words are on screen. */}
-              <p className="note note-warn" role="status">
-                Your recovery phrase will be shown on this screen. Make sure nobody is watching
-                and nothing is recording.
-              </p>
-              <PasswordField
-                id="reveal-pw"
-                data-testid="reveal-pw"
-                label="Password"
-                autoComplete="off"
-                value={revealPassword}
-                onChange={(e) => setRevealPassword(e.target.value)}
-              />
-              <Button type="submit" data-testid="reveal-submit" disabled={reveal.busy}>
-                {reveal.busy ? 'Checking…' : 'Show phrase'}
-              </Button>
-              <Button variant="secondary" onClick={closeReveal}>
-                Cancel
-              </Button>
-              <InlineError message={reveal.error} testId="reveal-error" />
-            </form>
-          ) : (
-            <div className="stack-sm">
-              <p className="small">
-                {canReveal
-                  ? 'Your recovery phrase can be shown again with your password. Anyone who reads those words owns this wallet.'
-                  : noPhraseReason}
-              </p>
-              <Button
-                variant="secondary"
-                data-testid="reveal-phrase"
-                disabled={!canReveal}
-                onClick={() => {
-                  reveal.setError(null);
-                  setAskingPhrase(true);
+        {/* One backup control, or none. The two branches are written out in
+            full rather than sharing a parameterised form, because every
+            `data-testid` in this file is read statically — by the selector
+            contract (tests/unit/testids.test.ts) and by the recording redaction
+            — and an id assembled from a variable is an id neither of them can
+            see. */}
+        {backup === 'recoveryPhrase' ? (
+          <div className="mt-8">
+            {phrase ? (
+              <div className="stack-sm">
+                <p className="note note-warn" role="status">
+                  Anyone who reads these words owns this wallet. Nobody legitimate will ever ask
+                  you for them.
+                </p>
+                <SeedGrid words={phrase} />
+                <Button variant="secondary" data-testid="reveal-hide" onClick={closeReveal}>
+                  Hide phrase
+                </Button>
+              </div>
+            ) : asking ? (
+              <form
+                className="stack-sm"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  void reveal.run(async () => {
+                    const result = await wallet.revealPhrase(revealPassword);
+                    // Spent — clear it the instant it has been used. A failure
+                    // keeps it, so a typo can be fixed without retyping.
+                    setRevealPassword('');
+                    setPhrase(result.words);
+                  });
                 }}
               >
-                Show recovery phrase
-              </Button>
-            </div>
-          )}
-        </div>
+                {/* The warning goes before the field, so it is read before the
+                    password is typed rather than after the words are on screen. */}
+                <p className="note note-warn" role="status">
+                  Your recovery phrase will be shown on this screen. Make sure nobody is watching
+                  and nothing is recording.
+                </p>
+                <PasswordField
+                  id="reveal-pw"
+                  data-testid="reveal-pw"
+                  label="Password"
+                  autoComplete="off"
+                  value={revealPassword}
+                  onChange={(e) => setRevealPassword(e.target.value)}
+                />
+                <Button type="submit" data-testid="reveal-submit" disabled={reveal.busy}>
+                  {reveal.busy ? 'Checking…' : 'Show phrase'}
+                </Button>
+                <Button variant="secondary" onClick={closeReveal}>
+                  Cancel
+                </Button>
+                <InlineError message={reveal.error} testId="reveal-error" />
+              </form>
+            ) : (
+              <div className="stack-sm">
+                <p className="small">
+                  Your recovery phrase can be shown again with your password. Anyone who reads
+                  those words owns this wallet.
+                </p>
+                <Button
+                  variant="secondary"
+                  data-testid="reveal-phrase"
+                  onClick={() => {
+                    reveal.setError(null);
+                    setAsking(true);
+                  }}
+                >
+                  Show recovery phrase
+                </Button>
+              </div>
+            )}
+          </div>
+        ) : backup === 'hdSeed' ? (
+          <div className="mt-8">
+            {seedHex ? (
+              <div className="stack-sm">
+                <p className="note note-warn" role="status">
+                  Anyone who reads this owns the wallet. Nobody legitimate will ever ask you
+                  for it.
+                </p>
+                <SeedHex seedHex={seedHex} />
+                <p className="small">
+                  {wallet.status?.origin === 'raw32'
+                    ? 'Write them down. To restore this wallet on any device, choose Import, then “Raw seed”, and type these characters back in.'
+                    : 'Write them down and keep them with your recovery phrase. They are this wallet’s master secret; the phrase is what restores it.'}
+                </p>
+                <Button variant="secondary" data-testid="reveal-seed-hide" onClick={closeReveal}>
+                  Hide seed
+                </Button>
+              </div>
+            ) : asking ? (
+              <form
+                className="stack-sm"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  void reveal.run(async () => {
+                    const result = await wallet.revealSeedHex(revealPassword);
+                    // Spent the instant it is used, exactly as the phrase is.
+                    setRevealPassword('');
+                    setSeedHex(result.seedHex);
+                  });
+                }}
+              >
+                <p className="note note-warn" role="status">
+                  Your HD seed will be shown on this screen. Make sure nobody is watching and
+                  nothing is recording.
+                </p>
+                <PasswordField
+                  id="reveal-seed-pw"
+                  data-testid="reveal-seed-pw"
+                  label="Password"
+                  autoComplete="off"
+                  value={revealPassword}
+                  onChange={(e) => setRevealPassword(e.target.value)}
+                />
+                <Button type="submit" data-testid="reveal-seed-submit" disabled={reveal.busy}>
+                  {reveal.busy ? 'Checking…' : 'Show HD seed'}
+                </Button>
+                <Button variant="secondary" onClick={closeReveal}>
+                  Cancel
+                </Button>
+                <InlineError message={reveal.error} testId="reveal-seed-error" />
+              </form>
+            ) : (
+              <div className="stack-sm">
+                <p className="small">{noPhraseReason}</p>
+                {/* What the seed is worth differs by wallet, so the two are said
+                    separately rather than in one sentence that is half true of
+                    each. A raw-32 wallet's seed goes straight back in through
+                    the import screen. A phrase-derived seed is 64 bytes, and
+                    that screen takes 32 — so for those wallets the seed is the
+                    master secret to keep, and the phrase is what restores. */}
+                {wallet.status?.origin === 'raw32' ? (
+                  <p className="small">
+                    That seed can be shown here with your password: the 64 hex characters every
+                    key in this wallet is derived from. Import → “Raw seed” takes them back and
+                    restores this wallet exactly, addresses and all.
+                  </p>
+                ) : (
+                  <>
+                    <p className="small">
+                      What the vault can still show you is the HD seed itself — the hex every
+                      key in this wallet is derived from, and the whole of its master secret.
+                      Keep it wherever you keep the phrase.
+                    </p>
+                    <p className="small">
+                      It is not a second way in on this build: a seed that came from a phrase is
+                      64 bytes, and Import → “Raw seed” takes a 32-byte one. The phrase you
+                      wrote down is what restores this wallet — and importing it into a fresh
+                      install would seal a wallet that can show its words again. This one cannot,
+                      because it never stored them. Nothing here will ever ask you to type your
+                      phrase in to upgrade anything; anything that does is trying to steal it.
+                    </p>
+                  </>
+                )}
+                <Button
+                  variant="secondary"
+                  data-testid="reveal-seed"
+                  onClick={() => {
+                    reveal.setError(null);
+                    setAsking(true);
+                  }}
+                >
+                  Show HD seed
+                </Button>
+              </div>
+            )}
+          </div>
+        ) : null}
       </Card>
 
       <Card tone={showWipe ? 'warn' : 'default'}>

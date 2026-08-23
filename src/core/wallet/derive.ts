@@ -8,16 +8,18 @@ export interface DerivedAddress {
   index: number;
   chain: Chain;
   network: BtqNetwork;
+  account: number;
 }
 
-/** P2MR address at m/0'/{0,1}'/index'. Does not return key material. */
+/** P2MR address at m/k'/{0,1}'/index'. Does not return key material. `account` defaults to 0. */
 export function addressFromHdSeed(
   hdSeed: Uint8Array,
   chain: Chain,
   index: number,
   network: BtqNetwork,
+  account = 0,
 ): DerivedAddress {
-  const keySeed = deriveKeySeed(masterFromSeed(hdSeed), chain, index);
+  const keySeed = deriveKeySeed(masterFromSeed(hdSeed), chain, index, account);
   const address = addressForPublicKey(publicKeyFromSeed(keySeed), network);
-  return { address, path: keyPath(chain, index), index, chain, network };
+  return { address, path: keyPath(chain, index, account), index, chain, network, account };
 }

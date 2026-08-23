@@ -26,9 +26,16 @@ best-effort. A vulnerability in btq-core itself belongs with
 - The content script and `window.btq` never receive phrase or key material at all. The
   popup receives the twelve words exactly twice — from `wallet.create` during onboarding,
   and from `wallet.revealPhrase` once the password has been re-typed — and never receives
-  the HD seed, the entropy or a secret key. Both times the words live in one screen's
-  component state and die with the screen. Signing happens in the worker; the popup sends
-  intent and a password.
+  the entropy or a secret key. Both times the words live in one screen's component state
+  and die with the screen. Signing happens in the worker; the popup sends intent and a
+  password.
+- It receives the **HD seed** on one method and one only: `wallet.revealSeedHex`, behind
+  the same re-typed password, for the wallets that have no phrase to show. Offering them
+  a greyed-out button instead would have left a wallet whose backup cannot be got at,
+  which is not a security property but a lost-coins one. It is offered *instead of* the
+  phrase control, never as well — `wallet.status.backup` names the one control the popup
+  may render — and the hex is checked against the seed the worker is actually deriving
+  from before it reaches the screen. It lives in one screen's state, like the words.
 - The provider is installed as a **MAIN-world content script** with a frozen,
   non-configurable surface — `isBtq`, `request`, `on`, `removeListener`, nothing else. It
   holds no `chrome.*` handle, so a page that compromises it gains no extension privilege.
@@ -47,16 +54,22 @@ best-effort. A vulnerability in btq-core itself belongs with
 - **The phrase without the password:** `wallet.revealPhrase` needs a wallet that is
   already unlocked **and** the password re-typed against the sealed vault. A wrong one
   counts against the same back-off as a wrong unlock and names nothing but the password.
-  There is no copy button on that screen, or on any screen that shows a phrase. A wallet
-  imported from a raw 32-byte seed, or sealed before the reveal existed, refuses with
-  `NO_PHRASE` rather than manufacture words for a different wallet — and words that are
-  shown are checked to re-derive *this* vault's HD seed before they reach the screen.
-- **Locked state:** cannot sign, derive, list history, or show the phrase. Revealing
-  refuses a locked wallet even with the right password, and never unlocks one as a side
-  effect. There is no export method at all: the wallet will not write the seed or the
-  phrase to a file, the clipboard or anything else.
-- **Pages:** cannot call `wallet.*` — send, unlock, confirm and `revealPhrase` are not on
-  the relay's allowlist. Site-connect is `page.requestAccounts` / `page.getAccounts` /
+  There is no copy button on that screen, or on any screen that shows a phrase or a seed.
+  A wallet imported from a raw 32-byte seed, or sealed before the reveal existed, refuses
+  with `NO_PHRASE` rather than manufacture words for a different wallet — and words that
+  are shown are checked to re-derive *this* vault's HD seed before they reach the screen.
+  Those wallets are shown their HD seed instead, under the same conditions. There is no
+  in-place upgrade for a pre-reveal vault and there will not be one: the only thing that
+  could seal the entropy is the phrase, and asking a user to type their phrase in "to
+  upgrade the vault" is the phishing script, not a migration.
+- **Locked state:** cannot sign, derive, list history, or show the phrase or the seed.
+  Either reveal refuses a locked wallet even with the right password, and never unlocks
+  one as a side effect. `wallet.status.backup` is `null` whenever locked, so a locked
+  popup learns nothing about what the vault could show. There is still no export method:
+  the wallet will not write the seed or the phrase to a file, the clipboard or anything
+  else — `reveal` means on the screen, now, and nowhere else.
+- **Pages:** cannot call `wallet.*` — send, unlock, confirm, `revealPhrase` and
+  `revealSeedHex` are not on the relay's allowlist. Site-connect is `page.requestAccounts` / `page.getAccounts` /
   `page.disconnect`, matched on the **exact** origin the browser reports for the sender,
   never on an origin the page supplies.
 - **Connect without consent:** an unapproved origin's `requestAccounts` is held, not
@@ -117,7 +130,7 @@ tip height and refuses a fork.
   wallet still does is **never ask for the phrase**, and never accept one outside the
   import screen, so anything prompting you to "confirm your recovery phrase" is somebody
   else talking.
-- The back-off shared by unlock, re-authentication and the phrase reveal is in memory
+- The back-off shared by unlock, re-authentication and both reveals is in memory
   only; it does not survive a service-worker restart, and it is not a substitute for a
   strong password.
 - **Removing the wallet** asks for the word `DELETE` and not for the password, so the

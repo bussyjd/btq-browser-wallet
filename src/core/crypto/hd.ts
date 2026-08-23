@@ -14,7 +14,10 @@
  *              non-hardened indices are refused (Derive returns false)
  *   Encode   : 73 bytes = depth(1) || fingerprint(4) || child(4 BE) || chaincode(32) || seed(32)
  * Path (src/wallet/scriptpubkeyman.cpp DeriveNewDilithiumChildKey):
- *   external m/0'/0'/n'   internal m/0'/1'/n'
+ *   account 0 (the only path Core's legacy HD writes):
+ *     external m/0'/0'/n'   internal m/0'/1'/n'
+ *   extra accounts in this wallet, same split one level up:
+ *     external m/k'/0'/n'   internal m/k'/1'/n'
  */
 import { hmac } from '@noble/hashes/hmac';
 import { sha512 } from '@noble/hashes/sha512';
@@ -97,31 +100,40 @@ export function derivePath(master: DilithiumExtKey, path: number[]): DilithiumEx
 export type Chain = 'external' | 'internal';
 
 /**
- * The account key for a chain: m/0'/0' (external) or m/0'/1' (internal),
- * mirroring btq-core's legacy HD split.
+ * The account key for a chain: m/k'/0' (external) or m/k'/1' (internal).
+ * `account` defaults to 0, which is byte-for-byte btq-core's legacy HD split
+ * and the golden-vector path.
  */
-export function accountKey(master: DilithiumExtKey, chain: Chain): DilithiumExtKey {
-  return derivePath(master, [HARDENED, HARDENED + (chain === 'internal' ? 1 : 0)]);
+export function accountKey(master: DilithiumExtKey, chain: Chain, account = 0): DilithiumExtKey {
+  if (!Number.isInteger(account) || account < 0 || account >= HARDENED) {
+    throw new Error('account out of range');
+  }
+  return derivePath(master, [HARDENED + account, HARDENED + (chain === 'internal' ? 1 : 0)]);
 }
 
 /**
- * The ML-DSA seed at m/0'/{0,1}'/index'. The intermediate account key is a
+ * The ML-DSA seed at m/k'/{0,1}'/index'. The intermediate account key is a
  * spendable secret for the whole chain, so it is zeroed on the way out — only
- * the caller's leaf seed survives.
+ * the caller's leaf seed survives. Omitting `account` is m/0'/… (golden path).
  */
-export function deriveKeySeed(master: DilithiumExtKey, chain: Chain, index: number): Uint8Array {
+export function deriveKeySeed(
+  master: DilithiumExtKey,
+  chain: Chain,
+  index: number,
+  account = 0,
+): Uint8Array {
   if (index < 0 || index >= HARDENED) throw new Error('index out of range');
-  const account = accountKey(master, chain);
+  const node = accountKey(master, chain, account);
   try {
-    return deriveChild(account, (index | HARDENED) >>> 0).seed;
+    return deriveChild(node, (index | HARDENED) >>> 0).seed;
   } finally {
-    account.seed.fill(0);
-    account.chaincode.fill(0);
+    node.seed.fill(0);
+    node.chaincode.fill(0);
   }
 }
 
-export function keyPath(chain: Chain, index: number): string {
-  return `m/0'/${chain === 'internal' ? 1 : 0}'/${index}'`;
+export function keyPath(chain: Chain, index: number, account = 0): string {
+  return `m/${account}'/${chain === 'internal' ? 1 : 0}'/${index}'`;
 }
 
 /** 73-byte serialization (btq-core CDilithiumExtKey::Encode). */

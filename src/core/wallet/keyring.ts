@@ -29,8 +29,20 @@ import { deriveKeySeed, masterFromSeed } from '../crypto/hd.js';
 import { scriptForAddress } from '../script/address.js';
 import { addressFromHdSeed, type DerivedAddress } from './derive.js';
 import { scanChain, type AddressLookup, type ChainScan } from './gap.js';
-import { emptyMeta, type ActivityItem, type WalletMeta, type WalletStorage } from './storage.js';
-import type { KeyringStatus } from './types.js';
+import {
+  MAX_ACCOUNTS,
+  ACCOUNT_NAME_MAX,
+  activeRecord,
+  emptyAccount,
+  emptyMeta,
+  ensureAccounts,
+  mirrorActive,
+  parseAccountName,
+  type ActivityItem,
+  type WalletMeta,
+  type WalletStorage,
+} from './storage.js';
+import type { BackupKind, KeyringStatus } from './types.js';
 import type { ExplorerUtxo } from '../explorer/utxo.js';
 import type { HistoryItem } from '../explorer/history.js';
 import { planSend, previewFromSigned, signPlan, type SendPlan, type SendPreview } from '../tx/builder.js';
@@ -60,7 +72,7 @@ export interface KeyringOptions {
   encrypt?: EncryptOptions;
 }
 
-export type { KeyringStatus } from './types.js';
+export type { BackupKind, KeyringStatus } from './types.js';
 
 export interface Reveal {
   mnemonic: string;
@@ -110,10 +122,25 @@ export class Keyring {
    * the re-stamp bug this reads around.
    */
   private phraseAvailable = false;
+  /**
+   * `origin` as the *decrypted payload* states it, for as long as the vault is
+   * open. Metadata carries a second copy, and that copy can be wrong: a lost
+   * `meta` sends `walletMeta()` through `emptyMeta(…, 'bip39')`, which re-stamps
+   * a raw-seed wallet as bip39, and the next `saveMeta` writes the lie down. The
+   * difference decides which sentence Settings shows a user about their own
+   * backup, so it is read from the one record only `seal()` ever wrote.
+   */
+  private payloadOrigin: SeedOrigin | null = null;
   private pending: { mnemonic: string; challenge: number[] } | null = null;
   private lastActivity = 0;
   private failedUnlocks = 0;
   private unlockBlockedUntil = 0;
+  /**
+   * Last-known active HD account. Updated synchronously on switch/create so
+   * `confirmSend` can pin it *before* the password KDF yields — a concurrent
+   * switch must not retarget a send the user already reviewed.
+   */
+  private activeIndex = 0;
   private readonly network: BtqNetwork;
   private readonly lockAfterMs: number;
   private readonly now: () => number;
@@ -130,13 +157,23 @@ export class Keyring {
   async status(): Promise<KeyringStatus> {
     this.maybeAutoLock();
     const vault = await this.storage.loadVault();
-    const meta = await this.storage.loadMeta();
+    const loaded = await this.storage.loadMeta();
+    const meta = loaded ? mirrorActive(ensureAccounts(loaded)) : null;
+    // Which backup this wallet can show, decided in one place. An open vault
+    // always has one: the phrase when the entropy is sealed beside the seed,
+    // the HD seed itself otherwise — a raw-32 import never had a phrase, and a
+    // v1 vault's entropy is gone for good. `null` means "offer no control",
+    // which is the locked case, and never "offer a control that does nothing".
+    const backup: BackupKind | null =
+      this.hdSeed === null ? null : this.phraseAvailable ? 'recoveryPhrase' : 'hdSeed';
     return {
       hasVault: vault !== null,
       unlocked: this.hdSeed !== null,
       pendingReveal: this.pending !== null,
       network: meta?.network ?? this.network,
-      origin: meta?.origin ?? null,
+      // Payload first, metadata only as the locked-wallet fallback — see the
+      // note on `payloadOrigin`.
+      origin: this.payloadOrigin ?? meta?.origin ?? null,
       externalNext: meta?.externalNext ?? 0,
       internalNext: meta?.internalNext ?? 0,
       usedExternal: meta?.usedExternal ?? 0,
@@ -145,9 +182,19 @@ export class Keyring {
       confirmedBalanceSats: meta?.confirmedBalanceSats ?? '0',
       tipHeight: meta?.tipHeight ?? null,
       lastScanAt: meta?.lastScanAt ?? null,
-      // False whenever locked, so a locked popup learns nothing about whether
-      // this device's vault could produce a phrase.
-      canRevealPhrase: this.hdSeed !== null && this.phraseAvailable,
+      backup,
+      // Derived, never recomputed: a second independent boolean is a second
+      // thing that can disagree with the first, and the disagreement that
+      // matters is the one that offers a phrase this vault cannot produce.
+      // False whenever locked, so a locked popup learns nothing about it.
+      canRevealPhrase: backup === 'recoveryPhrase',
+      activeAccount: meta?.activeAccount ?? 0,
+      accounts: (meta?.accounts ?? []).map((a) => ({
+        index: a.index,
+        name: a.name,
+        lastBalanceSats: a.lastBalanceSats,
+        address: a.address,
+      })),
     };
   }
 
@@ -233,8 +280,12 @@ export class Keyring {
       const payload = decodePayload(plain);
       this.hdSeed = hexToBytes(payload.hdSeedHex);
       this.phraseAvailable = payload.entropyHex !== undefined;
+      this.payloadOrigin = payload.origin;
       this.failedUnlocks = 0;
       this.unlockBlockedUntil = 0;
+      // A restarted worker defaults activeIndex to 0; restore the persisted
+      // account before any confirmSend can pin the wrong one.
+      await this.walletMeta();
       this.touch();
     } finally {
       wipePlaintext(plain);
@@ -248,6 +299,7 @@ export class Keyring {
       this.hdSeed = null;
     }
     this.phraseAvailable = false;
+    this.payloadOrigin = null;
     this.lastActivity = 0;
   }
 
@@ -261,13 +313,82 @@ export class Keyring {
 
   async receiveAddress(): Promise<DerivedAddress> {
     this.requireUnlocked();
-    const meta = await this.storage.loadMeta();
-    return this.receiveAt(meta?.externalNext ?? 0);
+    const meta = await this.walletMeta();
+    const rec = activeRecord(meta);
+    const derived = this.receiveAt(rec.externalNext, rec.index);
+    if (rec.address !== derived.address) {
+      rec.address = derived.address;
+      mirrorActive(meta);
+      await this.storage.saveMeta(meta);
+    }
+    return derived;
   }
 
-  addressAt(chain: Chain, index: number): DerivedAddress {
+  /**
+   * Address at a chain index. `account` defaults to 0 (golden path) so existing
+   * callers and tests keep their meaning; the send/scan path always passes the
+   * active account explicitly.
+   */
+  addressAt(chain: Chain, index: number, account = 0): DerivedAddress {
     const seed = this.requireUnlocked();
-    return addressFromHdSeed(seed, chain, index, this.network);
+    return addressFromHdSeed(seed, chain, index, this.network, account);
+  }
+
+  async createAccount(): Promise<{ index: number; name: string; address: string }> {
+    this.requireUnlocked();
+    const meta = await this.walletMeta();
+    if (meta.accounts.length >= MAX_ACCOUNTS) {
+      throw new WalletError('BAD_PARAMS', `This wallet holds at most ${MAX_ACCOUNTS} accounts.`);
+    }
+    const nextIndex = Math.max(...meta.accounts.map((a) => a.index)) + 1;
+    if (nextIndex >= MAX_ACCOUNTS) {
+      throw new WalletError('BAD_PARAMS', `This wallet holds at most ${MAX_ACCOUNTS} accounts.`);
+    }
+    const rec = emptyAccount(nextIndex);
+    rec.address = this.addressAt('external', 0, rec.index).address;
+    meta.accounts.push(rec);
+    meta.accounts.sort((a, b) => a.index - b.index);
+    meta.activeAccount = rec.index;
+    this.activeIndex = rec.index;
+    mirrorActive(meta);
+    await this.storage.saveMeta(meta);
+    this.touch();
+    return { index: rec.index, name: rec.name, address: rec.address };
+  }
+
+  async switchAccount(index: number): Promise<{ index: number; name: string; address: string }> {
+    this.requireUnlocked();
+    if (!Number.isInteger(index) || index < 0 || index >= MAX_ACCOUNTS) {
+      throw new WalletError('BAD_PARAMS', 'Unknown account.');
+    }
+    const meta = await this.walletMeta();
+    const rec = meta.accounts.find((a) => a.index === index);
+    if (!rec) throw new WalletError('BAD_PARAMS', 'Unknown account.');
+    meta.activeAccount = rec.index;
+    this.activeIndex = rec.index;
+    if (!rec.address) rec.address = this.addressAt('external', rec.externalNext, rec.index).address;
+    mirrorActive(meta);
+    await this.storage.saveMeta(meta);
+    this.touch();
+    return { index: rec.index, name: rec.name, address: rec.address };
+  }
+
+  async renameAccount(index: number, name: string): Promise<{ index: number; name: string }> {
+    this.requireUnlocked();
+    if (!Number.isInteger(index) || index < 0 || index >= MAX_ACCOUNTS) {
+      throw new WalletError('BAD_PARAMS', 'Unknown account.');
+    }
+    const trimmed = parseAccountName(name, '');
+    if (trimmed.length === 0) {
+      throw new WalletError('BAD_PARAMS', `Name must be 1–${ACCOUNT_NAME_MAX} characters.`);
+    }
+    const meta = await this.walletMeta();
+    const rec = meta.accounts.find((a) => a.index === index);
+    if (!rec) throw new WalletError('BAD_PARAMS', 'Unknown account.');
+    rec.name = trimmed;
+    await this.storage.saveMeta(meta);
+    this.touch();
+    return { index: rec.index, name: rec.name };
   }
 
   /**
@@ -352,18 +473,80 @@ export class Keyring {
   }
 
   /**
+   * Show the HD seed as hex, behind the password, on an already-unlocked wallet.
+   *
+   * The backup for the wallets that have no phrase to show — a raw-32 import
+   * never had one, and a v1 vault's BIP39 entropy is gone because
+   * `mnemonicToHdSeed` is one-way. What comes back is the master secret every
+   * key in this wallet is derived from, and it is offered *instead of* the
+   * phrase control, never as well — see `status().backup`.
+   *
+   * How far it gets the user back depends on which wallet it is, and the popup
+   * says which rather than averaging the two: a raw-32 wallet's 32-byte seed
+   * goes straight back in through `Import → raw seed`, while a seed that came
+   * from a phrase is 64 bytes and `parseRawSeedHex` deliberately refuses those
+   * (`tests/unit/mnemonic.test.ts`, "so a BIP39 seed is not imported as raw").
+   * For that wallet the phrase on paper is still what restores it, and this is
+   * the master secret to keep beside it.
+   *
+   * Same guarantees as `revealPhrase`, deliberately and by reusing the same
+   * code: locked refuses, the password is re-proved against the sealed vault,
+   * a wrong one costs the same shared back-off, and pages cannot reach it.
+   * Like the phrase, the hex is a JS string that cannot be zeroed — so it is
+   * read out of the payload, handed to the one screen that shows it, and never
+   * cached on this object.
+   */
+  async revealSeedHex(password: string): Promise<{ seedHex: string }> {
+    const plain = await this.reauthPlaintext(password);
+    let stored: Uint8Array | undefined;
+    try {
+      const payload = decodePayload(plain);
+      // Re-checked against the seed this wallet is actually deriving from, for
+      // the same reason the phrase is re-derived before it is shown: hex that
+      // restores a *different* wallet is a backup the user trusts and loses
+      // their coins to. Plain loop compare — both sides are our own material
+      // out of one authenticated ciphertext, there is no attacker input and no
+      // oracle, and the caller already proved the password to get here.
+      const live = this.hdSeed;
+      if (!live) throw new WalletError('LOCKED', 'Wallet is locked.');
+      stored = hexToBytes(payload.hdSeedHex);
+      let same = stored.length === live.length;
+      if (same) {
+        for (let i = 0; i < stored.length; i++) {
+          if (stored[i] !== live[i]) same = false;
+        }
+      }
+      if (!same) {
+        throw new WalletError('NOT_A_VAULT', 'The sealed seed is not the seed this wallet is using.');
+      }
+      return { seedHex: payload.hdSeedHex };
+    } finally {
+      if (stored) wipeBytes(stored);
+      wipePlaintext(plain);
+    }
+  }
+
+  /**
    * Walk every derived address on both chains, inclusive of the next unused
    * index (so a payment to the address currently on screen is picked up). The
    * one place this loop is written down.
    */
-  private async eachAddress<T>(fn: (chain: Chain, index: number, address: string) => Promise<T[]>): Promise<T[]> {
+  private async eachAddress<T>(
+    fn: (chain: Chain, index: number, address: string) => Promise<T[]>,
+    account?: number,
+  ): Promise<T[]> {
     this.requireUnlocked();
-    const meta = await this.storage.loadMeta();
+    const meta = await this.walletMeta();
+    const rec =
+      account === undefined ? activeRecord(meta) : meta.accounts.find((a) => a.index === account);
+    // A missing account must not silently walk the active one: that pairs
+    // another account's UTXOs with this caller's keys (or the reverse).
+    if (!rec) throw new WalletError('BAD_PARAMS', 'Unknown account.');
     const out: T[] = [];
     for (const chain of ['external', 'internal'] as const) {
-      const last = Math.max((chain === 'external' ? meta?.externalNext : meta?.internalNext) ?? 0, 0);
+      const last = Math.max(chain === 'external' ? rec.externalNext : rec.internalNext, 0);
       for (let i = 0; i <= last; i++) {
-        out.push(...(await fn(chain, i, this.addressAt(chain, i).address)));
+        out.push(...(await fn(chain, i, this.addressAt(chain, i, rec.index).address)));
       }
     }
     return out;
@@ -375,8 +558,8 @@ export class Keyring {
    * builds a conflicting replacement of a payment already in flight, so a payee
    * can end up with nothing while the balance still looks spent.
    */
-  async gatherUtxos(fetchUtxos: FetchUtxos): Promise<OwnedUtxo[]> {
-    const reserved = await this.reservedOutpoints();
+  async gatherUtxos(fetchUtxos: FetchUtxos, account?: number): Promise<OwnedUtxo[]> {
+    const reserved = await this.reservedOutpoints(account);
     const owned = await this.eachAddress<OwnedUtxo>(async (chain, index, address) => {
       const script = scriptForAddress(address, this.network);
       const rows = await fetchUtxos(address);
@@ -390,7 +573,7 @@ export class Keyring {
         index,
         blockHeight: u.blockHeight,
       }));
-    });
+    }, account);
     return owned.filter((u) => !reserved.has(outpointKey(u)));
   }
 
@@ -400,10 +583,12 @@ export class Keyring {
    * user must be able to retry it at a higher fee — and a reservation expires
    * after PENDING_RESERVE_MS so a dropped transaction cannot strand the coins.
    */
-  private async reservedOutpoints(): Promise<Set<string>> {
+  private async reservedOutpoints(account?: number): Promise<Set<string>> {
     const reserved = new Set<string>();
     const now = this.now();
+    const active = account ?? (await this.walletMeta()).activeAccount;
     for (const item of await this.storage.loadActivity()) {
+      if ((item.accountIndex ?? 0) !== active) continue;
       if (item.status !== 'pending') continue;
       if (item.at > 0 && now - item.at > PENDING_RESERVE_MS) continue;
       const keys = item.spends ?? (item.hex ? outpointsOfSignedHex(item.hex) : []);
@@ -470,9 +655,14 @@ export class Keyring {
     amountSats: bigint,
     fetchUtxos: FetchUtxos,
     feeRateSatPerKvB: number,
-  ): Promise<SendPlan & { changeIndex: number }> {
-    const utxos = await this.gatherUtxos(fetchUtxos);
-    const change = await this.changeAddress();
+    account?: number,
+  ): Promise<SendPlan & { changeIndex: number; account: number }> {
+    const meta = await this.walletMeta();
+    const rec =
+      account === undefined ? activeRecord(meta) : meta.accounts.find((a) => a.index === account);
+    if (!rec) throw new WalletError('BAD_PARAMS', 'Unknown account.');
+    const utxos = await this.gatherUtxos(fetchUtxos, rec.index);
+    const change = this.addressAt('internal', rec.internalNext, rec.index);
     const plan = planSend({
       utxos,
       destination,
@@ -480,7 +670,7 @@ export class Keyring {
       changeAddress: change.address,
       feeRateSatPerKvB,
     });
-    return { ...plan, changeIndex: change.index };
+    return { ...plan, changeIndex: change.index, account: rec.index };
   }
 
   async confirmSend(opts: {
@@ -492,13 +682,18 @@ export class Keyring {
     feeRateSatPerKvB?: number;
     now?: number;
   }): Promise<ConfirmSendResult> {
+    // Pin the account *before* reauth yields on the KDF. The header switcher
+    // stays clickable while the popup shows "Signing…"; without this pin a
+    // concurrent switch would debit a different account than the one whose
+    // UTXOs and fee the user just reviewed.
+    const account = this.activeIndex;
     await this.reauth(opts.password);
     const seed = this.requireUnlocked();
     const rate = assertFeeRate(opts.feeRateSatPerKvB ?? MIN_RELAY_SAT_PER_KVB);
-    const plan = await this.buildPlan(opts.destination, opts.amountSats, opts.fetchUtxos, rate);
+    const plan = await this.buildPlan(opts.destination, opts.amountSats, opts.fetchUtxos, rate, account);
     // Sign before any network call: a broadcast failure must never cost us the
     // bytes. previewFromSigned re-decodes them and refuses on any disagreement.
-    const signed = signPlan(plan, (u) => deriveKeySeed(masterFromSeed(seed), u.chain, u.index));
+    const signed = signPlan(plan, (u) => deriveKeySeed(masterFromSeed(seed), u.chain, u.index, plan.account));
     const preview = previewFromSigned(signed);
 
     let broadcastStatus: 'pending' | 'signed';
@@ -534,13 +729,18 @@ export class Keyring {
       broadcastVia,
       spends: plan.inputs.map(outpointKey),
       at: opts.now ?? this.now(),
+      accountIndex: plan.account,
     };
     const prev = await this.storage.loadActivity();
     await this.storage.saveActivity([item, ...prev].slice(0, 50));
     if (plan.change > 0n) {
-      const meta = (await this.storage.loadMeta()) ?? emptyMeta(this.network, 'bip39');
-      meta.internalNext = Math.max(meta.internalNext, plan.changeIndex + 1);
-      await this.storage.saveMeta(meta);
+      const meta = await this.walletMeta();
+      const rec = meta.accounts.find((a) => a.index === plan.account);
+      if (rec) {
+        rec.internalNext = Math.max(rec.internalNext, plan.changeIndex + 1);
+        mirrorActive(meta);
+        await this.storage.saveMeta(meta);
+      }
     }
     this.touch();
     return { ...preview, broadcastStatus, broadcastError, broadcastVia };
@@ -566,7 +766,9 @@ export class Keyring {
       }
     }
 
-    const local = await this.storage.loadActivity();
+    const account = (await this.walletMeta()).activeAccount;
+    const allLocal = await this.storage.loadActivity();
+    const local = allLocal.filter((a) => (a.accountIndex ?? 0) === account);
     let activityChanged = false;
     for (const a of local) {
       const onchain = seen.get(a.txid);
@@ -590,7 +792,7 @@ export class Keyring {
         seen.set(a.txid, { ...onchain, at: a.at });
       }
     }
-    if (activityChanged) await this.storage.saveActivity(local);
+    if (activityChanged) await this.storage.saveActivity(allLocal);
 
     const height = tip?.height ?? null;
     return [...seen.values()].map((h) => ({
@@ -600,7 +802,8 @@ export class Keyring {
   }
 
   async listActivity(): Promise<ActivityItem[]> {
-    return this.storage.loadActivity();
+    const account = (await this.walletMeta()).activeAccount;
+    return (await this.storage.loadActivity()).filter((a) => (a.accountIndex ?? 0) === account);
   }
 
   async connectedSites(): Promise<string[]> {
@@ -674,12 +877,6 @@ export class Keyring {
     await this.storage.saveOrigins(allowed);
   }
 
-  private async changeAddress(): Promise<DerivedAddress> {
-    this.requireUnlocked();
-    const meta = await this.storage.loadMeta();
-    return this.addressAt('internal', meta?.internalNext ?? 0);
-  }
-
   /**
    * Incremental gap scan.
    *
@@ -713,59 +910,60 @@ export class Keyring {
     lastScanAt: number;
   }> {
     this.requireUnlocked();
-    const meta = (await this.storage.loadMeta()) ?? emptyMeta(this.network, 'bip39');
+    const meta = await this.walletMeta();
+    const rec = activeRecord(meta);
     const full = opts.full === true;
 
     const external = await scanChain({
       chain: 'external',
-      addressAt: (i) => this.addressAt('external', i).address,
+      addressAt: (i) => this.addressAt('external', i, rec.index).address,
       lookup,
-      startIndex: full ? 0 : Math.max(0, meta.externalNext),
-      lastUsedIndex: full ? -1 : meta.externalNext - 1,
+      startIndex: full ? 0 : Math.max(0, rec.externalNext),
+      lastUsedIndex: full ? -1 : rec.externalNext - 1,
     });
     const internal = await scanChain({
       chain: 'internal',
-      addressAt: (i) => this.addressAt('internal', i).address,
+      addressAt: (i) => this.addressAt('internal', i, rec.index).address,
       lookup,
-      startIndex: full ? 0 : Math.max(0, meta.internalNext),
-      lastUsedIndex: full ? -1 : meta.internalNext - 1,
+      startIndex: full ? 0 : Math.max(0, rec.internalNext),
+      lastUsedIndex: full ? -1 : rec.internalNext - 1,
     });
 
-    let totalBalanceSats = BigInt(meta.lastBalanceSats || '0');
-    let confirmedBalanceSats = BigInt(meta.confirmedBalanceSats || '0');
-    const next: WalletMeta = {
-      ...meta,
-      externalNext: Math.max(full ? 0 : meta.externalNext, external.nextIndex),
-      internalNext: Math.max(full ? 0 : meta.internalNext, internal.nextIndex),
-      usedExternal: (full ? 0 : meta.usedExternal) + external.used.length,
-      usedInternal: (full ? 0 : meta.usedInternal) + internal.used.length,
-      scannedExternal: Math.max(full ? -1 : meta.scannedExternal, external.scannedTo),
-      scannedInternal: Math.max(full ? -1 : meta.scannedInternal, internal.scannedTo),
-      tipHeight: tip?.height ?? meta.tipHeight,
-      lastScanAt: this.now(),
-    };
+    rec.externalNext = Math.max(full ? 0 : rec.externalNext, external.nextIndex);
+    rec.internalNext = Math.max(full ? 0 : rec.internalNext, internal.nextIndex);
+    rec.usedExternal = (full ? 0 : rec.usedExternal) + external.used.length;
+    rec.usedInternal = (full ? 0 : rec.usedInternal) + internal.used.length;
+    rec.scannedExternal = Math.max(full ? -1 : rec.scannedExternal, external.scannedTo);
+    rec.scannedInternal = Math.max(full ? -1 : rec.scannedInternal, internal.scannedTo);
+    rec.address = this.addressAt('external', rec.externalNext, rec.index).address;
+    meta.tipHeight = tip?.height ?? meta.tipHeight;
+    meta.lastScanAt = this.now();
+    mirrorActive(meta);
     // Persist the new cursor first so the UTXO sweep below covers every address.
-    await this.storage.saveMeta(next);
+    await this.storage.saveMeta(meta);
 
+    let totalBalanceSats = BigInt(rec.lastBalanceSats || '0');
+    let confirmedBalanceSats = BigInt(rec.confirmedBalanceSats || '0');
     if (fetchUtxos) {
       const b = await this.balances(fetchUtxos);
       totalBalanceSats = b.totalSats;
       confirmedBalanceSats = b.confirmedSats;
-      next.lastBalanceSats = totalBalanceSats.toString();
-      next.confirmedBalanceSats = confirmedBalanceSats.toString();
-      await this.storage.saveMeta(next);
+      rec.lastBalanceSats = totalBalanceSats.toString();
+      rec.confirmedBalanceSats = confirmedBalanceSats.toString();
+      mirrorActive(meta);
+      await this.storage.saveMeta(meta);
     }
 
     this.touch();
     return {
       external,
       internal,
-      usedExternal: next.usedExternal,
-      usedInternal: next.usedInternal,
+      usedExternal: rec.usedExternal,
+      usedInternal: rec.usedInternal,
       totalBalanceSats,
       confirmedBalanceSats,
-      tipHeight: next.tipHeight,
-      lastScanAt: next.lastScanAt ?? this.now(),
+      tipHeight: meta.tipHeight,
+      lastScanAt: meta.lastScanAt ?? this.now(),
     };
   }
 
@@ -780,19 +978,26 @@ export class Keyring {
     if (this.now() - this.lastActivity >= this.lockAfterMs) this.lock();
   }
 
-  private receiveAt(index: number): DerivedAddress {
+  private receiveAt(index: number, account: number): DerivedAddress {
     const seed = this.requireUnlocked();
     this.touch();
-    return addressFromHdSeed(seed, 'external', index, this.network);
+    return addressFromHdSeed(seed, 'external', index, this.network, account);
   }
 
   /** Receive address without resetting the auto-lock clock. */
   private async peekReceiveAddress(): Promise<string> {
-    const meta = await this.storage.loadMeta();
+    const rec = activeRecord(await this.walletMeta());
     this.maybeAutoLock();
     const seed = this.hdSeed;
     if (!seed) throw new WalletError('LOCKED', 'Wallet is locked.');
-    return addressFromHdSeed(seed, 'external', meta?.externalNext ?? 0, this.network).address;
+    return addressFromHdSeed(seed, 'external', rec.externalNext, this.network, rec.index).address;
+  }
+
+  private async walletMeta(): Promise<WalletMeta> {
+    const loaded = await this.storage.loadMeta();
+    const meta = mirrorActive(ensureAccounts(loaded ?? emptyMeta(this.network, 'bip39')));
+    this.activeIndex = meta.activeAccount;
+    return meta;
   }
 
   /**
@@ -831,6 +1036,8 @@ export class Keyring {
       await this.storage.saveMeta(emptyMeta(this.network, origin));
       this.hdSeed = new Uint8Array(hdSeed);
       this.phraseAvailable = entropy !== undefined;
+      this.payloadOrigin = origin;
+      this.activeIndex = 0;
       this.clearPending();
       this.touch();
     } finally {

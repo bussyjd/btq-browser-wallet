@@ -157,8 +157,9 @@ child:   I = HMAC-SHA512(key = parent_chaincode,
          I_L -> child seed                  I_R -> child chaincode
          *** HARDENED ONLY *** — non-hardened indices are refused by design
 extkey:  73 bytes = depth(1) ‖ fingerprint(4) ‖ child(4 BE) ‖ chaincode(32) ‖ seed(32)
-path:    external m/0'/0'/n'      internal m/0'/1'/n'
-         (src/wallet/scriptpubkeyman.cpp DeriveNewDilithiumChildKey)
+path:    external m/k'/0'/n'      internal m/k'/1'/n'
+         k = 0 is src/wallet/scriptpubkeyman.cpp DeriveNewDilithiumChildKey
+         extra accounts (this wallet) use k ≥ 1; Core has no RPC for them
 key:     ML-DSA-44 KeyGen(ξ = derived seed)
 ```
 

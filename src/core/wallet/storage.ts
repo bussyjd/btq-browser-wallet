@@ -2,9 +2,38 @@ import type { BtqNetwork } from '../script/address.js';
 import type { SeedOrigin } from '../vault/payload.js';
 import type { BroadcastVia } from './errors.js';
 
+/** HD accounts this wallet will derive. Caps a storage-wedge of huge indices. */
+export const MAX_ACCOUNTS = 20;
+export const ACCOUNT_NAME_MAX = 32;
+
+/**
+ * One HD account: path prefix m/k'/{0,1}'/n'. Index 0 is btq-core's legacy
+ * account and the golden-vector path. Extra accounts are this wallet's, not
+ * a Core RPC concept.
+ */
+export interface AccountRecord {
+  index: number;
+  name: string;
+  externalNext: number;
+  internalNext: number;
+  usedExternal: number;
+  usedInternal: number;
+  lastBalanceSats: string;
+  confirmedBalanceSats: string;
+  scannedExternal: number;
+  scannedInternal: number;
+  /** Cached current receive address. Public; display only. */
+  address: string | null;
+}
+
 export interface WalletMeta {
   network: BtqNetwork;
   origin: SeedOrigin;
+  /**
+   * Cursor/balance of the *active* account, mirrored so older readers and the
+   * status contract keep working. The per-account records in `accounts` are
+   * the source of truth.
+   */
   externalNext: number;
   internalNext: number;
   usedExternal: number;
@@ -20,6 +49,8 @@ export interface WalletMeta {
   tipHeight: number | null;
   /** ms epoch of the last successful scan. */
   lastScanAt: number | null;
+  accounts: AccountRecord[];
+  activeAccount: number;
 }
 
 export interface ActivityItem {
@@ -37,6 +68,8 @@ export interface ActivityItem {
   /** Outpoints this transaction spends, so a later send cannot re-select them. */
   spends?: string[];
   at: number;
+  /** HD account that produced this send. Missing on pre-account rows = 0. */
+  accountIndex?: number;
 }
 
 export interface WalletStorage {
@@ -56,7 +89,28 @@ export interface WalletStorage {
 const NETWORKS: ReadonlySet<string> = new Set(['mainnet', 'testnet', 'signet', 'regtest']);
 const ACTIVITY_STATUS: ReadonlySet<string> = new Set(['pending', 'confirmed', 'signed']);
 
+export function defaultAccountName(index: number): string {
+  return `Account ${index + 1}`;
+}
+
+export function emptyAccount(index: number): AccountRecord {
+  return {
+    index,
+    name: defaultAccountName(index),
+    externalNext: 0,
+    internalNext: 0,
+    usedExternal: 0,
+    usedInternal: 0,
+    lastBalanceSats: '0',
+    confirmedBalanceSats: '0',
+    scannedExternal: -1,
+    scannedInternal: -1,
+    address: null,
+  };
+}
+
 export function emptyMeta(network: BtqNetwork, origin: SeedOrigin): WalletMeta {
+  const account = emptyAccount(0);
   return {
     network,
     origin,
@@ -70,7 +124,62 @@ export function emptyMeta(network: BtqNetwork, origin: SeedOrigin): WalletMeta {
     scannedInternal: -1,
     tipHeight: null,
     lastScanAt: null,
+    accounts: [account],
+    activeAccount: 0,
   };
+}
+
+/**
+ * Guarantee a non-empty accounts list. An older meta written before extra
+ * accounts existed becomes account 0, keeping its cursors.
+ */
+export function ensureAccounts(meta: WalletMeta): WalletMeta {
+  if (!Array.isArray(meta.accounts) || meta.accounts.length === 0) {
+    const rec = emptyAccount(0);
+    rec.externalNext = meta.externalNext;
+    rec.internalNext = meta.internalNext;
+    rec.usedExternal = meta.usedExternal;
+    rec.usedInternal = meta.usedInternal;
+    rec.lastBalanceSats = meta.lastBalanceSats;
+    rec.confirmedBalanceSats = meta.confirmedBalanceSats;
+    rec.scannedExternal = meta.scannedExternal;
+    rec.scannedInternal = meta.scannedInternal;
+    meta.accounts = [rec];
+    meta.activeAccount = 0;
+  }
+  if (!meta.accounts.some((a) => a.index === meta.activeAccount)) {
+    meta.activeAccount = meta.accounts[0]!.index;
+  }
+  return meta;
+}
+
+export function activeRecord(meta: WalletMeta): AccountRecord {
+  const found = meta.accounts.find((a) => a.index === meta.activeAccount);
+  if (found) return found;
+  const first = meta.accounts[0];
+  if (first) {
+    meta.activeAccount = first.index;
+    return first;
+  }
+  const created = emptyAccount(0);
+  meta.accounts = [created];
+  meta.activeAccount = 0;
+  return created;
+}
+
+/** Copy the active account's cursors and balance onto the top-level fields. */
+export function mirrorActive(meta: WalletMeta): WalletMeta {
+  const rec = activeRecord(meta);
+  meta.activeAccount = rec.index;
+  meta.externalNext = rec.externalNext;
+  meta.internalNext = rec.internalNext;
+  meta.usedExternal = rec.usedExternal;
+  meta.usedInternal = rec.usedInternal;
+  meta.lastBalanceSats = rec.lastBalanceSats;
+  meta.confirmedBalanceSats = rec.confirmedBalanceSats;
+  meta.scannedExternal = rec.scannedExternal;
+  meta.scannedInternal = rec.scannedInternal;
+  return meta;
 }
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -85,6 +194,42 @@ function satsString(v: unknown): string {
   return typeof v === 'string' && /^-?\d{1,20}$/.test(v) ? v : '0';
 }
 
+export function parseAccountName(v: unknown, fallback: string): string {
+  if (typeof v !== 'string') return fallback;
+  let stripped = '';
+  for (const ch of v) {
+    const c = ch.codePointAt(0) ?? 0;
+    if (c < 32 || c === 127) continue;
+    stripped += ch;
+  }
+  const name = stripped.trim();
+  if (name.length === 0) return fallback;
+  return name.slice(0, ACCOUNT_NAME_MAX);
+}
+
+function parseCachedAddress(v: unknown): string | null {
+  return typeof v === 'string' && v.length >= 20 && v.length <= 128 ? v : null;
+}
+
+function parseAccountRecord(v: unknown): AccountRecord | null {
+  if (!isRecord(v)) return null;
+  const index = counter(v.index, -1);
+  if (index < 0 || index >= MAX_ACCOUNTS) return null;
+  return {
+    index,
+    name: parseAccountName(v.name, defaultAccountName(index)),
+    externalNext: counter(v.externalNext),
+    internalNext: counter(v.internalNext),
+    usedExternal: counter(v.usedExternal),
+    usedInternal: counter(v.usedInternal),
+    lastBalanceSats: satsString(v.lastBalanceSats),
+    confirmedBalanceSats: satsString(v.confirmedBalanceSats),
+    scannedExternal: counter(v.scannedExternal, -1),
+    scannedInternal: counter(v.scannedInternal, -1),
+    address: parseCachedAddress(v.address),
+  };
+}
+
 /**
  * Validate persisted wallet metadata. Storage is attacker-adjacent: anything
  * that can write extension storage could set a huge `externalNext` and make
@@ -95,21 +240,58 @@ export function parseMeta(v: unknown): WalletMeta | null {
   if (!isRecord(v)) return null;
   if (typeof v.network !== 'string' || !NETWORKS.has(v.network)) return null;
   if (v.origin !== 'bip39' && v.origin !== 'raw32') return null;
-  return {
+
+  const account0 = emptyAccount(0);
+  account0.externalNext = counter(v.externalNext);
+  account0.internalNext = counter(v.internalNext);
+  account0.usedExternal = counter(v.usedExternal);
+  account0.usedInternal = counter(v.usedInternal);
+  account0.lastBalanceSats = satsString(v.lastBalanceSats);
+  account0.confirmedBalanceSats = satsString(v.confirmedBalanceSats);
+  account0.scannedExternal = counter(v.scannedExternal, -1);
+  account0.scannedInternal = counter(v.scannedInternal, -1);
+  account0.address = parseCachedAddress(v.address);
+
+  const accounts: AccountRecord[] = [];
+  const seen = new Set<number>();
+  if (Array.isArray(v.accounts)) {
+    for (const raw of v.accounts) {
+      if (accounts.length >= MAX_ACCOUNTS) break;
+      const rec = parseAccountRecord(raw);
+      if (!rec || seen.has(rec.index)) continue;
+      seen.add(rec.index);
+      accounts.push(rec);
+    }
+  }
+  if (accounts.length === 0) accounts.push(account0);
+  else if (!seen.has(0)) {
+    // A poisoned list that omits account 0 would hide the golden-path coins
+    // and, with nextIndex already at MAX_ACCOUNTS, block adding it back.
+    accounts.push(emptyAccount(0));
+  }
+  accounts.sort((a, b) => a.index - b.index);
+
+  const activeWanted =
+    typeof v.activeAccount === 'number' && Number.isInteger(v.activeAccount) ? v.activeAccount : 0;
+  const activeAccount = accounts.some((a) => a.index === activeWanted) ? activeWanted : accounts[0]!.index;
+
+  return mirrorActive({
     network: v.network as BtqNetwork,
     origin: v.origin,
-    externalNext: counter(v.externalNext),
-    internalNext: counter(v.internalNext),
-    usedExternal: counter(v.usedExternal),
-    usedInternal: counter(v.usedInternal),
-    lastBalanceSats: satsString(v.lastBalanceSats),
-    confirmedBalanceSats: satsString(v.confirmedBalanceSats),
-    scannedExternal: counter(v.scannedExternal, -1),
-    scannedInternal: counter(v.scannedInternal, -1),
+    externalNext: account0.externalNext,
+    internalNext: account0.internalNext,
+    usedExternal: account0.usedExternal,
+    usedInternal: account0.usedInternal,
+    lastBalanceSats: account0.lastBalanceSats,
+    confirmedBalanceSats: account0.confirmedBalanceSats,
+    scannedExternal: account0.scannedExternal,
+    scannedInternal: account0.scannedInternal,
     tipHeight:
       typeof v.tipHeight === 'number' && Number.isInteger(v.tipHeight) && v.tipHeight >= 0 ? v.tipHeight : null,
     lastScanAt: typeof v.lastScanAt === 'number' && Number.isFinite(v.lastScanAt) ? v.lastScanAt : null,
-  };
+    accounts,
+    activeAccount,
+  });
 }
 
 /** Validate persisted activity, dropping rows that are not well-formed. */
@@ -134,6 +316,16 @@ export function parseActivity(v: unknown): ActivityItem[] {
     if (raw.broadcastVia === 'node' || raw.broadcastVia === 'explorer') item.broadcastVia = raw.broadcastVia;
     if (Array.isArray(raw.spends)) {
       item.spends = raw.spends.filter((s): s is string => typeof s === 'string' && /^[0-9a-f]{64}:\d+$/i.test(s));
+    }
+    if (
+      typeof raw.accountIndex === 'number' &&
+      Number.isInteger(raw.accountIndex) &&
+      raw.accountIndex >= 0 &&
+      raw.accountIndex < MAX_ACCOUNTS
+    ) {
+      item.accountIndex = raw.accountIndex;
+    } else {
+      item.accountIndex = 0;
     }
     out.push(item);
   }

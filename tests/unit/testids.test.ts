@@ -11,7 +11,8 @@ import { fileURLToPath } from 'node:url';
  *
  * The list is the selector contract the end-to-end suite drives, in full.
  */
-const UI = join(dirname(fileURLToPath(import.meta.url)), '../../src/ui');
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '../..');
+const UI = join(ROOT, 'src/ui');
 
 const REQUIRED = [
   'welcome-create',
@@ -79,6 +80,14 @@ const REQUIRED = [
   'reveal-submit',
   'reveal-error',
   'reveal-hide',
+  // The other backup control: a wallet with no phrase to show offers the HD
+  // seed *instead*, never a disabled "Show recovery phrase".
+  'reveal-seed',
+  'reveal-seed-pw',
+  'reveal-seed-submit',
+  'reveal-seed-error',
+  'reveal-seed-hide',
+  'seed-hex',
   'wipe-input',
   'wipe-confirm',
   'connect-origin',
@@ -86,6 +95,11 @@ const REQUIRED = [
   'connect-deny',
   'toast',
   'error',
+  'account-switcher',
+  'account-list',
+  'account-add',
+  'account-row-0',
+  'account-rename',
 ];
 
 function walk(dir: string): string[] {
@@ -120,12 +134,64 @@ function renderedTestIds(): Set<string> {
     else if (tpl.startsWith('confirm-word-')) for (let i = 1; i <= 24; i++) ids.add(`confirm-word-${i}`);
     else if (tpl.startsWith('tab-')) for (const t of ['receive', 'send', 'activity']) ids.add(`tab-${t}`);
     else if (tpl.startsWith('fee-')) for (const f of ['economy', 'normal', 'priority']) ids.add(`fee-${f}`);
+    else if (tpl.startsWith('account-row-')) for (let i = 0; i < 20; i++) ids.add(`account-row-${i}`);
     else ids.add(tpl);
   }
   // InlineError renders `error` unless a caller overrides testId.
   if (/testId = 'error'/.test(blob)) ids.add('error');
   return ids;
 }
+
+/**
+ * The recording redaction is a *selector* contract too, and a stricter one: a
+ * phrase surface the stylesheet does not name paints its characters into a
+ * video shipped in this repository, and every test still passes, because the
+ * tests read the DOM and the DOM is untouched. Checking it here costs
+ * milliseconds; the alternative is noticing in a released video.
+ */
+describe('recording redaction covers every surface it declares', () => {
+  const redact = readFileSync(join(ROOT, 'tests/e2e/fixtures/redact.ts'), 'utf8');
+  const selectors = [...redact.matchAll(/^export const [A-Z_]+ = '([^']+)';$/gm)].map((m) => m[1]!);
+
+  it('names four surfaces and no fewer', () => {
+    // A vacuous pass is the failure mode: an empty list would satisfy every
+    // loop below while covering nothing.
+    expect(selectors).toEqual([
+      '[data-testid^="seed-word-"]',
+      '[data-word]',
+      '[data-testid="import-text"]',
+      '[data-testid="seed-hex"]',
+    ]);
+  });
+
+  it('every declared surface appears in the stylesheet that hides it', () => {
+    const css = redact.slice(redact.indexOf('const css = `'), redact.indexOf('const attach'));
+    for (const selector of selectors) {
+      expect(css, `${selector} is declared but never styled`).toContain(selector);
+    }
+  });
+
+  it('every declared surface is an element the popup actually renders', () => {
+    // A selector that matches nothing redacts nothing, and `expectRedacted`
+    // only notices when a journey happens to ask about that surface.
+    const rendered = renderedTestIds();
+    for (const selector of selectors) {
+      const exact = /^\[data-testid="([^"]+)"\]$/.exec(selector);
+      const prefix = /^\[data-testid\^="([^"]+)"\]$/.exec(selector);
+      if (exact) expect(rendered.has(exact[1]!), selector).toBe(true);
+      else if (prefix) expect([...rendered].some((id) => id.startsWith(prefix[1]!)), selector).toBe(true);
+      else expect(selector).toBe('[data-word]'); // the one attribute-only surface
+    }
+  });
+
+  it('expectRedacted refuses a surface that is not on the list', () => {
+    // Without this the guard is opt-in: a caller could ask about a selector
+    // nothing covers and get a green tick for it.
+    const guard = redact.slice(redact.indexOf('export async function expectRedacted'));
+    expect(guard).toContain('[SEED_WORDS, SEED_CHALLENGE, SEED_INPUT, SEED_HEX]');
+    expect(guard).toContain('add it to redact.ts');
+  });
+});
 
 describe('data-testid selector contract', () => {
   const rendered = renderedTestIds();

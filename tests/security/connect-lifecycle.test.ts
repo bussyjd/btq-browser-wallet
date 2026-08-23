@@ -265,4 +265,53 @@ describe('accountsChanged broadcast', () => {
     await flush();
     expect(chromeFake.tabMessages[0]?.message).toMatchObject({ event: 'accountsChanged', origin: DAPP, accounts: [] });
   });
+
+  it('emits accountsChanged with the new receive address after create and switch', async () => {
+    chromeFake.tabs = [{ id: 4 }];
+    await connectSite(DAPP, 4);
+    chromeFake.tabMessages.length = 0;
+    const created = (await ok(chromeFake.call({ method: 'wallet.createAccount' }))) as { address: string };
+    await flush();
+    expect(chromeFake.tabMessages).toEqual([
+      expect.objectContaining({
+        tabId: 4,
+        message: {
+          channel: 'btq-wallet',
+          kind: 'event',
+          event: 'accountsChanged',
+          origin: DAPP,
+          accounts: [created.address],
+        },
+      }),
+    ]);
+
+    chromeFake.tabMessages.length = 0;
+    const switched = (await ok(chromeFake.call({ method: 'wallet.switchAccount', params: { index: 0 } }))) as {
+      address: string;
+    };
+    await flush();
+    expect(switched.address).not.toBe(created.address);
+    expect(chromeFake.tabMessages[0]?.message).toMatchObject({
+      event: 'accountsChanged',
+      origin: DAPP,
+      accounts: [switched.address],
+    });
+    expect(await ok(chromeFake.callFromPage({ method: 'page.getAccounts' }, DAPP))).toEqual({
+      accounts: [switched.address],
+    });
+  });
+
+  it('a page cannot create or switch accounts through the worker', async () => {
+    // Attacker gain: a connected site that could switch accounts would change
+    // which coins a later user-approved send spends, without a prompt.
+    chromeFake.tabs = [{ id: 5 }];
+    await connectSite(DAPP, 5);
+    const reply = await chromeFake.callFromPage(
+      { method: 'wallet.switchAccount', params: { index: 0 } },
+      DAPP,
+    ).promise;
+    expect(reply.code).toBe('FORBIDDEN');
+    const created = await chromeFake.callFromPage({ method: 'wallet.createAccount' }, DAPP).promise;
+    expect(created.code).toBe('FORBIDDEN');
+  });
 });
