@@ -558,6 +558,7 @@ test('scene 10 · a site asks for an address, and the grant can be taken back', 
   await openSettings(popup);
   await expect(popup.getByTestId('site-row')).toHaveCount(1);
   await expect(popup.getByTestId('site-row')).toContainText(dapp.origin);
+  await expectNoSecret(popup, secrets(), { expectsPasswordField: true });
   await dwell(popup, 2200);
   await popup.getByTestId('site-revoke').click();
   await expect(popup.getByTestId('site-row')).toHaveCount(0);

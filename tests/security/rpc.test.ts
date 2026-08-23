@@ -21,6 +21,16 @@ function collectKeys(value: unknown, into: string[] = []): string[] {
   return into;
 }
 
+/** Every string value in a result, ignoring key names — a leak is always a value. */
+function stringValues(value: unknown, into: string[] = []): string[] {
+  if (typeof value === 'string') into.push(value);
+  else if (Array.isArray(value)) for (const v of value) stringValues(v, into);
+  else if (value && typeof value === 'object') {
+    for (const v of Object.values(value as Record<string, unknown>)) stringValues(v, into);
+  }
+  return into;
+}
+
 describe('RPC surface — what a page could try', () => {
   it('a tab cannot call any wallet method', async () => {
     // Attacker gain: a webpage talking to the extension would unlock, wipe, or
@@ -108,8 +118,17 @@ describe('RPC surface — what a page could try', () => {
       connectedSites: await dispatch(k, { method: 'wallet.connectedSites' }, { fromTab: false }),
     };
     for (const [name, result] of Object.entries(others)) {
-      const tokens = new Set(JSON.stringify(result).toLowerCase().split(/[^a-z]+/));
+      // Tokenise the string *values*, not the serialization: key names and JSON
+      // literals are attacker-irrelevant (a leak lands in a value) and eleven of
+      // them — address, balance, false, height, history, index, network, path,
+      // receive, tip, true — are themselves BIP39 words, which made this assertion
+      // fail on ~6% of runs against a perfectly correct wallet.
+      const tokens = new Set(stringValues(result).join(' ').toLowerCase().split(/[^a-z]+/));
       for (const word of new Set(words)) expect(tokens.has(word), `${name} leaked "${word}"`).toBe(false);
+      // Nothing may carry the phrase whole, in any encoding of it.
+      expect(JSON.stringify(result).toLowerCase(), `${name} leaked the phrase`).not.toContain(
+        words.join(' '),
+      );
       for (const secret of SECRET_RESULT_KEYS) {
         expect(collectKeys(result).includes(secret), `${name}.${secret}`).toBe(false);
       }

@@ -287,19 +287,30 @@ export async function typeInto(
  * assertion that prints the RPC password into the terminal and into the HTML
  * report is a worse leak than the one it was guarding against.
  */
-export async function expectNoSecret(page: Page, secrets: Secret[]): Promise<void> {
+export async function expectNoSecret(
+  page: Page,
+  secrets: Secret[],
+  { expectsPasswordField = false }: { expectsPasswordField?: boolean } = {},
+): Promise<void> {
   const wanted = secrets.filter((s) => s.value.length > 0);
 
-  const unmasked = await page.evaluate((ids: string[]) => {
+  const masking = await page.evaluate((ids: string[]) => {
     const bad: string[] = [];
+    let checked = 0;
     for (const id of ids) {
       const el = document.querySelector(`[data-testid="${id}"]`);
       if (!el) continue;
+      checked += 1;
       if ((el as HTMLInputElement).type !== 'password') bad.push(id);
     }
-    return bad;
+    return { bad, checked };
   }, PASSWORD_FIELDS);
-  expect(unmasked, 'these password fields are showing their characters on camera').toEqual([]);
+  expect(masking.bad, 'these password fields are showing their characters on camera').toEqual([]);
+  // Skipping every field silently would disarm half this guard the day a testid
+  // is renamed: a screen with a password on it must have had one field checked.
+  if (expectsPasswordField) {
+    expect(masking.checked, 'no password field was found to check for masking').toBeGreaterThan(0);
+  }
 
   if (wanted.length === 0) return;
 

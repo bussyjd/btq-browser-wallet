@@ -35,6 +35,9 @@ const REQUIRED = [
   'receive-qr',
   'copy-address',
   'refresh',
+  // waitForLiveScan's whole value rests on this one: a failed live scan still
+  // sets scanned=true, so the recording would show a confident wrong balance.
+  'sync-error',
   'tab-receive',
   'tab-send',
   'tab-activity',

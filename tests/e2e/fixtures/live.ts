@@ -551,7 +551,7 @@ export async function preflight(
       'Alice funded',
       confirmed >= needed,
       `${formatSats(confirmed)} tBTQ confirmed across m/0'/0'/0..${GAP_LIMIT - 1} (${utxoCount} utxo${utxoCount === 1 ? '' : 's'}, ${confirmedUtxos} confirmed${mempool > 0n ? `, ${formatSats(mempool)} tBTQ still in the mempool` : ''}) · needs ${formatSats(needed)}`,
-      `demo:live — Alice has ${formatSats(confirmed)} tBTQ confirmed across m/0'/0'/0..${GAP_LIMIT - 1} (${utxoCount} utxo${utxoCount === 1 ? '' : 's'}${mempool > 0n ? `, ${formatSats(mempool)} tBTQ still in the mempool` : ''}), and this take needs ${formatSats(needed)}. Fund ${shortAddress(fundTarget)} with at least ${formatSats(needed)} tBTQ and wait for one block, then run npm run demo:live again.`,
+      `demo:live — Alice has ${formatSats(confirmed)} tBTQ confirmed across m/0'/0'/0..${GAP_LIMIT - 1} (${utxoCount} utxo${utxoCount === 1 ? '' : 's'}${mempool > 0n ? `, ${formatSats(mempool)} tBTQ still in the mempool` : ''}), and this take needs ${formatSats(needed)}. Fund ${fundTarget} with at least ${formatSats(needed)} tBTQ and wait for one block, then run npm run demo:live again.`,
     );
   } catch (e) {
     add(
