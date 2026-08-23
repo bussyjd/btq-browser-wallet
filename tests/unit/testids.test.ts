@@ -24,6 +24,13 @@ const REQUIRED = [
   'seed-continue',
   'confirm-word-1',
   'confirm-seal',
+  // The gate as a popup that was closed and reopened renders it: the sentence
+  // saying the wallet already exists and where the phrase can still be read, the
+  // password box the check needs when the create screen's copy is long gone, and
+  // the way off the screen. tests/e2e/lifetime.spec.ts drives all three.
+  'confirm-resumed',
+  'confirm-pw',
+  'confirm-leave',
   'import-mnemonic',
   'import-raw',
   'import-text',

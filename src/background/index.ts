@@ -272,6 +272,20 @@ function errorReply(e: unknown): ConnectReply {
 
 // ---------------------------------------------------------------------- events
 
+/**
+ * This worker generation holds nothing.
+ *
+ * A parked `sendResponse` cannot survive the worker that owns it, so every
+ * prompt the previous generation left in storage — and every count left on the
+ * toolbar badge — is describing a request that no longer exists. Reconciling at
+ * startup rather than at the next popup open is what stops a badge reading "1"
+ * over a site nobody is holding, and what makes a lost approval look lost
+ * instead of pending. Nothing is granted either way: `approveConnect` requires
+ * the broker to be holding the origin, and the broker is empty here.
+ */
+setPendingBadge(0);
+void mirrorPrompts();
+
 chrome.runtime.onInstalled.addListener(() => {
   void chrome.alarms.create('autolock', { periodInMinutes: 1 });
 });
@@ -314,7 +328,14 @@ async function handleMessage(
     // Answered from the broker, not from storage: only a request with a live
     // parked responder behind it is one the user can honestly act on.
     const live = await livePrompts();
-    sendResponse({ result: live.length > 0 ? { origin: live[0]?.origin } : null });
+    // A dedicated approval window may only ever learn about the request it was
+    // opened for. Two things turn on that: it must not render a second site's
+    // prompt under the origin in its own URL, and — since the window outlives
+    // the worker that opened it — asking again is how it finds out that its own
+    // request died in a restart. The toolbar popup, opened for nobody, still
+    // sees whatever is outstanding.
+    const visible = windowOrigin === null ? live : live.filter((p) => p.origin === windowOrigin);
+    sendResponse({ result: visible.length > 0 ? { origin: visible[0]?.origin } : null });
     return;
   }
 
@@ -329,7 +350,16 @@ async function handleMessage(
       return;
     }
     if (!broker.has(origin)) {
-      sendResponse({ error: 'No site is waiting for that approval.', code: 'FORBIDDEN' });
+      // Reached when a window outlives its request: the site gave up, the
+      // five-minute timeout fired, or this worker is a restart of the one that
+      // parked the caller. Say which, because the user's next move — ask the
+      // site to try again — is the same in all three and is not obvious from
+      // "forbidden".
+      sendResponse({
+        error:
+          'That request is no longer waiting: the site gave up, it timed out, or the wallet restarted while this window was open. Ask the site to connect again.',
+        code: 'FORBIDDEN',
+      });
       return;
     }
   }

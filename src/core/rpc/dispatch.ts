@@ -123,6 +123,9 @@ export async function dispatch(keyring: Keyring, request: RpcRequest, ctx: Dispa
         )
         .then(() => ({ ok: true as const }));
     }
+    case 'wallet.dismissConfirm':
+      await keyring.dismissConfirm();
+      return { ok: true as const };
     case 'wallet.importMnemonic':
       await keyring.importMnemonic(str(p.mnemonic, 'mnemonic'), str(p.password, 'password'));
       return { ok: true as const };

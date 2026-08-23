@@ -7,7 +7,7 @@
  * settling another origin's request, or a locked wallet handing out addresses.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { FakeChrome, uninstallChrome, type Call } from '../helpers/fake-chrome.js';
+import { FakeChrome, uninstallChrome, type Call, type FakeSender } from '../helpers/fake-chrome.js';
 
 const MNEMONIC = 'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about';
 const PASSWORD = 'testnet-ok';
@@ -24,6 +24,31 @@ async function boot(): Promise<void> {
   chromeFake.install();
   vi.resetModules();
   await import('../../src/background/index.js');
+}
+
+/**
+ * A service-worker restart, modelled rather than waited for.
+ *
+ * `chrome.storage.local` outlives the worker (the same Map is handed to the new
+ * FakeChrome); the worker's memory does not (a fresh module, so a fresh broker,
+ * a fresh keyring and no parked responders at all). That is the whole of what
+ * Chrome does after about thirty idle seconds, and it is the state every
+ * assertion below is about.
+ */
+async function restartWorker(): Promise<void> {
+  const store = chromeFake.store;
+  uninstallChrome();
+  chromeFake = new FakeChrome(store);
+  chromeFake.install();
+  vi.resetModules();
+  await import('../../src/background/index.js');
+  await flush();
+}
+
+/** Speak as the approval window the worker opened for `origin`. */
+function approvalWindow(origin: string): FakeSender {
+  const url = `chrome-extension://${chromeFake.extensionId}/src/ui/index.html?connect=1&origin=${encodeURIComponent(origin)}`;
+  return { id: chromeFake.extensionId, url };
 }
 
 async function ok(call: Call): Promise<unknown> {
@@ -363,5 +388,89 @@ describe('accountsChanged broadcast', () => {
     expect(reply.code).toBe('FORBIDDEN');
     const created = await chromeFake.callFromPage({ method: 'wallet.createAccount' }, DAPP).promise;
     expect(created.code).toBe('FORBIDDEN');
+  });
+});
+
+/**
+ * The other half of the same MV3 lifetime problem as onboarding, and the half
+ * that cannot be designed away: a parked `sendResponse` is a live callback into
+ * a page, and no amount of writing to disk makes one survive its worker. So the
+ * requirement here is not "keep it" but "lose it loudly" — the page is told
+ * (Chrome closes the channel and the relay turns the `lastError` into
+ * DISCONNECTED; see connect-relay.test.ts), and the wallet must stop pretending
+ * a request is still pending on every surface the user can see.
+ */
+describe('an approval window that outlives the worker holding its request', () => {
+  it('finds the request gone, not pending: badge, mirror and pendingConnect all agree', async () => {
+    const request = chromeFake.callFromPage({ method: 'page.requestAccounts' }, DAPP);
+    await flush();
+    expect(request.settled).toBe(false);
+    expect(chromeFake.badgeText).toBe('1');
+    expect(storedPrompts()).toEqual([{ origin: DAPP, at: expect.any(Number) }]);
+
+    await restartWorker();
+
+    // Reconciled at startup rather than at the next popup open: a toolbar badge
+    // reading "1" over a request nobody is holding is the wallet telling the
+    // user something is waiting for them when nothing is.
+    expect(chromeFake.badgeText).toBe('');
+    expect(storedPrompts(), 'a prompt from a dead worker generation').toBeUndefined();
+    expect(
+      await ok(chromeFake.call({ method: 'wallet.pendingConnect' }, approvalWindow(DAPP))),
+    ).toBeNull();
+  });
+
+  it('is refused if it approves anyway, and told what to do instead', async () => {
+    // The race the polling cannot close: the worker dies between the window's
+    // last check and the click. The refusal is the backstop, and it has to be
+    // readable — "forbidden" tells a user nothing about asking the site again.
+    chromeFake.callFromPage({ method: 'page.requestAccounts' }, DAPP);
+    await flush();
+    await restartWorker();
+    await ok(chromeFake.call({ method: 'wallet.unlock', params: { password: PASSWORD } }));
+
+    const reply = await chromeFake.call(
+      { method: 'wallet.approveConnect', params: { origin: DAPP } },
+      approvalWindow(DAPP),
+    ).promise;
+    expect(reply.code).toBe('FORBIDDEN');
+    expect(reply.error).toMatch(/no longer waiting/i);
+    expect(reply.error).toMatch(/connect again/i);
+
+    // Attacker gain if this ever passed: a permanent allowlist entry for a site
+    // that is not, right now, asking for one — granted out of a stale record by
+    // a user who thought they were answering a live prompt.
+    const sites = (await ok(chromeFake.call({ method: 'wallet.connectedSites' }))) as {
+      sites: { origin: string }[];
+    };
+    expect(sites.sites).toEqual([]);
+  });
+
+  it('never inherits another site\'s request to fill the gap', async () => {
+    // Two sites waiting. The window opened for the first must learn that *its*
+    // request is the one outstanding — never render the newest prompt under the
+    // origin printed in its own URL, which is how one site gets approved on
+    // another's screen.
+    chromeFake.callFromPage({ method: 'page.requestAccounts' }, DAPP, 1);
+    await flush();
+    chromeFake.callFromPage({ method: 'page.requestAccounts' }, EVIL, 2);
+    await flush();
+    expect(chromeFake.windows).toHaveLength(2);
+
+    expect(await ok(chromeFake.call({ method: 'wallet.pendingConnect' }, approvalWindow(DAPP)))).toEqual({
+      origin: DAPP,
+    });
+    expect(await ok(chromeFake.call({ method: 'wallet.pendingConnect' }, approvalWindow(EVIL)))).toEqual({
+      origin: EVIL,
+    });
+    // The toolbar popup was opened for nobody and still sees whatever is
+    // outstanding — that is the surface a user reaches for when a window was
+    // closed by accident.
+    expect(await ok(chromeFake.call({ method: 'wallet.pendingConnect' }))).toEqual({ origin: EVIL });
+
+    // And after the restart neither window is offered the other one's site.
+    await restartWorker();
+    expect(await ok(chromeFake.call({ method: 'wallet.pendingConnect' }, approvalWindow(DAPP)))).toBeNull();
+    expect(await ok(chromeFake.call({ method: 'wallet.pendingConnect' }, approvalWindow(EVIL)))).toBeNull();
   });
 });

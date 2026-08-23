@@ -181,6 +181,15 @@ export function useWallet() {
     [],
   );
 
+  /**
+   * Leave the confirmation challenge without passing it. Clears the outstanding
+   * challenge and claims nothing about whether the phrase was written down — the
+   * vault was sealed at create time and is unaffected either way.
+   */
+  const dismissConfirm = useCallback(async () => {
+    await rpc('wallet.dismissConfirm');
+  }, []);
+
   const importMnemonic = useCallback(async (mnemonic: string, password: string) => {
     await rpc('wallet.importMnemonic', { mnemonic, password });
   }, []);
@@ -397,6 +406,7 @@ export function useWallet() {
     refreshHistory,
     create,
     confirmSeed,
+    dismissConfirm,
     importMnemonic,
     importSeed,
     importBackup,

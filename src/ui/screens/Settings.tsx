@@ -316,8 +316,18 @@ export function Settings({
 
       <Card>
         <p className="section-label">Security</p>
+        {/* What actually happens, not what a timer constant says. Chrome ends an
+            idle background worker after roughly half a minute, and the decrypted
+            seed lives only in that worker — so in practice the wallet is locked
+            again within a minute of being left alone, well before the wallet's
+            own five-minute idle limit is ever reached. Locking early is the safe
+            direction; promising five minutes and delivering thirty seconds is
+            not, and this sentence is the only place a user is ever told. */}
         <p className="small">
-          The vault locks itself after 5 minutes of inactivity, and whenever the browser restarts.
+          The vault locks itself within about a minute of being left alone — and always when the
+          browser restarts, or when you press the button below. Five minutes of inactivity is the
+          outside limit; in practice Chrome shuts the extension's background worker down sooner,
+          and your keys go with it.
         </p>
         <div className="mt-8">
           <Button

@@ -7,14 +7,30 @@ import { Toast } from './components/Toast.js';
 import type { HomeTab } from './components/TabBar.js';
 import { useWallet } from './hooks/useWallet.js';
 import { errMessage, onAutoLock } from './rpc.js';
-import type { SendResult } from './types.js';
+import type { SendResult, WalletStatus } from './types.js';
+import { ConfirmSeed } from './screens/ConfirmSeed.js';
 import { ConnectApproval } from './screens/ConnectApproval.js';
 import { Home } from './screens/Home.js';
 import { Onboarding } from './screens/Onboarding.js';
 import { Settings } from './screens/Settings.js';
 import { Unlock } from './screens/Unlock.js';
 
-type Screen = 'boot' | 'onboard-tab' | 'onboarding' | 'unlock' | 'home' | 'settings' | 'connect';
+type Screen =
+  | 'boot'
+  | 'onboard-tab'
+  | 'onboarding'
+  | 'unlock'
+  /**
+   * The phrase-confirmation gate, reached when the popup comes back to a wallet
+   * that is sealed but not yet confirmed — the user closed the window mid-setup,
+   * or the browser restarted. `onboarding` covers the same step while the words
+   * are still on screen; this one has to ask for the password, because it has
+   * neither the words nor the password any more.
+   */
+  | 'confirm'
+  | 'home'
+  | 'settings'
+  | 'connect';
 
 const params = new URLSearchParams(window.location.search);
 const WANT_CONNECT = params.get('connect') === '1';
@@ -31,6 +47,19 @@ const ONBOARD_TAB_FLAG = 'onboardTabOpened';
  */
 const WINDOW_ORIGIN = ((raw: string | null) =>
   raw !== null && /^https?:\/\/[^/\s]+$/.test(raw) ? raw : null)(params.get('origin'));
+
+/**
+ * Does this wallet still owe a phrase confirmation?
+ *
+ * Optional in the status because an older worker never sends it, and absent has
+ * to read as "no" rather than "maybe": the gate is a screen of empty word
+ * fields, and showing it over a wallet with nothing outstanding would strand the
+ * user behind three boxes nothing can satisfy. Both halves are required for the
+ * same reason — a flag with no positions behind it is not a challenge.
+ */
+function awaitingConfirm(status: WalletStatus | null): boolean {
+  return status?.awaitingConfirm === true && (status.confirmChallenge?.length ?? 0) > 0;
+}
 
 /** The action popup closes on any outside click, which would discard a shown seed. */
 async function isActionPopup(): Promise<boolean> {
@@ -68,7 +97,6 @@ export function App() {
   const [sendResult, setSendResult] = useState<SendResult | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [lockNote, setLockNote] = useState<string | null>(null);
-  const [seedNotice, setSeedNotice] = useState<string | null>(null);
   const [bootError, setBootError] = useState<string | null>(null);
   const [returnTo, setReturnTo] = useState<Screen | null>(null);
   const [accountsOpen, setAccountsOpen] = useState(false);
@@ -104,17 +132,34 @@ export function App() {
     return () => onAutoLock(null);
   }, []);
 
-  /** Where the popup goes once the vault is open: a waiting site first, else back. */
-  const afterAuth = useCallback(async () => {
+  /**
+   * Where the popup goes once the vault is open: a waiting site first — it is
+   * on a five-minute clock and the user is not — then an unconfirmed phrase,
+   * then wherever they were.
+   */
+  const afterAuth = useCallback(async (status: WalletStatus | null) => {
     let pending: string | null = null;
     try {
       pending = await wallet.loadPending();
     } catch {
       /* no pending request is the normal case */
     }
-    setScreen(WANT_CONNECT || pending ? 'connect' : returnTo === 'settings' ? 'settings' : 'home');
+    // The status is passed in, never read off `wallet` here: this callback was
+    // created in the render *before* the unlock, so the hook state it closes
+    // over is the locked one — and a locked status carries no challenge, which
+    // would route every unlock straight past the confirmation gate.
+    const awaiting = awaitingConfirm(status);
+    setScreen(
+      WANT_CONNECT || pending
+        ? 'connect'
+        : awaiting
+          ? 'confirm'
+          : returnTo === 'settings'
+            ? 'settings'
+            : 'home',
+    );
     setReturnTo(null);
-    void wallet.refresh();
+    if (!awaiting) void wallet.refresh();
   }, [returnTo, wallet]);
 
   useEffect(() => {
@@ -130,7 +175,6 @@ export function App() {
         }
         if (cancelled) return;
         if (!st.hasVault) {
-          if (st.pendingReveal) setSeedNotice('The previous seed was discarded — start again.');
           if (await claimOnboardingTab()) {
             try {
               await chrome.tabs.create({
@@ -156,6 +200,16 @@ export function App() {
           /* ignore */
         }
         if (cancelled) return;
+        // A sealed-but-unconfirmed wallet lands here whenever setup was
+        // interrupted: the popup closed while the words were on screen, or the
+        // browser restarted before the challenge was answered. The wallet is
+        // real and the coins are safe; what is missing is the proof that the
+        // phrase was written down, so ask for it rather than opening Home over
+        // the top of it.
+        if (awaitingConfirm(st) && !WANT_CONNECT && !pending) {
+          setScreen('confirm');
+          return;
+        }
         setScreen(WANT_CONNECT || pending ? 'connect' : 'home');
         void wallet.refresh();
       } catch (e) {
@@ -171,6 +225,23 @@ export function App() {
     // Runs once on mount; the wallet hook's callbacks are stable.
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // A parked connect request lives in the service worker's memory, and Chrome
+  // ends an idle worker after roughly thirty seconds — so an approval window can
+  // outlive the very request it was opened for. Re-asking while this screen is
+  // up is how the window finds out: the moment the worker stops holding it,
+  // `connectOrigin` goes null and the screen says the request is gone instead of
+  // offering a Connect button that can only fail. The call is also what keeps a
+  // worker awake while the user is reading the prompt, but the screen does not
+  // depend on that — losing the request is handled, not prevented.
+  const loadPending = wallet.loadPending;
+  useEffect(() => {
+    if (screen !== 'connect') return;
+    const id = window.setInterval(() => {
+      void loadPending().catch(() => undefined);
+    }, 3_000);
+    return () => window.clearInterval(id);
+  }, [screen, loadPending]);
+
   /** The approval window exists only to answer one request. */
   function finishConnect() {
     if (WANT_CONNECT) {
@@ -180,6 +251,7 @@ export function App() {
     setScreen('home');
   }
 
+  const confirmChallenge = wallet.status?.confirmChallenge ?? [];
   const unlocked = Boolean(wallet.status?.unlocked);
   const showHeaderTools = unlocked && (screen === 'home' || screen === 'connect');
   // The account everything on screen is about — the header's name, and the one
@@ -188,9 +260,18 @@ export function App() {
   const activeAccountName =
     (wallet.status?.accounts ?? []).find((a) => a.index === (wallet.status?.activeAccount ?? 0))?.name ??
     'Account 1';
-  // A dedicated approval window answers for its own site and nothing else; the
-  // toolbar popup shows whatever the worker still has a live caller for.
-  const connectOrigin = WANT_CONNECT ? (WINDOW_ORIGIN ?? wallet.pendingOrigin) : wallet.pendingOrigin;
+  // A dedicated approval window answers for its own site and nothing else — and
+  // only while the worker is still holding that request. The URL alone is not
+  // enough: this window outlives the worker that opened it, and a parked
+  // response does not, so rendering from `?origin=` would offer a Connect button
+  // for a request that no longer exists. The worker's answer is the authority in
+  // both windows; the URL only narrows it.
+  const connectOrigin =
+    WANT_CONNECT && WINDOW_ORIGIN
+      ? wallet.pendingOrigin === WINDOW_ORIGIN
+        ? WINDOW_ORIGIN
+        : null
+      : wallet.pendingOrigin;
 
   function screenBody() {
     switch (screen) {
@@ -215,9 +296,7 @@ export function App() {
         return (
           <Onboarding
             wallet={wallet}
-            notice={seedNotice}
             onDone={async () => {
-              setSeedNotice(null);
               await wallet.loadStatus();
               setTab('receive');
               setScreen('home');
@@ -232,9 +311,9 @@ export function App() {
             note={lockNote}
             onUnlock={async (password) => {
               await wallet.unlock(password);
-              await wallet.loadStatus();
+              const st = await wallet.loadStatus();
               setLockNote(null);
-              await afterAuth();
+              await afterAuth(st);
             }}
             onWipe={async (confirmation) => {
               await wallet.wipe(confirmation);
@@ -245,6 +324,28 @@ export function App() {
             }}
           />
         );
+
+      case 'confirm':
+        return confirmChallenge.length > 0 ? (
+          <ConfirmSeed
+            challenge={confirmChallenge}
+            password={null}
+            onSubmit={async (answers, password) => {
+              await wallet.confirmSeed(answers, password);
+              await wallet.loadStatus();
+              setTab('receive');
+              setScreen('home');
+              void wallet.refresh();
+            }}
+            onLeave={async () => {
+              await wallet.dismissConfirm();
+              await wallet.loadStatus();
+              setTab('receive');
+              setScreen('home');
+              void wallet.refresh();
+            }}
+          />
+        ) : null;
 
       case 'connect':
         return connectOrigin ? (
@@ -263,10 +364,15 @@ export function App() {
           />
         ) : (
           <div className="stack">
-            <h1>No request waiting</h1>
-            <p className="lede">The site either cancelled or the request already timed out.</p>
-            <Button variant="secondary" onClick={() => setScreen('home')}>
-              Go to the wallet
+            <h1>Nothing left to approve</h1>
+            <p className="lede" data-testid="connect-gone">
+              The site gave up, the request timed out, or the wallet's background worker restarted
+              while this window was open — it holds a waiting request in memory and nothing else,
+              so a restart loses it rather than granting it. Nothing was approved; ask the site to
+              connect again.
+            </p>
+            <Button variant="secondary" onClick={finishConnect}>
+              {WANT_CONNECT ? 'Close this window' : 'Go to the wallet'}
             </Button>
           </div>
         );

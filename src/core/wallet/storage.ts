@@ -59,6 +59,23 @@ export interface WalletMeta {
   lastScanAt: number | null;
   accounts: AccountRecord[];
   activeAccount: number;
+  /**
+   * The phrase-confirmation challenge still outstanding: 0-based positions in
+   * the recovery phrase the user has been asked to type back, or `null` once
+   * they have passed it or explicitly left it.
+   *
+   * It lives here, in cleartext metadata, because the vault is sealed at
+   * `create` time and the challenge is a *gate over a wallet that already
+   * exists* — it has to survive the service worker being torn down while the
+   * user is writing the words on paper, which is the one thing an in-memory
+   * field cannot do. Positions are not secret: they say which three of the
+   * twelve will be asked for, never what any of them is, and the words
+   * themselves are only ever regenerated from the sealed entropy behind the
+   * password. Anything an attacker writes here can at worst *clear* the
+   * reminder (`parseConfirmChallenge` refuses everything else); it can never
+   * unlock, grant, or seal anything.
+   */
+  confirmChallenge: number[] | null;
 }
 
 export interface ActivityItem {
@@ -118,7 +135,11 @@ export function emptyAccount(index: number): AccountRecord {
   };
 }
 
-export function emptyMeta(network: BtqNetwork, origin: SeedOrigin): WalletMeta {
+export function emptyMeta(
+  network: BtqNetwork,
+  origin: SeedOrigin,
+  confirmChallenge: number[] | null = null,
+): WalletMeta {
   const account = emptyAccount(0);
   return {
     network,
@@ -135,6 +156,7 @@ export function emptyMeta(network: BtqNetwork, origin: SeedOrigin): WalletMeta {
     lastScanAt: null,
     accounts: [account],
     activeAccount: 0,
+    confirmChallenge,
   };
 }
 
@@ -338,7 +360,33 @@ export function parseMeta(v: unknown): WalletMeta | null {
     lastScanAt: msEpoch(v.lastScanAt),
     accounts,
     activeAccount,
+    confirmChallenge: parseConfirmChallenge(v.confirmChallenge),
   });
+}
+
+/** Positions past this are not in any phrase this build seals. */
+const MAX_PHRASE_WORDS = 24;
+/** And a challenge longer than this is not one this build ever wrote. */
+const MAX_CHALLENGE_WORDS = 8;
+
+/**
+ * Validate a stored confirmation challenge.
+ *
+ * Every rejection collapses to `null`, "nothing outstanding", and that is the
+ * safe direction on purpose: the worst a hand-written record can do is drop the
+ * reminder to confirm a phrase whose wallet is already sealed and whose words
+ * Settings can still show. The opposite fail-open — trusting a list of
+ * positions — would let stored bytes decide which words `confirm` checks.
+ */
+export function parseConfirmChallenge(v: unknown): number[] | null {
+  if (!Array.isArray(v) || v.length === 0 || v.length > MAX_CHALLENGE_WORDS) return null;
+  const out: number[] = [];
+  for (const raw of v) {
+    if (typeof raw !== 'number' || !Number.isInteger(raw) || raw < 0 || raw >= MAX_PHRASE_WORDS) return null;
+    if (out.includes(raw)) return null;
+    out.push(raw);
+  }
+  return out.sort((a, b) => a - b);
 }
 
 /** Validate persisted activity, dropping rows that are not well-formed. */

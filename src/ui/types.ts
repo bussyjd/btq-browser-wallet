@@ -13,7 +13,19 @@
 export interface WalletStatus {
   hasVault: boolean;
   unlocked: boolean;
-  pendingReveal: boolean;
+  /**
+   * A phrase this device has sealed but the user has not typed back yet. The
+   * wallet exists either way — the challenge is a gate in front of it, not a
+   * step before it — so this is a reason to route to the confirm screen, never
+   * a reason to treat the wallet as missing.
+   */
+  awaitingConfirm?: boolean;
+  /**
+   * The word positions that gate asks for, 0-based. Present alongside
+   * `awaitingConfirm`, so a popup reopened long after create can render the same
+   * three fields; the words themselves never cross this boundary.
+   */
+  confirmChallenge?: number[] | null;
   network: string;
   origin: string | null;
   externalNext: number;

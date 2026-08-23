@@ -20,7 +20,11 @@ best-effort. A vulnerability in btq-core itself belongs with
 
 - The HD seed — and the BIP39 entropy it was derived from, which the vault seals in the
   same ciphertext — decrypt **only** in the MV3 service worker, and **only** while
-  unlocked. Locking, an auto-lock, or a service-worker restart drops them. The phrase is
+  unlocked. Locking, an auto-lock, or a service-worker restart drops them — and a restart
+  is the common case, not the rare one: Chrome ends an idle worker after roughly thirty
+  seconds, so in practice the wallet re-locks about a minute after you stop using it,
+  well inside the five-minute idle limit the wallet enforces itself. Locking early is the
+  safe direction, and it is what **Settings → Security** tells you. The phrase is
   regenerated from that entropy when it is asked for and let go again; it is never cached,
   in the worker or anywhere else, because a JavaScript string cannot be zeroed.
 - The content script and `window.btq` never receive phrase or key material at all. The
@@ -50,8 +54,11 @@ best-effort. A vulnerability in btq-core itself belongs with
 
 ## What we refuse
 
-- **Wrong password:** one error, the wallet stays locked, and after 5 failures unlock and
-  re-auth back off exponentially (in memory, capped at 5 minutes).
+- **Wrong password:** one error, the wallet stays locked, and after 5 failures unlock,
+  re-auth and the onboarding phrase check all back off exponentially (in memory, capped at
+  5 minutes). In memory means a worker restart clears the counter — which is why the
+  back-off is described as slowing a person at a keyboard and never as the bound on an
+  offline attack. That bound is PBKDF2, and it does not restart.
 - **The phrase without the password:** `wallet.revealPhrase` needs a wallet that is
   already unlocked **and** the password re-typed against the sealed vault. A wrong one
   counts against the same back-off as a wrong unlock and names nothing but the password.

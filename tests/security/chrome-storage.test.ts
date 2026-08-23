@@ -178,6 +178,31 @@ describe('storage validators in isolation', () => {
     expect(meta?.accounts[0]).toMatchObject({ index: 0, name: 'Account 1', externalNext: 3, usedExternal: 2 });
   });
 
+  it('parseMeta round-trips a confirmation challenge and refuses a poisoned one', () => {
+    // The challenge is the one thing in cleartext metadata that the onboarding
+    // gate reads, so it is the one thing a storage writer could aim at. Every
+    // rejection collapses to null — "nothing outstanding" — which at worst drops
+    // a reminder in front of a wallet that is already sealed and whose phrase
+    // Settings can still show. The opposite fail-open would let stored bytes
+    // choose which words `confirm` checks.
+    const base = { network: 'testnet', origin: 'bip39' };
+    expect(parseMeta({ ...base, confirmChallenge: [7, 2, 2 + 9] })?.confirmChallenge).toEqual([2, 7, 11]);
+    expect(parseMeta(base)?.confirmChallenge).toBeNull();
+    for (const bad of [
+      [],                       // a challenge that asks nothing passes itself
+      [0, 0, 1],                // one word typed three times
+      [0, 1, 2.5],              // not a position
+      [0, 1, -1],
+      [0, 1, 24],               // past the longest phrase this build seals
+      [0, 1, '2'],
+      Array.from({ length: 9 }, (_, i) => i), // longer than any challenge we write
+      'seven',
+      { 0: 1 },
+    ]) {
+      expect(parseMeta({ ...base, confirmChallenge: bad })?.confirmChallenge, JSON.stringify(bad)).toBeNull();
+    }
+  });
+
   it('parseMeta keeps extra accounts and mirrors the active one onto the top-level cursors', () => {
     const meta = parseMeta({
       network: 'testnet',

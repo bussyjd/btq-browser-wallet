@@ -8,6 +8,16 @@
  * is held in the clear, and no mnemonic string is ever kept on this object: a
  * JS string cannot be zeroed, so caching one would be strictly worse than
  * regenerating it and letting go.
+ *
+ * **Nothing on this object is allowed to outlive the service worker.** Chrome
+ * tears an idle MV3 worker down after about thirty seconds of no events, and
+ * every private field here is gone with it — so a field is only ever a cache of
+ * something the vault or the metadata can produce again, or a secret whose loss
+ * locks the wallet. Onboarding used to break that rule (it parked the generated
+ * mnemonic in a field between `create` and `confirm`, a gap in which the worker
+ * receives no events at all, and lost it while the words were still on the
+ * user's screen); `create` now seals the vault outright and the confirmation
+ * challenge lives in storage. See `create` for why that is safe.
  */
 import type { BtqNetwork } from '../script/address.js';
 import type { Chain } from '../crypto/hd.js';
@@ -90,6 +100,12 @@ export interface KeyringOptions {
 
 export type { BackupKind, KeyringStatus } from './types.js';
 
+/**
+ * What `create` hands back: the phrase of a wallet that is *already sealed*, and
+ * the positions its confirmation gate will ask for. The words are shown once,
+ * here, and are never held by the worker afterwards — Settings → Security
+ * regenerates them from the vault when the user asks again.
+ */
 export interface Reveal {
   mnemonic: string;
   challenge: number[];
@@ -178,7 +194,6 @@ export class Keyring {
    * backup, so it is read from the one record only `seal()` ever wrote.
    */
   private payloadOrigin: SeedOrigin | null = null;
-  private pending: { mnemonic: string; challenge: number[] } | null = null;
   private lastActivity = 0;
   private failedUnlocks = 0;
   private unlockBlockedUntil = 0;
@@ -224,10 +239,17 @@ export class Keyring {
     // nothing".
     const backup: BackupKind | null =
       this.hdSeed === null ? null : this.phraseAvailable ? 'recoveryPhrase' : 'hdSeed';
+    // The confirmation gate, read from storage rather than from this object.
+    // That is the whole repair: it has to survive the worker being torn down
+    // while the user is copying twelve words onto paper, and no field here can.
+    // Only ever reported alongside a vault — a challenge with nothing sealed
+    // behind it is not a gate, it is a leftover.
+    const confirmChallenge = vault === null ? null : (meta?.confirmChallenge ?? null);
     return {
       hasVault: vault !== null,
       unlocked: this.hdSeed !== null,
-      pendingReveal: this.pending !== null,
+      awaitingConfirm: confirmChallenge !== null,
+      confirmChallenge,
       network: meta?.network ?? this.network,
       // Payload first, metadata only as the locked-wallet fallback — see the
       // note on `payloadOrigin`.
@@ -269,6 +291,33 @@ export class Keyring {
     };
   }
 
+  /**
+   * Create a wallet: generate a phrase, **seal the vault with it now**, and hand
+   * back the words together with the positions the user will be asked to type
+   * back.
+   *
+   * The seal happens here and not in `confirm`, and that is the entire point.
+   * The password is already in hand, and between showing the words and checking
+   * them the service worker receives no events whatsoever — the popup is only
+   * rendering. Chrome ends an idle MV3 worker after about thirty seconds, which
+   * is less time than it takes to write twelve words down properly, so anything
+   * held in memory across that gap is gone. The old design held the whole
+   * mnemonic there: `confirm` woke up on a fresh object, found nothing pending
+   * and refused to seal a wallet whose twelve words were still on screen, which
+   * made careful users the only ones who could not finish setting up.
+   *
+   * A keepalive port would only have narrowed that window — Chrome closes the
+   * popup on blur, so opening a text editor to write the phrase down kills the
+   * popup and the port together. Sealing first removes it: the vault exists
+   * before this returns, the challenge becomes a gate over a wallet that already
+   * exists, and a worker death mid-way costs the user nothing.
+   *
+   * This is only safe because the phrase can be read back. `revealPhrase` shows
+   * it at Settings → Security, behind this same password, on this same sealed
+   * vault — so someone who abandons the challenge still owns a wallet and can
+   * still get their words. Before that landed, this design would have been a
+   * trap: a sealed wallet whose phrase nobody could ever see again.
+   */
   async create(password: string): Promise<Reveal> {
     this.maybeAutoLock();
     assertPassword(password);
@@ -278,40 +327,80 @@ export class Keyring {
     this.lock();
     const mnemonic = generateMnemonic(128);
     const challenge = pickChallengeIndices(12, 3, this.opts.randomBytes);
-    this.pending = { mnemonic, challenge };
-    this.touch();
-    return { mnemonic, challenge };
-  }
-
-  async confirm(answers: { index: number; word: string }[], password: string): Promise<void> {
-    this.maybeAutoLock();
-    assertPassword(password);
-    if (!this.pending) {
-      throw new WalletError('NO_PENDING', 'No seed is waiting to be confirmed. Start create again.');
-    }
-    const words = this.pending.mnemonic.split(' ');
-    const expected = new Map(this.pending.challenge.map((i) => [i, words[i]]));
-    if (answers.length !== expected.size) {
-      throw new WalletError('CONFIRM_MISMATCH', 'Those words do not match the seed.');
-    }
-    const seen = new Set<number>();
-    for (const a of answers) {
-      // Duplicating one correct index must not satisfy a 3-word challenge.
-      if (seen.has(a.index)) {
-        throw new WalletError('CONFIRM_MISMATCH', 'Those words do not match the seed.');
-      }
-      seen.add(a.index);
-      const want = expected.get(a.index);
-      if (want === undefined || want !== a.word.trim().toLowerCase()) {
-        throw new WalletError('CONFIRM_MISMATCH', 'Those words do not match the seed.');
-      }
-    }
-    const { mnemonic } = this.pending;
     // Entropy into a local first: inlining it as the 4th argument would
     // evaluate the seed first, and a throw would then strand an un-wiped
     // 64-byte HD seed that never reaches seal()'s finally.
     const entropy = mnemonicToEntropy(mnemonic);
-    await this.seal(mnemonicToHdSeed(mnemonic), password, 'bip39', entropy);
+    await this.seal(mnemonicToHdSeed(mnemonic), password, 'bip39', entropy, challenge);
+    return { mnemonic, challenge };
+  }
+
+  /**
+   * The phrase-confirmation gate, over a vault that already exists.
+   *
+   * It proves two things and seals nothing: that the password opens this vault,
+   * and that the words typed back are the ones it holds. The words are
+   * regenerated from the vault's own entropy for the comparison and let go —
+   * the same mechanism `revealPhrase` uses, and the reason this survives a
+   * service-worker restart. Everything it needs is on disk; the password is the
+   * only key to it, and the caller has just supplied one.
+   *
+   * A correct password installs the seed on the way through, so a user who ends
+   * up confirming on a restarted worker lands on an open wallet instead of an
+   * unlock screen. A wrong password costs the same back-off as a wrong unlock.
+   * A wrong *word* costs nothing and leaves the challenge standing: the wallet
+   * it guards is already sealed, so there is nothing to punish.
+   */
+  async confirm(answers: { index: number; word: string }[], password: string): Promise<void> {
+    this.maybeAutoLock();
+    assertPassword(password);
+    if (!(await this.storage.loadVault())) {
+      throw new WalletError('NO_VAULT', 'No wallet on this device.');
+    }
+    const challenge = (await this.walletMeta()).confirmChallenge;
+    if (!challenge) {
+      throw new WalletError('NO_PENDING', 'This wallet has no phrase waiting to be confirmed.');
+    }
+    const plain = await this.openVault(password);
+    let entropy: Uint8Array | undefined;
+    try {
+      const payload = decodePayload(plain);
+      if (payload.entropyHex === undefined) {
+        // Only a create can raise a challenge, and a create always seals
+        // entropy — so this is our own bug, never a user's, and it says so
+        // rather than quietly passing a gate it cannot check.
+        throw new WalletError('NO_PHRASE', NO_PHRASE_MESSAGE);
+      }
+      entropy = hexToBytes(payload.entropyHex);
+      checkChallenge(challenge, entropyToMnemonic(entropy).split(' '), answers);
+      this.installSeed(payload);
+    } finally {
+      if (entropy) wipeBytes(entropy);
+      wipePlaintext(plain);
+    }
+    await this.updateMeta((meta) => {
+      meta.confirmChallenge = null;
+    });
+    this.touch();
+  }
+
+  /**
+   * Leave the confirmation challenge without passing it.
+   *
+   * Deliberately possible, and deliberately explicit. The vault is already
+   * sealed, so walking away costs the user nothing — and a screen with no way
+   * off it is how people end up photographing their phrase to get past it. What
+   * this does not do is claim the phrase was confirmed: it drops the outstanding
+   * challenge and nothing else, and the words stay readable at Settings →
+   * Security behind the password.
+   *
+   * Unlocked-only, so a locked popup cannot quietly clear the reminder.
+   */
+  async dismissConfirm(): Promise<void> {
+    this.requireUnlocked();
+    await this.updateMeta((meta) => {
+      meta.confirmChallenge = null;
+    });
   }
 
   async importMnemonic(mnemonic: string, password: string): Promise<void> {
@@ -337,23 +426,9 @@ export class Keyring {
 
   async unlock(password: string): Promise<void> {
     this.lock();
-    this.assertUnlockAllowed();
-    const blob = await this.storage.loadVault();
-    if (!blob) throw new WalletError('NO_VAULT', 'No wallet on this device.');
-    let plain: Uint8Array;
+    const plain = await this.openVault(password);
     try {
-      plain = await decryptVault(blob, password);
-    } catch (e) {
-      this.noteFailedUnlock();
-      throw e;
-    }
-    try {
-      const payload = decodePayload(plain);
-      this.hdSeed = hexToBytes(payload.hdSeedHex);
-      this.phraseAvailable = payload.entropyHex !== undefined;
-      this.payloadOrigin = payload.origin;
-      this.failedUnlocks = 0;
-      this.unlockBlockedUntil = 0;
+      this.installSeed(decodePayload(plain));
       // A restarted worker defaults activeIndex to 0; restore the persisted
       // account before any confirmSend can pin the wrong one.
       await this.walletMeta();
@@ -364,7 +439,6 @@ export class Keyring {
   }
 
   lock(): void {
-    this.clearPending();
     if (this.hdSeed) {
       wipeBytes(this.hdSeed);
       this.hdSeed = null;
@@ -478,6 +552,22 @@ export class Keyring {
    */
   private async reauthPlaintext(password: string): Promise<Uint8Array> {
     this.requireUnlocked();
+    const plain = await this.openVault(password);
+    this.touch();
+    return plain;
+  }
+
+  /**
+   * Decrypt the sealed vault with `password`, or refuse — the one place a
+   * password is ever checked against the blob, and therefore the one place the
+   * unlock back-off is charged.
+   *
+   * Returns the plaintext; the caller owns it and MUST wipe it. It installs
+   * nothing: a correct password here does not by itself open a locked wallet,
+   * which is what lets `revealPhrase` re-prove a password without changing the
+   * lock state, and what lets `confirm` run on a worker that has just restarted.
+   */
+  private async openVault(password: string): Promise<Uint8Array> {
     this.assertUnlockAllowed();
     const blob = await this.storage.loadVault();
     if (!blob) throw new WalletError('NO_VAULT', 'No wallet on this device.');
@@ -490,8 +580,15 @@ export class Keyring {
     }
     this.failedUnlocks = 0;
     this.unlockBlockedUntil = 0;
-    this.touch();
     return plain;
+  }
+
+  /** Install a decrypted payload as the open vault. The only writer of `hdSeed`
+   * besides `seal`, which has the raw bytes rather than a payload. */
+  private installSeed(payload: VaultPayload): void {
+    this.hdSeed = hexToBytes(payload.hdSeedHex);
+    this.phraseAvailable = payload.entropyHex !== undefined;
+    this.payloadOrigin = payload.origin;
   }
 
   async reauth(password: string): Promise<void> {
@@ -1368,10 +1465,6 @@ export class Keyring {
   }
 
   maybeAutoLock(): void {
-    // An in-progress reveal (no decrypted seed yet) stays in memory so the user
-    // can write it down; it is never persisted. A leftover pending must not
-    // keep an unlocked seed pinned in RAM.
-    if (this.pending && this.hdSeed === null) return;
     if (this.hdSeed === null) return;
     if (this.lockAfterMs <= 0) return;
     if (this.lastActivity === 0) return;
@@ -1466,6 +1559,7 @@ export class Keyring {
     password: string,
     origin: SeedOrigin,
     entropy?: Uint8Array,
+    confirmChallenge: number[] | null = null,
   ): Promise<void> {
     let plain: Uint8Array | undefined;
     try {
@@ -1489,12 +1583,14 @@ export class Keyring {
       plain = encodePayload(payload);
       const blob = await encryptVault(plain, password, this.opts.encrypt);
       await this.storage.saveVault(blob);
-      await this.storage.saveMeta(emptyMeta(this.network, origin));
+      // The challenge goes down in the same breath as the vault: a sealed wallet
+      // that has forgotten it owes the user a confirmation would drop them
+      // straight onto Home with twelve unwritten words behind them.
+      await this.storage.saveMeta(emptyMeta(this.network, origin, confirmChallenge));
       this.hdSeed = new Uint8Array(hdSeed);
       this.phraseAvailable = entropy !== undefined;
       this.payloadOrigin = origin;
       this.activeIndex = 0;
-      this.clearPending();
       this.touch();
     } finally {
       if (plain) wipePlaintext(plain);
@@ -1538,9 +1634,33 @@ export class Keyring {
   private touch(): void {
     this.lastActivity = this.now();
   }
+}
 
-  private clearPending(): void {
-    this.pending = null;
+/**
+ * Check the typed-back words against the challenge, or throw.
+ *
+ * One sentence for every way of getting it wrong — a short answer, a word from
+ * the wrong position, a position that is not in the challenge at all — because a
+ * refusal that named which one would tell a guesser where to spend their next
+ * try. `seen` is what stops one correct word being pasted into all three fields:
+ * a challenge satisfied that way proves the user wrote down a twelfth of their
+ * phrase, and device loss then burns the wallet.
+ */
+function checkChallenge(
+  challenge: readonly number[],
+  words: readonly string[],
+  answers: readonly { index: number; word: string }[],
+): void {
+  const mismatch = (): WalletError =>
+    new WalletError('CONFIRM_MISMATCH', 'Those words do not match the seed.');
+  const expected = new Map(challenge.map((i) => [i, words[i]]));
+  if (answers.length !== expected.size) throw mismatch();
+  const seen = new Set<number>();
+  for (const a of answers) {
+    if (seen.has(a.index)) throw mismatch();
+    seen.add(a.index);
+    const want = expected.get(a.index);
+    if (want === undefined || want !== a.word.trim().toLowerCase()) throw mismatch();
   }
 }
 

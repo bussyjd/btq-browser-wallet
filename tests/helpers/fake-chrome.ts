@@ -14,6 +14,12 @@ export interface FakeSender {
   tab?: { id: number };
   origin?: string;
   id?: string;
+  /**
+   * The extension page that sent the message, as the browser reports it. The
+   * worker reads the approval window's `?connect=1&origin=…` out of this, so a
+   * test that wants to speak as an approval window has to supply it.
+   */
+  url?: string;
 }
 
 export type MessageListener = (message: unknown, sender: FakeSender, sendResponse: (reply: Reply) => void) => unknown;
@@ -41,7 +47,13 @@ export interface CreatedWindow {
 
 export class FakeChrome {
   readonly extensionId = 'btqfakeextensionid0000000000000000';
-  readonly store = new Map<string, unknown>();
+  /**
+   * `chrome.storage.local`, which outlives any one service worker. Pass an
+   * existing map to model a *restart*: the browser keeps the storage and throws
+   * the worker's memory away, and a second FakeChrome over the same map plus a
+   * fresh `import()` of the worker module reproduces exactly that.
+   */
+  readonly store: Map<string, unknown>;
   readonly messageListeners: MessageListener[] = [];
   readonly windowRemovedListeners: ((windowId: number) => void)[] = [];
   readonly alarmListeners: ((alarm: { name: string }) => void)[] = [];
@@ -59,6 +71,10 @@ export class FakeChrome {
   hasOpenPopup = true;
   /** Set to make `chrome.windows.create` reject, as it does with no UI at all. */
   windowCreateFails = false;
+
+  constructor(store: Map<string, unknown> = new Map()) {
+    this.store = store;
+  }
 
   readonly runtime = {
     id: this.extensionId,

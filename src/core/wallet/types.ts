@@ -36,7 +36,19 @@ export type BackupKind = 'recoveryPhrase' | 'hdSeed';
 export interface KeyringStatus {
   hasVault: boolean;
   unlocked: boolean;
-  pendingReveal: boolean;
+  /**
+   * A recovery phrase this device has sealed but the user has not yet typed
+   * back. True only alongside a vault — the wallet exists either way, and the
+   * challenge is a gate in front of it, not a step before it.
+   */
+  awaitingConfirm: boolean;
+  /**
+   * The positions that gate asks for, 0-based, or null when none is
+   * outstanding. Carried in the status so a popup that was closed and reopened
+   * can render the same three fields the create screen did; the words behind
+   * them never cross this boundary.
+   */
+  confirmChallenge: number[] | null;
   network: BtqNetwork;
   /**
    * How the seed got here. Taken from the *decrypted payload* while unlocked

@@ -27,6 +27,7 @@ export const WALLET_METHODS = [
   'wallet.status',
   'wallet.create',
   'wallet.confirm',
+  'wallet.dismissConfirm',
   'wallet.importMnemonic',
   'wallet.importSeed',
   'wallet.unlock',

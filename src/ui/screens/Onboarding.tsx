@@ -20,13 +20,21 @@ type Step =
   | 'import-raw';
 
 /**
- * The onboarding reveal: the chosen password and the generated phrase, held in
- * memory only until the vault is sealed.
+ * The onboarding reveal: the chosen password and the phrase of a wallet that
+ * `wallet.create` has *already sealed*.
  *
- * Nothing is persisted before `confirm`, so closing the popup here really does
- * discard *this* seed and the next attempt generates a different one. That is
- * unlike the phrase afterwards, which Settings → Security can show again behind
- * the password once a vault exists.
+ * This state is the half of the flow that survives the background worker, and
+ * that asymmetry is the reason the flow is shaped this way. Chrome ends an idle
+ * MV3 worker after about thirty seconds and the popup keeps rendering
+ * regardless, so anything the worker held between the two screens was gone while
+ * the words were still on screen. Now the worker holds nothing: the vault is
+ * sealed, and what lives here is a convenience — the password, so the
+ * confirmation step need not ask for it again, and the words, so "Back to the
+ * words" works without a round trip.
+ *
+ * Both die with this component, and losing them costs the user nothing: the
+ * wallet exists, and Settings → Security shows the phrase again behind the
+ * password.
  */
 interface Reveal {
   password: string;
@@ -37,18 +45,9 @@ interface Reveal {
 /**
  * Create and import, in one place. Every secret this flow touches — the chosen
  * password, the generated phrase, pasted import text — lives in state that dies
- * with this component, and the component unmounts the moment the vault exists.
+ * with this component, and the component unmounts the moment setup finishes.
  */
-export function Onboarding({
-  wallet,
-  notice,
-  onDone,
-}: {
-  wallet: Wallet;
-  /** e.g. the previous reveal was discarded because the popup closed. */
-  notice: string | null;
-  onDone: () => Promise<void>;
-}) {
+export function Onboarding({ wallet, onDone }: { wallet: Wallet; onDone: () => Promise<void> }) {
   const [step, setStep] = useState<Step>('welcome');
   const [reveal, setReveal] = useState<Reveal | null>(null);
 
@@ -79,9 +78,10 @@ export function Onboarding({
       return reveal ? (
         <ConfirmSeed
           challenge={reveal.challenge}
+          password={reveal.password}
           onBack={() => setStep('show-seed')}
-          onSubmit={async (answers) => {
-            await wallet.confirmSeed(answers, reveal.password);
+          onSubmit={async (answers, password) => {
+            await wallet.confirmSeed(answers, password);
             setReveal(null);
             await onDone();
           }}
@@ -133,11 +133,7 @@ export function Onboarding({
 
     default:
       return (
-        <Welcome
-          notice={notice}
-          onCreate={() => restart('create-password')}
-          onImport={() => restart('import-choice')}
-        />
+        <Welcome onCreate={() => restart('create-password')} onImport={() => restart('import-choice')} />
       );
   }
 }

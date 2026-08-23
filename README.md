@@ -17,8 +17,8 @@ Five-minute path: [load the extension](#load-the-extension) → [try the flows](
 
 | | |
 |---|---|
-| <img src="docs/screenshots/create-seed.png" alt="The recovery-phrase screen: twelve numbered slots, blanked for this screenshot, under a warning that closing the window discards this seed and that Settings can show the phrase again with the password" width="330"> | <img src="docs/screenshots/receive.png" alt="Receive tab: balance, QR code, the tbtq1z address and its derivation path" width="330"> |
-| **Create** — write the phrase down here; nothing is saved until you confirm. | **Receive** — next unused address, its path, QR, copy. |
+| <img src="docs/screenshots/create-seed.png" alt="The recovery-phrase screen: twelve numbered slots, blanked for this screenshot, under a warning to write the words down on paper and a note that Settings can show the phrase again with the password" width="330"> | <img src="docs/screenshots/receive.png" alt="Receive tab: balance, QR code, the tbtq1z address and its derivation path" width="330"> |
+| **Create** — the vault is already sealed here; write the phrase down, and read it again in Settings if you are interrupted. | **Receive** — next unused address, its path, QR, copy. |
 | <img src="docs/screenshots/send-review.png" alt="Send review card: destination, amount, fee in tBTQ and sat/vB, change, inputs, total debited, password field" width="330"> | <img src="docs/screenshots/connect.png" alt="Connection request screen naming the site origin and what it will and will not see" width="330"> |
 | **Send** — the review card replaces the form, so what you read is what gets signed. | **Site-connect** — exact origin, revocable, and it can never move funds. |
 
@@ -46,12 +46,19 @@ Chrome 116 or newer (the provider is injected into the MAIN world, which is Chro
 ## Try the flows
 
 **Create.** **Create a wallet** → set a password (≥8 characters) → the 12 words appear →
-**I wrote it down** → type three of them back → **Seal the vault**. Nothing is persisted
-until you confirm, so closing the popup on the word screen really does discard *that*
-seed. What is then written is one AES-256-GCM blob behind PBKDF2-SHA256 (600 000
-iterations), holding the HD seed and the BIP39 entropy it came from — the entropy is what
-lets **Settings → Security** show the phrase again later, with your password. The words
-themselves are never stored, in the clear or otherwise.
+**I wrote it down** → type three of them back → **Confirm the phrase**. The vault is
+sealed at the *first* step, with the password you just chose: one AES-256-GCM blob behind
+PBKDF2-SHA256 (600 000 iterations), holding the HD seed and the BIP39 entropy it came
+from. The entropy is what lets **Settings → Security** show the phrase again later, with
+your password; the words themselves are never stored, in the clear or otherwise.
+
+Sealing first is deliberate, and it is why the phrase screen can be read at human speed.
+Chrome shuts an extension's background worker down after roughly thirty seconds of
+quiet — and writing twelve words on paper takes longer than that — so a wallet held in
+memory until the confirmation came back was a wallet the careful user never got. What
+the confirmation does now is prove you have your copy of the phrase, over a wallet that
+already exists. Walk away from it and nothing is lost: the wallet is yours, and the
+words are waiting under **Settings → Security**.
 
 **Import — three forms.** **I already have a seed** offers **Use a seed phrase**, **Use a
 backup file** and **Use a raw seed**:
@@ -146,7 +153,11 @@ python3 -m http.server 8080 -d tests/e2e/fixtures   # → http://localhost:8080/
 **Connect wallet** calls `window.btq.request({ method: 'btq_requestAccounts' })`. The
 extension opens an approval window naming the exact origin; the page's promise stays
 unsettled until you answer. **Connect** hands it one address; **Cancel**, closing that
-window, or five minutes of silence gets it `USER_REJECTED` (EIP-1193 code `4001`).
+window, or five minutes of silence gets it `USER_REJECTED` (EIP-1193 code `4001`). A
+waiting request lives in the background worker and cannot outlive it: if Chrome recycles
+the worker while an approval window is open, the page is told the wallet is unreachable
+and the window says the request is gone — never a Connect button over a site that is no
+longer asking.
 **Disconnect** — or Settings → Connected sites → **Revoke** — takes it back and fires
 `accountsChanged([])`. The grant it hands out is for one account: the one that was
 active when you clicked **Connect**. A page can never call `wallet.*`: send, unlock and the phrase

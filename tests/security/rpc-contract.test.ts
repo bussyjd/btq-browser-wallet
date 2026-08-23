@@ -94,7 +94,12 @@ describe('wallet RPC contract v2', () => {
     for (const key of [
       'hasVault',
       'unlocked',
-      'pendingReveal',
+      // The confirmation gate, and the positions it asks for. Both are on the
+      // contract because the popup routes on them: a wallet sealed at create
+      // but never confirmed has to come back to the confirm screen after the
+      // popup, or the worker, or the browser has been closed.
+      'awaitingConfirm',
+      'confirmChallenge',
       'network',
       'origin',
       'externalNext',
@@ -114,6 +119,9 @@ describe('wallet RPC contract v2', () => {
     }
     expect(status.lastBalanceSats).toBe('0');
     expect(status.confirmedBalanceSats).toBe('0');
+    // No vault, so nothing to confirm — never a gate in front of nothing.
+    expect(status.awaitingConfirm).toBe(false);
+    expect(status.confirmChallenge).toBeNull();
     // A locked keyring — here, one with no vault at all — must answer "no".
     // The popup gates the reveal button on `=== true`, so an omitted or
     // truthy-by-accident value would offer a button that can only fail.

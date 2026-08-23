@@ -247,6 +247,53 @@ export async function launchDevice(opts: DeviceOptions): Promise<Device> {
   return device;
 }
 
+/**
+ * End the extension's service worker and bring a fresh one up, the way Chrome
+ * does when the worker has been idle for about thirty seconds.
+ *
+ * Done with CDP rather than a thirty-second sleep: the wait would be slow, would
+ * still be a guess (any event resets the idle timer), and would leave the suite
+ * hostage to a Chrome heuristic. `ServiceWorker.stopAllWorkers` ends the running
+ * instance outright, which is the state under test — a second generation with
+ * the same storage and none of the first one's memory.
+ *
+ * Three details, each learned by getting it wrong:
+ *  - the marker write is awaited, or it can land on the *next* worker instead of
+ *    the one being killed, and then nothing ever looks restarted;
+ *  - the debugging session is detached before anything else happens, because an
+ *    attached session keeps a service worker alive — that is how DevTools stops
+ *    one dying mid-inspect — so the stop does not land while it is held;
+ *  - a stopped MV3 worker comes back only when an *event* arrives, so one is
+ *    sent. Reading the marker off a worker nobody has woken does not fail, it
+ *    hangs, which is a thirty-second timeout instead of an answer.
+ */
+export async function restartServiceWorker(device: Device, page: Page): Promise<void> {
+  const MARK = '__btqWorkerGeneration';
+  await (await device.worker()).evaluate((key: string) => {
+    (self as unknown as Record<string, unknown>)[key] = 1;
+  }, MARK);
+
+  const client = await device.context.newCDPSession(page);
+  try {
+    await client.send('ServiceWorker.enable');
+    await client.send('ServiceWorker.stopAllWorkers');
+  } finally {
+    await client.detach().catch(() => undefined);
+  }
+  await new Promise((resolve) => setTimeout(resolve, 500));
+
+  // The event that starts the replacement: the same `wallet.status` the popup
+  // asks for every time it opens, sent from the page the test is already on.
+  await device.rpc(page, 'wallet.status');
+  const generation = await (await device.worker()).evaluate(
+    (key: string) => (self as unknown as Record<string, unknown>)[key] ?? null,
+    MARK,
+  );
+  // Not a soft skip: a test that believes it restarted a worker it did not
+  // restart is a test that proves nothing while reporting a pass.
+  expect(generation, 'the service worker was never torn down').toBeNull();
+}
+
 // ------------------------------------------------------------------ gestures
 
 /** Create a wallet through the real onboarding flow; returns the 12 words. */

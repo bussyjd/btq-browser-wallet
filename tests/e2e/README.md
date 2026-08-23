@@ -67,6 +67,22 @@ would move the test and the wallet together. `tests/vectors/golden.json` has a
 imported to close the loop end to end (`smoke.spec.ts` asserts that refusal
 instead). `tests/unit/vectors.test.ts` is what pins derivation to the vectors.
 
+### Stopping the service worker on purpose
+
+`fixtures/extension.ts` exports `restartServiceWorker`, which ends the running
+worker over CDP (`ServiceWorker.stopAllWorkers`) and waits for its replacement.
+It does **not** sleep for thirty seconds: that would be slow, would still be a
+guess — any event resets Chrome's idle timer — and would tie the suite to a
+heuristic. The proof that it worked is a marker written onto the worker's global
+scope, which the next instance cannot see.
+
+Three details are load-bearing, each learned by getting it wrong: the marker
+write is awaited (a floating one can land on the *next* worker); the debugging
+session is detached before anything is checked (an attached session keeps a
+service worker alive, which is how DevTools stops one dying mid-inspect); and the
+replacement is started by sending it a real message, because reading a marker off
+a worker nobody has woken does not fail — it hangs.
+
 ## What each hostile case proves
 
 | Case | The thing that would otherwise go unnoticed |
@@ -81,6 +97,8 @@ instead). `tests/unit/vectors.test.ts` is what pins derivation to the vectors.
 | `negative.spec.ts` reveals on a raw-seed wallet | a wallet with no BIP39 entropy must say so — running words back out of its HD seed would hand the user a phrase that restores a different wallet |
 | `accounts.spec.ts` restores from a backup file on a device with its **own** mock backend, then reads that backend's request log before the switcher is opened | "restoring the account list asks the explorer nothing" is only checkable against a log nobody else is writing to. The assertion is not merely "the other account's first address was not queried" but that every address queried belongs to the account on screen |
 | `accounts.spec.ts` scans the downloaded file for the account name, both addresses and the password | the file is the one artefact of this wallet that leaves the machine; a plaintext account label beside an address in a downloads folder is a dossier |
+| `lifetime.spec.ts` kills the real service worker between "write these words down" and "type three of them back" | the failure that only a *careful* user hits. Chrome ends an idle MV3 worker after about thirty seconds, which is less than it takes to copy twelve words onto paper — and the popup goes on painting them regardless. The unit suite models the restart by discarding a `Keyring`; only this proves the popup half survives it |
+| `lifetime.spec.ts` then closes the popup as well and reopens the wallet | a setup abandoned mid-phrase has to come back to the confirmation gate, on a wallet that already exists — not to a Welcome screen offering to generate a second phrase over the top of the first |
 
 ### One thing this suite asserts *is* stored in the clear
 

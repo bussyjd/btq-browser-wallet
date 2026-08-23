@@ -43,7 +43,7 @@ describe('RPC surface — what a page could try', () => {
         /not available to pages/,
       );
     }
-    expect((await k.status()).pendingReveal).toBe(false);
+    expect((await k.status()).awaitingConfirm).toBe(false);
     expect((await k.status()).hasVault).toBe(false);
   });
 

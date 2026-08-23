@@ -157,9 +157,12 @@ from `/utxos`, scale-16 fee estimation, coin selection under the weight ceiling,
 sighash, signing, and node broadcast. Broadcast turned out to require a node (§2); a
 failed broadcast keeps the signed hex and says why.
 
-**Polish.** Onboarding, the seed-confirmation challenge, lock and auto-lock after five
-minutes idle, an activity list with confirmations, the brand palette in both colour
-schemes, and error copy that names the cause and the next step.
+**Polish.** Onboarding, the seed-confirmation challenge, lock and auto-lock, an activity
+list with confirmations, the brand palette in both colour schemes, and error copy that
+names the cause and the next step. Two of those were reshaped by the MV3 worker lifetime
+rather than by taste: the vault is sealed at `create` and the challenge gates a wallet
+that already exists (nothing can be held across the minutes a person spends copying a
+phrase), and the auto-lock is documented as what it is — see below.
 
 **Site-connect and fees.** The `window.btq` provider, a held approval that names the
 origin, per-site permissions with revoke, `accountsChanged`, three fee presets and a Max
@@ -253,7 +256,13 @@ Each of these was considered and left out on purpose; none is blocked on an unkn
   down.
 - **i18n.** English only.
 - **Configurable auto-lock.** Fixed at five minutes idle — a `chrome.alarms` tick every
-  minute checks the threshold — with re-authentication on every send.
+  minute checks the threshold — with re-authentication on every send. Five minutes is the
+  *outside* limit and rarely the one that fires: the decrypted seed lives in the service
+  worker, Chrome ends an idle worker after about thirty seconds, and the seed goes with
+  it. So the wallet really locks about a minute after the last thing you did. That is
+  fail-safe, so the code is left alone and the documentation says what happens — the
+  alternative, pinning a worker awake to honour a number in a config, would keep key
+  material in memory *longer* to satisfy a promise nobody asked for.
 - **Hardware signing and PSBT interchange.** btq-core's P2MR PSBT fields are mapped in
   `BTQ_CORE_MAP.md`, but nothing here reads or writes a PSBT: the wallet builds and signs
   its own transactions.

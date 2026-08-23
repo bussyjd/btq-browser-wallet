@@ -1,15 +1,7 @@
 import { Button } from '../components/Button.js';
 import { Mark } from '../components/Mark.js';
 
-export function Welcome({
-  onCreate,
-  onImport,
-  notice,
-}: {
-  onCreate: () => void;
-  onImport: () => void;
-  notice?: string | null;
-}) {
+export function Welcome({ onCreate, onImport }: { onCreate: () => void; onImport: () => void }) {
   return (
     <div className="stack">
       <Mark size={44} />
@@ -20,11 +12,6 @@ export function Welcome({
           coins here are not mainnet money.
         </p>
       </div>
-      {notice ? (
-        <p className="note note-warn" role="status">
-          {notice}
-        </p>
-      ) : null}
       <div className="stack-sm mt-8">
         <Button data-testid="welcome-create" onClick={onCreate}>
           Create a wallet
