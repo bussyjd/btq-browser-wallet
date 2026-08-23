@@ -33,6 +33,7 @@ import { parseUtxoResponse, type ExplorerUtxo } from '../../../src/core/explorer
 import { parseTipResponse } from '../../../src/core/explorer/schema.js';
 import { scriptForAddress } from '../../../src/core/script/address.js';
 import { addressFromHdSeed } from '../../../src/core/wallet/derive.js';
+import type { Chain } from '../../../src/core/crypto/hd.js';
 import { mnemonicToHdSeed } from '../../../src/core/crypto/mnemonic.js';
 import { parseBtqAmount, formatSats } from '../../../src/core/wallet/format.js';
 import { dustThreshold, feeForP2mrTx, MIN_RELAY_SAT_PER_KVB } from '../../../src/core/tx/fee.js';
@@ -256,6 +257,7 @@ export async function explorerGet(
 }
 
 export interface Funding {
+  chain: Chain;
   index: number;
   path: string;
   address: string;
@@ -265,13 +267,20 @@ export interface Funding {
 }
 
 /**
- * Read one wallet's first `GAP_LIMIT` receive addresses through the extension's
- * own parser, so what the preflight believes is what the popup will believe.
+ * Read one wallet's first `GAP_LIMIT` addresses on BOTH chains through the
+ * extension's own parser, so what the preflight believes is what the popup will
+ * believe.
+ *
+ * Both chains, because change lands on the internal one: after a take, Alice's
+ * remaining coins are at m/0'/1'/n', and a preflight that only looked at
+ * m/0'/0'/n' would report an empty wallet and refuse every subsequent take
+ * while the popup happily showed the balance and could spend it.
  */
 export async function confirmedFunding(cfg: LiveConfig, mnemonic: string): Promise<Funding[]> {
   const hdSeed = mnemonicToHdSeed(mnemonic);
-  const derived = Array.from({ length: GAP_LIMIT }, (_, i) =>
-    addressFromHdSeed(hdSeed, 'external', i, 'testnet'),
+  const chains: Chain[] = ['external', 'internal'];
+  const derived = chains.flatMap((chain) =>
+    Array.from({ length: GAP_LIMIT }, (_, i) => addressFromHdSeed(hdSeed, chain, i, 'testnet')),
   );
   const out: Funding[] = new Array<Funding>(derived.length);
   // The same width the wallet scans at, so the public indexer sees the same
@@ -289,7 +298,7 @@ export async function confirmedFunding(cfg: LiveConfig, mnemonic: string): Promi
         if (u.blockHeight === null) mempool += u.value;
         else confirmed += u.value;
       }
-      out[i] = { index: d.index, path: d.path, address: d.address, confirmed, mempool, utxos };
+      out[i] = { chain: d.chain, index: d.index, path: d.path, address: d.address, confirmed, mempool, utxos };
     }
   });
   await Promise.all(workers);
@@ -546,12 +555,13 @@ export async function preflight(
     // "insufficient funds" on camera at any fee chip the operator clicks.
     const needed =
       cfg.amountSats + feeForP2mrTx(Math.max(confirmedUtxos, 1), 2, PRIORITY_SAT_PER_KVB) + dustThreshold();
-    const fundTarget = funding[0]!.address;
+    // Top-ups go to the receive address, never to a change address.
+    const fundTarget = funding.find((f) => f.chain === 'external' && f.index === 0)!.address;
     add(
       'Alice funded',
       confirmed >= needed,
-      `${formatSats(confirmed)} tBTQ confirmed across m/0'/0'/0..${GAP_LIMIT - 1} (${utxoCount} utxo${utxoCount === 1 ? '' : 's'}, ${confirmedUtxos} confirmed${mempool > 0n ? `, ${formatSats(mempool)} tBTQ still in the mempool` : ''}) · needs ${formatSats(needed)}`,
-      `demo:live — Alice has ${formatSats(confirmed)} tBTQ confirmed across m/0'/0'/0..${GAP_LIMIT - 1} (${utxoCount} utxo${utxoCount === 1 ? '' : 's'}${mempool > 0n ? `, ${formatSats(mempool)} tBTQ still in the mempool` : ''}), and this take needs ${formatSats(needed)}. Fund ${fundTarget} with at least ${formatSats(needed)} tBTQ and wait for one block, then run npm run demo:live again.`,
+      `${formatSats(confirmed)} tBTQ confirmed across m/0'/{0,1}'/0..${GAP_LIMIT - 1} (${utxoCount} utxo${utxoCount === 1 ? '' : 's'}, ${confirmedUtxos} confirmed${mempool > 0n ? `, ${formatSats(mempool)} tBTQ still in the mempool` : ''}) · needs ${formatSats(needed)}`,
+      `demo:live — Alice has ${formatSats(confirmed)} tBTQ confirmed across m/0'/{0,1}'/0..${GAP_LIMIT - 1} (${utxoCount} utxo${utxoCount === 1 ? '' : 's'}${mempool > 0n ? `, ${formatSats(mempool)} tBTQ still in the mempool` : ''}), and this take needs ${formatSats(needed)}. Fund ${fundTarget} with at least ${formatSats(needed)} tBTQ and wait for one block, then run npm run demo:live again.`,
     );
   } catch (e) {
     add(
