@@ -49,6 +49,8 @@ import {
 } from './fixtures/live.js';
 import { startStaticDapp, type StaticDapp } from './fixtures/static-dapp.js';
 import { addressFromHdSeed } from '../../src/core/wallet/derive.js';
+import { decodeAddress } from '../../src/core/script/address.js';
+import { bytesToHex } from '../../src/core/util/hex.js';
 import { mnemonicToHdSeed } from '../../src/core/crypto/mnemonic.js';
 import { formatSats, parseBtqAmount } from '../../src/core/wallet/format.js';
 import { GAP_LIMIT } from '../../src/core/wallet/gap.js';
@@ -393,20 +395,37 @@ test('scene 6 · the transaction on the public explorer', async () => {
   });
   // Fail on a blank tab rather than dwell on one: the page must actually name
   // the transaction and both of its outputs before it is worth showing.
+  //
+  // It prints the txid in full, but it renders each output as its witness
+  // program shortened to `head…tail` and never shows the bech32 address, so
+  // that is what we look for — derived here from the two addresses this test
+  // computed itself, which ties the outputs on screen to our own keys more
+  // tightly than an address string would.
+  const shortened = (address: string): string => {
+    const hex = bytesToHex(decodeAddress(address, 'testnet').merkleRoot);
+    return `${hex.slice(0, 20)}...${hex.slice(-20)}`;
+  };
   const change = derivedAddresses(cfg.alice.mnemonic, 'internal');
+  let missing = 'the page never rendered';
   await expect
     .poll(
       async () => {
         const text = await tab.evaluate(() => document.body?.innerText ?? '');
-        return (
-          text.includes(sentTxid) &&
-          text.includes(bobAddress) &&
-          change.some((a) => text.includes(a))
-        );
+        const hasTxid = text.includes(sentTxid);
+        const hasPayee = text.includes(shortened(bobAddress));
+        const hasChange = change.some((a) => text.includes(shortened(a)));
+        missing = [
+          hasTxid ? null : 'the txid',
+          hasPayee ? null : `the payee output (${shortened(bobAddress)})`,
+          hasChange ? null : 'the change output',
+        ]
+          .filter(Boolean)
+          .join(', ');
+        return hasTxid && hasPayee && hasChange;
       },
       {
         timeout: 60_000,
-        message: `${cfg.explorer}/tx/${sentTxid} never showed the txid, the payee and the change address`,
+        message: `${cfg.explorer}/tx/${sentTxid} never showed ${missing}`,
       },
     )
     .toBe(true);

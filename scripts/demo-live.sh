@@ -24,11 +24,24 @@ set -eu
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
 
+# Read, do not source. A recovery phrase is twelve words separated by spaces, so
+# sourcing would need every value quoted and would run `survey: command not found`
+# on the first unquoted one. Parsing also means this file is data: nothing in it
+# is ever executed, however it got onto the machine.
 if [ -f ./.env.demo ]; then
   echo "demo:live — reading ./.env.demo"
-  set -a
-  . ./.env.demo
-  set +a
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in '' | '#'*) continue ;; esac
+    case "$line" in *=*) ;; *) continue ;; esac
+    key=${line%%=*}
+    value=${line#*=}
+    # Tolerate, but do not require, surrounding quotes.
+    case "$value" in
+      \"*\") value=${value#\"}; value=${value%\"} ;;
+      "'"*"'") value=${value#"'"}; value=${value%"'"} ;;
+    esac
+    export "$key=$value"
+  done < ./.env.demo
 fi
 
 BTQ_LIVE=1
