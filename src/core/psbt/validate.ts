@@ -23,8 +23,7 @@
  * second transaction decoder we refuse. That is a compatibility limit, not a
  * hole: the failure is a refusal to decode, never a signature we skipped.
  */
-import { SIGHASH_ALL } from '../crypto/mldsa.js';
-import { verifyTransactionHash } from '../crypto/mldsa.js';
+import { SIGHASH_ALL, verifyTransactionHash } from '../crypto/mldsa.js';
 import { bytesEqual } from '../util/bytes.js';
 import { bytesToHex } from '../util/hex.js';
 import { commitsToProgram, tapLeafHash, OP_2 } from '../script/p2mr.js';

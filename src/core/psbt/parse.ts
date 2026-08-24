@@ -113,10 +113,20 @@ function readMap(r: Reader, what: string): PsbtKeyValue[] {
   }
 }
 
-/** The compact-size type at the head of a PSBT key. */
+/**
+ * The compact-size type at the head of a PSBT key.
+ *
+ * `readCompactSize` throws a plain `Error` for a truncated or non-canonical
+ * encoding, and a one-byte key of 0xfd is exactly that. Re-tagging it keeps
+ * this module's promise that every rejection a caller can trigger is a
+ * `WalletError('BAD_PSBT')`.
+ */
 export function keyType(key: Uint8Array): number {
-  const { value } = readCompactSize(key, 0);
-  return value;
+  try {
+    return readCompactSize(key, 0).value;
+  } catch (e) {
+    throw psbtError(`PSBT key has no valid type prefix: ${e instanceof Error ? e.message : String(e)}`);
+  }
 }
 
 /** Values that are themselves length-prefixed inside the value field. */
@@ -130,7 +140,13 @@ function fixedLengthValue(value: Uint8Array, expected: number, what: string): Ui
 function parseWitnessUtxo(value: Uint8Array): { value: bigint; script: Uint8Array } {
   if (value.length < 9) throw psbtError('witness UTXO is truncated');
   const amount = readUintLE(value, 0, 8);
-  const { value: scriptLength, offset } = readCompactSize(value, 8);
+  let scriptLength: number;
+  let offset: number;
+  try {
+    ({ value: scriptLength, offset } = readCompactSize(value, 8));
+  } catch (e) {
+    throw psbtError(`witness UTXO script length is malformed: ${e instanceof Error ? e.message : String(e)}`);
+  }
   if (offset + scriptLength !== value.length) {
     throw psbtError('witness UTXO length does not match its stated size');
   }
