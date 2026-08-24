@@ -702,13 +702,29 @@ trusted on rows nothing has verified yet. Prefer that check to asserting 42 as a
 number.
 
 A sibling spike implements `thresholdWitnessBytes(m, n)` and `maxInputsForWitness()` in
-`src/core/tx/fee.ts` and asserts both tables, tying them to the shipping constants by
-feeding the *single-key* witness through the same formula and getting `MAX_P2MR_INPUTS = 90`
-back. That tie is the single-key leaf, not a 1-of-1 accumulator, for the reason above. Every
-row was also cross-checked against btq-core's own serializer — `CTransaction.get_weight()`
-and `get_vsize()` from `test/functional/test_framework/messages.py`, with the leaf assembled
-from btq-core's opcode values rather than from this document. Two independent methods, same
-figures. It is arithmetic proved against consensus, not a multisig feature.
+`src/core/tx/fee.ts` and asserts both tables. It anchors them to the shipping constants in
+two independent places, and the shape of those anchors is the point — neither asserts a
+multisig number, both assert that the *general* formula reproduces an already-verified
+single-key one:
+
+- The one byte-counting path in the module, given the single-key leaf's real dimensions read
+  off the wallet's own script builders rather than retyped —
+  `1 + (3 + 2421) + (3 + 1316) + (1 + 1)` — returns `P2MR_WITNESS_BYTES = 3746`
+  (`src/core/tx/fee.ts:23`). The threshold witness sizes go through that same function.
+- The same input-ceiling formula, given the single-key witness, returns
+  `MAX_P2MR_INPUTS = 90` (`src/core/tx/fee.ts:24`).
+
+What the spike deliberately does **not** assert is that a 1-of-1 accumulator equals the
+single-key leaf, for the reason above: 1322 against 1316, a different TapLeaf hash, a
+different address.
+
+Every row was also cross-checked against btq-core's own serializer —
+`CTransaction.get_weight()` and `get_vsize()` from
+`test/functional/test_framework/messages.py`, with the leaf assembled from btq-core's opcode
+values rather than from this document — and the over-signed 840 vB case is asserted
+alongside the minimal 689, since that is the one row where a correct implementation and a
+naive one both produce a *valid* transaction. Two independent methods, same figures. It is
+arithmetic proved against consensus, not a multisig feature.
 
 ---
 
