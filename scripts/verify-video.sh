@@ -68,6 +68,7 @@ UI_OK = {
 
 worst = 0
 findings = []
+noisy = []
 for txt in sorted(glob.glob(os.path.join(work, '*.txt'))):
     body = open(txt, errors='ignore').read()
     low = body.lower()
@@ -79,18 +80,52 @@ for txt in sorted(glob.glob(os.path.join(work, '*.txt'))):
         if p and p.lower() in low:
             findings.append((name, 'FULL PHRASE ON SCREEN'))
 
-    tokens = set(re.findall(r'[a-z]{3,}', low))
+    seq = re.findall(r'[a-z]{3,}', low)
+    tokens = set(seq)
     # A seed grid shows many wordlist words at once; UI copy shows a handful.
     hits = (tokens & wordlist) - UI_OK
     phrase_hits = tokens & phrase_words
     worst = max(worst, len(hits))
+
+    # Distinct-token count alone is blind to a phrase that repeats a word, and
+    # the one this project tests with is
+    # 'abandon abandon ... abandon about' — eleven of twelve identical. Rendered
+    # in full and legible it collapses to two distinct tokens and sails under
+    # any threshold. Verified: a 6-second clip of exactly that, twelve words on
+    # screen, passed this script.
+    #
+    # So position is scored too. A run is consecutive OCR words that are all in
+    # the wordlist, counted with repeats — twelve in a row is a seed grid
+    # whether or not they differ, and prose does not reach it. Cheap, and it
+    # closes the case a set cannot see.
+    run = best_run = 0
+    for w in seq:
+        if w in wordlist and w not in UI_OK:
+            run += 1
+            best_run = max(best_run, run)
+        else:
+            run = 0
+
+    # What fails the run is only ever specific: this wallet's actual phrases, the
+    # actual RPC password, or the structural shape of a seed grid. The
+    # distinct-token count is not specific and must not fail anything — the
+    # Security screen alone puts fourteen BIP39 words on screen in plain prose
+    # ('cancel', 'lock', 'now', 'only', 'screen', 'security', 'sure', 'use',
+    # 'will', 'wrong', 'you' …), which tripped an >=8 rule on every frame of a
+    # take that leaks nothing. A verifier that cries wolf on its own copy gets
+    # ignored, and then it is worth less than nothing. It is reported as noise
+    # to look at, never as a verdict.
     if len(phrase_hits) >= 3:
         findings.append((name, f'{len(phrase_hits)} demo-phrase words: {sorted(phrase_hits)}'))
+    elif best_run >= 10:
+        findings.append((name, f'{best_run} wordlist words in a row — a seed grid, distinct or not'))
     elif len(hits) >= 8:
-        findings.append((name, f'{len(hits)} unexplained wordlist tokens: {sorted(hits)[:12]}'))
+        noisy.append((name, f'{len(hits)} wordlist tokens (prose, most likely): {sorted(hits)[:12]}'))
 
 print(f'frames OCRed: {len(glob.glob(os.path.join(work, "*.txt")))}')
-print(f'max unexplained wordlist tokens in any frame: {worst}')
+print(f'busiest frame held {worst} wordlist tokens (prose does this; not a verdict)')
+if noisy:
+    print(f'{len(noisy)} frame(s) worth an eyeball, e.g. {noisy[0][1]}')
 if findings:
     print('FAIL — secrets visible:')
     for n, why in findings:
