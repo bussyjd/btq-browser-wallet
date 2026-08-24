@@ -167,14 +167,19 @@ export function dustThreshold(): bigint {
  * only, so that it stays independent of the leaf builder.
  * ------------------------------------------------------------------------- */
 
-/** ML-DSA-44 public key, `src/crypto/dilithium_key.h`. */
+/** ML-DSA-44 public key, `src/crypto/dilithium_key.h:64`. */
 export const DILITHIUM_PUBKEY_BYTES = 1312;
 /** Signature plus the mandatory sighash byte — `src/psbt.h:82`. */
 export const DILITHIUM_SIG_BYTES = 2421;
 /** MAX_PUBKEYS_PER_MULTISIG, `src/script/script.h:35`. Also the PSBT cap on
  *  partial sigs per input (`src/psbt.h:83`). */
 export const MAX_THRESHOLD_KEYS = 20;
-/** Largest witness stack item policy will relay, `src/policy/policy.h:48`. */
+/**
+ * Largest witness stack item policy will relay (`src/policy/policy.h:48`,
+ * = MAX_SCRIPT_ELEMENT_SIZE, raised from Bitcoin's 520 to carry these keys and
+ * signatures). It binds the signature slots only — see the note above on which
+ * stack items `IsWitnessStandard` measures.
+ */
 export const MAX_STANDARD_TAPSCRIPT_STACK_ITEM_SIZE = 15_000;
 
 /**
@@ -291,7 +296,10 @@ export function estimateMultisigTxWeight(
   const stripped = strippedTxSize(inputs.length, outputs);
   let witness = 0;
   for (const input of inputs) witness += thresholdWitnessBytes(input.m, input.n, input.depth ?? 0);
-  const total = stripped + (inputs.length > 0 ? 2 : 0) + witness; // marker/flag + witnesses
+  // Marker/flag only when there is a witness to introduce; with no inputs
+  // there is none, and the empty-input case exists here purely so a caller can
+  // price the fixed overhead of a shape before choosing coins for it.
+  const total = stripped + (inputs.length > 0 ? 2 : 0) + witness;
   return transactionWeight(stripped, total);
 }
 
