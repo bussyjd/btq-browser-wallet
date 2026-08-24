@@ -509,29 +509,48 @@ BTQ's witness scale factor is 16, not Bitcoin's 4 (`docs/REFERENCE.md:19`). For 
 where one signature is 2421 bytes and one public key is 1312, that choice is the difference
 between multisig being usable and being theoretical.
 
-The accumulator leaf is `1319n + 3` bytes for m ≤ 16 (`OP_0`, then 1319 bytes per key —
-`OP_TOALTSTACK`, a 3-byte `OP_PUSHDATA2` header, the 1312-byte key,
-`OP_CHECKSIGDILITHIUM`, `OP_FROMALTSTACK`, `OP_ADD` — then the threshold push and
-`OP_GREATERTHANOREQUAL`), and `1319n + 4` for m ≥ 17, where the threshold no longer fits
-`OP_1`..`OP_16`. The witness is m signatures at 2424 bytes each (2421 plus a 3-byte compact
-size), `n − m` one-byte empty slots, the leaf with its 3-byte length prefix, the 1-byte
-control block with its own, and the stack count.
+### The derivation, so the table can be recomputed
 
-For a 1-input, 2-output spend — `stripped = 137`, so `weight = 137 × 15 + (137 + 2 +
-witness)`, and `vsize = ceil(weight / 16)`:
+**Leaf script.** `1319n + 3` bytes for m ≤ 16: `OP_0`, then 1319 bytes per key
+(`OP_TOALTSTACK`, a 3-byte `OP_PUSHDATA2` header, the 1312-byte key,
+`OP_CHECKSIGDILITHIUM`, `OP_FROMALTSTACK`, `OP_ADD`), then the threshold push and
+`OP_GREATERTHANOREQUAL`.
 
-| spend | leaf script | witness | vsize | vs single-key |
-|---|---|---|---|---|
-| single-key | 1316 B | 3746 B | **372 vB** | 1.00× |
-| 2-of-2 | 2641 B | 7495 B | **606 vB** | 1.63× |
-| 2-of-3 | 3960 B | 8815 B | **689 vB** | 1.85× |
-| 3-of-5 | 6598 B | 13878 B | **1005 vB** | 2.70× |
-| 20-of-20 (max) | 26384 B | 74870 B | **4817 vB** | 12.95× |
+It is **`1319n + 4` for m ≥ 17**, and this is easy to miss. `GetScriptForDilithiumThreshold`
+emits the threshold with `script << m` (`src/script/dilithium_leaf.cpp:23`); 1 through 16
+have single opcodes `OP_1`..`OP_16`, but 17 and above have none and serialize as a two-byte
+minimal data push. `MAX_PUBKEYS_PER_MULTISIG = 20` (`src/script/script.h:35`) makes that
+range reachable, so a 20-of-20 leaf is 26384 bytes, not 26383. A test suite written around
+2-of-3 never sees it.
+
+**Witness.** m signatures at 2424 bytes each (2421 plus a 3-byte compact size prefix), plus
+`n − m` empty slots at one byte each, plus the leaf script with its 3-byte length prefix,
+plus the 1-byte control block with its own, plus the stack-item count.
+
+**Transaction.** For 1 input and 2 P2MR outputs — and note that the segwit marker and flag
+belong to `total`, never to `stripped`:
+
+```
+stripped = 4 + varint(1) + 41 + varint(2) + 2×43 + 4  = 137
+total    = stripped + 2 + witness
+weight   = stripped × 15 + total
+vsize    = ceil(weight / 16)
+```
+
+| spend | leaf script | witness | weight | vsize | vs single-key |
+|---|---|---|---|---|---|
+| single-key | 1316 B | 3746 B | 5940 | **372 vB** | 1.00× |
+| 2-of-2 | 2641 B | 7495 B | 9689 | **606 vB** | 1.63× |
+| 2-of-3 | 3960 B | 8815 B | 11009 | **689 vB** | 1.85× |
+| 3-of-5 | 6598 B | 13878 B | 16072 | **1005 vB** | 2.70× |
+| 20-of-20 (max) | 26384 B | 74870 B | 77064 | **4817 vB** | 12.95× |
 
 The single-key row is not a new calculation; it reproduces the wallet's already-verified
 constants exactly — `P2MR_WITNESS_BYTES = 3746` (`src/core/tx/fee.ts:23`) and
-`P2MR_INPUT_WEIGHT = 4402` (`:20`) — which is what ties the rest of the table to something
-checked against consensus.
+`P2MR_INPUT_WEIGHT = 41 × 16 + 3746 = 4402` (`:20`) — which is what ties the rest of the
+table to something checked against consensus. Two of these rows were wrong in an earlier
+draft, and both were caught by recomputing rather than by reading. That is the argument for
+printing the derivation next to the figures.
 
 **The comparison that matters.** At Bitcoin's scale factor of 4, the same 2-of-3 witness
 alone would contribute ~2204 vB instead of ~551. Post-quantum multisig is economically
