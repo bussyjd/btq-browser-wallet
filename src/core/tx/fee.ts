@@ -59,22 +59,25 @@ export function virtualSizeCeil(weight: number): number {
 }
 
 /**
- * Bytes a compact-size prefix occupies, for any length this wallet can build.
- * The value table is `compactSize()` in `util/bytes.ts` (btq-core
- * `serialize.h` `WriteCompactSize`) counted rather than encoded, so nothing
- * here allocates inside a coin-selection loop; `fee.test.ts` pins the two
- * against each other at all three thresholds.
+ * Bytes a compact-size prefix occupies — `compactSize()` in `util/bytes.ts`
+ * (btq-core `serialize.h` `WriteCompactSize`) counted rather than encoded, so
+ * nothing here allocates inside a coin-selection loop.
  *
- * It deliberately does not reproduce `compactSize()`'s refusals — that
- * function throws above 0xffffffff and on a negative or fractional argument,
- * where this one keeps counting. Nothing reachable gets near it: the largest
- * count in a standard transaction is a few hundred. Callers that take a length
- * from outside validate it first.
+ * It matches that encoder's contract exactly, refusals included: a negative or
+ * fractional length is not a length, and the 9-byte form cannot appear in
+ * anything this wallet builds, so both throw rather than return a number a
+ * caller would spend. `fee.test.ts` pins the two against each other at every
+ * threshold and at both refusals — a doc comment claiming an equivalence no
+ * test covers is how an off-by-one survives.
  */
 export function compactSizeBytes(n: number): number {
+  if (!Number.isInteger(n) || n < 0) {
+    throw new WalletError('BAD_PARAMS', 'A compact size must be a non-negative whole number.');
+  }
   if (n < 0xfd) return 1;
   if (n <= 0xffff) return 3;
-  return 5;
+  if (n <= 0xffffffff) return 5;
+  throw new WalletError('BAD_PARAMS', 'Compact size too large.');
 }
 
 /** Weight of a signed single-key P2MR tx with `inputs` and `outputs`. */
@@ -314,6 +317,12 @@ export interface ThresholdInput {
    * Merkle path length to this leaf. 0 is a single-leaf tree, whose control
    * block is the lone 1-byte leaf-version-and-parity byte
    * (`src/script/interpreter.h:252-255`, control block = 1 + 32*depth).
+   *
+   * It defaults to 0 because every coin this wallet spends today lives in a
+   * single-leaf tree. That default is the cheap direction, so a multi-leaf
+   * coin — a hot leaf beside a timelocked recovery leaf, say — must pass its
+   * real depth: omitting it under-quotes by 32 witness bytes, 2 vB, per input,
+   * and under-quoting is the direction that fails to relay.
    */
   depth?: number;
   /**
@@ -388,27 +397,42 @@ export function estimateMultisigTxWeight(
 }
 
 /**
- * The largest number of identical threshold inputs that still fits under
- * MAX_STANDARD_TX_WEIGHT — the multisig analogue of `MAX_P2MR_INPUTS`, which
- * cannot be a constant here because the answer depends on the shape: 42 for a
- * 2-of-3, 5 for a 20-of-20.
+ * The largest number of inputs of one witness size that still fits under
+ * MAX_STANDARD_TX_WEIGHT. The fixed overhead of a transaction is paid once,
+ * not once per input, so this is not `MAX_STANDARD_TX_WEIGHT` divided by a
+ * one-input transaction's weight — that mistake charges ~1538 WU of overhead
+ * 42 times over and answers 36 where the truth is 42.
  *
- * Without this a coin selector quotes a perfectly correct fee for a
- * transaction no node will relay, and the send fails at the last step.
+ * The formula validates itself: fed the single-key witness it must reproduce
+ * `MAX_P2MR_INPUTS`, a constant this module has shipped and relied on since
+ * before any of the threshold work. `fee.test.ts` asserts exactly that, which
+ * is worth more than pinning 42 as a magic number.
+ *
+ * No estimator here throws on a set that exceeds the ceiling — `estimateP2mrTxWeight`
+ * does not either. The ceiling is a number the caller enforces (`coinselect.ts`
+ * does, with TOO_MANY_INPUTS); this is where that number comes from.
  */
-export function maxStandardThresholdInputs(input: ThresholdInput, outputs = 2): number {
-  const witness = witnessBytesFor(input);
-  const perInput = 41 * WITNESS_SCALE_FACTOR + witness;
+export function maxInputsForWitness(witnessBytes: number, outputs = 2): number {
+  const perInput = 41 * WITNESS_SCALE_FACTOR + witnessBytes;
   const uniformWeight = (count: number): number => {
     const stripped = strippedTxSize(count, outputs);
-    return transactionWeight(stripped, stripped + 2 + count * witness);
+    return transactionWeight(stripped, stripped + 2 + count * witnessBytes);
   };
-  // Exact but for the compact-size step at 253 inputs, so the loops below run
-  // at most a couple of times.
+  // Exact but for the compact-size step at 253 inputs, so the loops run at
+  // most a couple of times.
   let count = Math.max(0, Math.floor((MAX_STANDARD_TX_WEIGHT - uniformWeight(0)) / perInput));
   while (count > 0 && uniformWeight(count) > MAX_STANDARD_TX_WEIGHT) count--;
   while (uniformWeight(count + 1) <= MAX_STANDARD_TX_WEIGHT) count++;
   return count;
+}
+
+/**
+ * The multisig analogue of `MAX_P2MR_INPUTS`, which cannot be a constant
+ * because the answer depends on the shape: 42 for a 2-of-3, 27 for a 3-of-5,
+ * 5 for a 20-of-20.
+ */
+export function maxStandardThresholdInputs(input: ThresholdInput, outputs = 2): number {
+  return maxInputsForWitness(witnessBytesFor(input), outputs);
 }
 
 /** `feeForP2mrTx` for a threshold input set. */

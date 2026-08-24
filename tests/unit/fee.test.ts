@@ -32,6 +32,7 @@ import {
   VALIDATION_WEIGHT_OFFSET,
   validationWeightSlack,
   maxStandardThresholdInputs,
+  maxInputsForWitness,
   THRESHOLD_LEAF_KEY_BYTES,
   P2MR_WITNESS_BYTES,
   type ThresholdInput,
@@ -288,19 +289,21 @@ describe('k-of-n threshold sizing', () => {
     expect(thresholdLeafScriptBytes(1, 1)).not.toBe(singleKeyLeafScript(pubkey).length);
   });
 
-  it('compactSizeBytes counts exactly what compactSize() encodes, at every threshold', () => {
+  it('compactSizeBytes agrees with compactSize() at every threshold and both refusals', () => {
     // fee.ts counts the prefix instead of building it, so the two must not be
     // allowed to drift: an off-by-one here is an off-by-one in every fee.
-    // Both sides of each of the three thresholds, plus the largest length a
-    // standard transaction can reach.
+    // Both sides of each of the three thresholds, plus the largest length the
+    // encoder accepts at all.
     for (const n of [0, 1, 0xfc, 0xfd, 0xfe, 0xff, 0xffff, 0x10000, 0xffffff, 0xffffffff]) {
       expect(compactSizeBytes(n), `n=${n}`).toBe(compactSize(n).length);
     }
-    // Above 0xffffffff the encoder throws and the counter keeps counting; the
-    // divergence is documented and unreachable, but pin it so a future change
-    // to either one is a deliberate change to both.
-    expect(() => compactSize(0x1_0000_0000)).toThrow();
-    expect(compactSizeBytes(0x1_0000_0000)).toBe(5);
+    // The refusals must match too, or the counter hands back a number for a
+    // length the encoder would never produce. These are the two boundaries the
+    // old test stopped short of.
+    for (const n of [0x1_0000_0000, -1, 1.5, NaN]) {
+      expect(() => compactSize(n), `n=${n}`).toThrow();
+      expect(() => compactSizeBytes(n), `n=${n}`).toThrow(WalletError);
+    }
   });
 
   it('a threshold leaf is 1319 bytes per key, plus OP_0, <m> and the comparison', () => {
@@ -415,12 +418,25 @@ describe('k-of-n threshold sizing', () => {
       Array.from({ length: k }, () => ({ m: 2, n: 3 }));
     const limit = maxStandardThresholdInputs({ m: 2, n: 3 }, 2);
     expect(limit).toBe(42);
+    // The formula validates itself: fed the single-key witness it has to
+    // reproduce MAX_P2MR_INPUTS, a constant this module shipped and relied on
+    // long before any threshold work. That is a far better check on the
+    // arithmetic than asserting 42 as a magic number — if this line fails, 42
+    // is not to be trusted either.
+    expect(maxInputsForWitness(P2MR_WITNESS_BYTES, 2)).toBe(MAX_P2MR_INPUTS);
+    expect(maxInputsForWitness(P2MR_WITNESS_BYTES, 1)).toBe(MAX_P2MR_INPUTS);
+    expect(MAX_P2MR_INPUTS).toBe(90);
     expect(estimateMultisigTxWeight(inputs(limit), 2)).toBe(399_320);
     expect(estimateMultisigTxWeight(inputs(limit), 2)).toBeLessThanOrEqual(MAX_STANDARD_TX_WEIGHT);
     expect(estimateMultisigTxWeight(inputs(limit + 1), 2)).toBeGreaterThan(MAX_STANDARD_TX_WEIGHT);
     // The ceiling really does depend on the shape, which is why it is a
     // function and not a constant.
+    expect(maxStandardThresholdInputs({ m: 2, n: 2 }, 2)).toBe(48);
+    expect(maxStandardThresholdInputs({ m: 3, n: 5 }, 2)).toBe(27);
     expect(maxStandardThresholdInputs({ m: 20, n: 20 }, 2)).toBe(5);
+    // The 1-of-1 threshold leaf is 6 bytes bigger than the single-key one, and
+    // 90 has enough slack to absorb that — so this row agreeing with
+    // MAX_P2MR_INPUTS is a coincidence, not the self-check above.
     expect(maxStandardThresholdInputs({ m: 1, n: 1 }, 2)).toBe(90);
     // And it holds at the boundary for every shape in the table.
     for (const [m, n] of [
@@ -473,6 +489,12 @@ describe('k-of-n threshold sizing', () => {
     expect(thresholdWitnessBytes(2, 3, 8) - thresholdWitnessBytes(2, 3, 7)).toBe(34);
     expect(thresholdWitnessBytes(2, 3, 7) - thresholdWitnessBytes(2, 3, 6)).toBe(32);
     expect(thresholdWitnessBytes(2, 3, 9) - thresholdWitnessBytes(2, 3, 8)).toBe(32);
+    // Omitting depth is the cheap direction, which is the dangerous one: a
+    // multi-leaf coin quoted at depth 0 under-pays by 2 vB per input and the
+    // transaction may not relay. The default is documented, not silent.
+    expect(
+      virtualSizeCeil(estimateMultisigTxWeight([{ m: 2, n: 3 }], 2)),
+    ).toBeLessThan(virtualSizeCeil(estimateMultisigTxWeight([{ m: 2, n: 3, depth: 1 }], 2)));
     // btq-core caps a control block at 128 merkle nodes
     // (P2MR_CONTROL_MAX_NODE_COUNT, src/script/interpreter.h:254). Past that
     // the spend is invalid, not merely expensive, so quoting a fee for it
