@@ -216,6 +216,14 @@ interface PendingPlan {
    */
   account: number;
   createdAt: number;
+  /**
+   * True from the moment a `confirmSend` claims this plan until it either signs
+   * it or is refused the password. It is the single-flight lock on one consent:
+   * the slot below is only cleared once the plan is past every check, which is
+   * an `await` too late to stop a second confirmation that read the slot before
+   * the first one cleared it.
+   */
+  signing: boolean;
 }
 
 /**
@@ -1135,6 +1143,7 @@ export class Keyring {
       plan,
       account: plan.account,
       createdAt: this.now(),
+      signing: false,
     };
     return {
       planId: id,
@@ -1235,22 +1244,49 @@ export class Keyring {
     // under a confirmation that had already been consented to.
     const account = this.activeIndex;
     const held = this.pendingPlan;
-    await this.reauth(opts.password);
+    /** The plan this call is confirming, if the slot is still holding it. */
+    const mine = held && held.id === opts.planId ? held : null;
+    // Claimed in the same synchronous breath as the read, and for the same
+    // reason. Two confirmations of one handle both got past the read — nothing
+    // between here and the KDF is atomic across an await — and both then went
+    // on to sign. Signing is deterministic here, so that was a duplicate
+    // broadcast and a duplicate activity row rather than a double spend; but it
+    // was one consent spent twice, and a wallet that will sign a plan twice
+    // because it was asked twice is not one whose "one shot" below means
+    // anything. The loser is refused, not queued: the winner is already signing
+    // that exact plan.
+    if (mine) {
+      if (mine.signing) throw new WalletError('PLAN_STALE', PLAN_STALE_MESSAGE);
+      mine.signing = true;
+    }
+    try {
+      await this.reauth(opts.password);
+    } catch (e) {
+      // A typo must not cost the user the card they are reading, so a refused
+      // password gives the claim back — on the object this call is holding,
+      // never on the slot. If a lock or a newer preview has moved the slot on,
+      // `mine` is already unreachable and this clears a flag nobody can read.
+      // Every *other* refusal below has already dropped the plan out of the
+      // slot (a switch, a lock and the TTL each call `forgetPlan`), so there is
+      // nothing there to hand back.
+      if (mine) mine.signing = false;
+      throw e;
+    }
     const seed = this.requireUnlocked();
-    if (!held || held.id !== opts.planId) throw new WalletError('PLAN_STALE', PLAN_STALE_MESSAGE);
+    if (!mine) throw new WalletError('PLAN_STALE', PLAN_STALE_MESSAGE);
     // Belt and braces on top of expiring the plan on every switch: the pinned
     // account and the account the plan was *built* for must be the same one.
-    if (held.account !== account) throw new WalletError('PLAN_STALE', PLAN_STALE_MESSAGE);
+    if (mine.account !== account) throw new WalletError('PLAN_STALE', PLAN_STALE_MESSAGE);
     // The card quoted a fee rate as well as a fee; both go stale.
-    if (this.now() - held.createdAt > SEND_PLAN_TTL_MS) {
+    if (this.now() - mine.createdAt > SEND_PLAN_TTL_MS) {
       this.forgetPlan();
       throw new WalletError('PLAN_STALE', PLAN_STALE_MESSAGE);
     }
     // One shot. Taken before signing, so a refusal below cannot leave a handle
     // behind that would sign the same coins twice.
-    if (this.pendingPlan?.id === held.id) this.forgetPlan();
-    await this.revalidatePlan(held, opts.fetchUtxos);
-    const plan = held.plan;
+    if (this.pendingPlan?.id === mine.id) this.forgetPlan();
+    await this.revalidatePlan(mine, opts.fetchUtxos);
+    const plan = mine.plan;
     // Sign before any network call: a broadcast failure must never cost us the
     // bytes. previewFromSigned re-decodes them and refuses on any disagreement.
     const signed = signPlan(plan, (u) => deriveKeySeed(masterFromSeed(seed), u.chain, u.index, plan.account));

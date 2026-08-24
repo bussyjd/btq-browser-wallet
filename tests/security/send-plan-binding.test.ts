@@ -32,7 +32,7 @@ vi.mock('../../src/core/crypto/mldsa.js', async (importOriginal) => {
   };
 });
 
-import { Keyring, SEND_PLAN_TTL_MS } from '../../src/core/wallet/keyring.js';
+import { Keyring, SEND_PLAN_TTL_MS, type ConfirmSendResult } from '../../src/core/wallet/keyring.js';
 import { dispatch } from '../../src/core/rpc/dispatch.js';
 import { scriptForAddress } from '../../src/core/script/address.js';
 import { parseTx } from '../../src/core/tx/parse.js';
@@ -334,6 +334,71 @@ describe('confirmSend signs the plan the user reviewed, or nothing at all', () =
     ).rejects.toMatchObject({ code: 'PLAN_STALE' });
     expect(signer.calls).toBe(before);
     expect(await k.listActivity()).toHaveLength(1);
+  });
+
+  it('two confirmations racing on one handle sign once between them', async () => {
+    // "One shot" used to be true only of *sequential* calls. Both of these read
+    // the plan slot before either awaited the KDF, so both came away holding the
+    // same plan and both signed it: the same deterministic bytes, so a duplicate
+    // broadcast and a duplicate activity row rather than a double spend — but
+    // one approval spent twice, and a second push of a transaction the user
+    // approved once. The shipped popup drops the second click in `useAction`;
+    // that is a UI courtesy, not the guarantee, and the worker takes messages
+    // from every extension page at once.
+    const k = ring();
+    await k.importMnemonic(MNEMONIC, PASSWORD);
+    const a0 = (await k.receiveAddress()).address;
+    const { fetchUtxos } = ledger([{ address: a0, vout: 0, value: 90_000_000n }]);
+    const plan = await k.prepareSend({ destination: DEST, amountSats: 10_000_000n, fetchUtxos });
+    const before = signer.calls;
+    const pushes: string[] = [];
+    // The winner is held inside `broadcast` until the loser has had every
+    // chance to sign. This is not a contrivance to make the test fail — it is
+    // the only version of this test that can pass for the right reason. A
+    // broadcast that resolves immediately lets the winner reserve its outpoints
+    // before the loser revalidates, so the loser is turned away by the
+    // reservation and the suite reports one signature whether the single-flight
+    // claim exists or not. Push a real transaction at a real node and that
+    // window is a network round-trip wide. Verified both ways: with the claim
+    // removed this reaches `signer.calls - before === 2`; with an instant
+    // broadcast it reaches 1 either way and proves nothing.
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((r) => { release = r; });
+    let firstPush = true;
+    const broadcast = async (hex: string) => {
+      pushes.push(hex);
+      if (firstPush) {
+        firstPush = false;
+        await held;
+      }
+      return pushed(hex);
+    };
+    // Started in the same tick, which is exactly what two messages arriving
+    // together produce — no fake timers, no injected seam.
+    const settled = Promise.allSettled([
+      k.confirmSend({ planId: plan.planId, password: PASSWORD, fetchUtxos, broadcast }),
+      k.confirmSend({ planId: plan.planId, password: PASSWORD, fetchUtxos, broadcast }),
+    ]);
+    await new Promise((r) => setTimeout(r, 1200));
+    release();
+    const outcome = await settled;
+    const won = outcome.filter((r): r is PromiseFulfilledResult<ConfirmSendResult> => r.status === 'fulfilled');
+    const lost = outcome.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
+    expect(won).toHaveLength(1);
+    expect(lost).toHaveLength(1);
+    expect(lost[0]!.reason).toMatchObject({ code: 'PLAN_STALE' });
+    // The claim is the point: one signature, one broadcast, one row.
+    expect(signer.calls - before).toBe(1);
+    expect(pushes).toHaveLength(1);
+    expect(won[0]!.value.broadcastStatus).toBe('pending');
+    const activity = await k.listActivity();
+    expect(activity).toHaveLength(1);
+    expect(activity[0]!.txid).toBe(won[0]!.value.txid);
+    // …and the loser did not wedge the wallet either: the plan is spent, so a
+    // third attempt is refused for the same reason a sequential replay is.
+    await expect(
+      k.confirmSend({ planId: plan.planId, password: PASSWORD, fetchUtxos, broadcast: noRoute }),
+    ).rejects.toMatchObject({ code: 'PLAN_STALE' });
   });
 
   it('locking the wallet drops the plan on the review card', async () => {
