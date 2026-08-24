@@ -26,7 +26,7 @@ import { bytesEqual } from '../util/bytes.js';
 import { bytesToHex } from '../util/hex.js';
 import { compareControlBlocks, compareDilithiumSigs, compareLeaves, hash160 } from './order.js';
 import { psbtError } from './parse.js';
-import type { DilithiumPartialSignature, P2MRLeafScript, Psbt, PsbtInput, PsbtKeyValue, PsbtOutput } from './types.js';
+import { MAX_DILITHIUM_PARTIAL_SIGS_PER_INPUT, type DilithiumPartialSignature, type P2MRLeafScript, type Psbt, type PsbtInput, type PsbtKeyValue, type PsbtOutput } from './types.js';
 
 /** The identity a Dilithium signature is keyed by on the wire and in the map. */
 function sigId(sig: DilithiumPartialSignature): string {
@@ -70,6 +70,15 @@ function mergeInput(a: PsbtInput, b: PsbtInput): PsbtInput {
   const sigs = new Map<string, DilithiumPartialSignature>();
   for (const sig of a.dilithiumSigs) sigs.set(sigId(sig), sig);
   for (const sig of b.dilithiumSigs) if (!sigs.has(sigId(sig))) sigs.set(sigId(sig), sig);
+  // btq-core enforces the cap only while parsing, so its own `combinepsbt` can
+  // hand back a PSBT its own `decodepsbt` refuses. Two copies of a single-leaf
+  // spend cannot reach 21 — a leaf names at most 20 keys and a signature has to
+  // come from one of them — so this only fires on a multi-leaf tree, where the
+  // honest answer is to refuse rather than emit bytes nobody can decode.
+  if (sigs.size > MAX_DILITHIUM_PARTIAL_SIGS_PER_INPUT) {
+    throw psbtError(`combining would leave more than ${MAX_DILITHIUM_PARTIAL_SIGS_PER_INPUT} ` +
+      'partial signatures on one input, which no decoder will accept');
+  }
 
   return {
     witnessUtxo: a.witnessUtxo ?? b.witnessUtxo,
