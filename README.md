@@ -449,8 +449,12 @@ a known vector and checking byte equality — an assurance a secp256k1 signer ca
 sets `DEFAULT_SEQUENCE = 0xfffffffd // opt in to RBF`, so **every transaction this wallet
 has ever sent is replaceable and there is no way to replace one.** At the 1000 sat/kvB
 incremental relay floor (`policy.h:38`) a bump on a 372 vB spend costs on the order of 372
-extra sats. It is not hypothetical on a chain whose blocks arrive hours apart — a stuck
-transaction is the normal case, and CPFP covers the inbound direction. Where it gets
+extra sats. The case does not rest on block times: any wallet that lets the user choose a
+fee rate needs a way to correct that choice, and one that marks every transaction
+replaceable and then offers no way to replace one has the gap whatever the chain is doing.
+On BTQ testnet today it is more than theoretical — blocks can be hours apart, so a
+transaction that has to wait waits visibly. CPFP covers the inbound direction, where the
+user never picked the fee at all. Where it gets
 interesting is multisig: a replacement is a **new transaction needing m fresh signatures**,
 so the fee is trivial and the coordination is not.
 
