@@ -207,7 +207,7 @@ the hex yourself with `btq-cli sendrawtransaction <hex>` whenever you have a nod
 ## Run the tests
 
 ```sh
-npm test            # 412 tests: unit, security, golden vectors — no node, no network
+npm test            # 572 tests: unit, security, golden vectors — no node, no network
                     # (6 of them skip unless a regtest node is running — see below)
 npm run typecheck   # src (browser-only types) and tests/tooling (node types) separately
 npm run lint
@@ -218,7 +218,7 @@ End to end, in a real browser:
 
 ```sh
 npm run playwright:install   # once: fetches the Chromium build Playwright drives
-npm run test:e2e             # builds dist/, loads it in Chromium: 26 tests, plus the
+npm run test:e2e             # builds dist/, loads it in Chromium: 35 tests, plus the
                              # regtest tier and the live-recording tier, which skip
                              # unless a node — or an operator — turns them on
 npm run test:all             # the above, after npm test
@@ -312,6 +312,16 @@ the payee restoring his own wallet and finding the money, the phrase read back b
 password, and a site connected and revoked. Every number it dwells on is asserted first
 against a value read independently in Node, and a run that cannot prove what it is showing
 throws instead of recording it anyway.
+
+> **This take predates the last UI pass, and one screen in it is now wrong.** It was
+> recorded on 22 Aug. Since then the create screen stopped saying "nothing is saved until
+> you confirm" — the vault is now sealed *before* the phrase is shown, because the MV3
+> service worker is torn down while you are writing twelve words on paper and the old flow
+> failed for anyone who took their time. The receive tab also leads with the address rather
+> than the QR, and the balance line reads "Checked just now · block N". The screenshots
+> above are current; this video is not. A fresh take is pending only on BTQ testnet
+> resuming block production — it stopped mid-recording during the re-run, which is why
+> `npm run demo:preflight` now refuses a take when the tip has gone stale.
 
 ```sh
 npm run demo:preflight   # will a take work? node, explorer, chain tip, Alice's coins — ~3 s, no browser
