@@ -1,0 +1,274 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>BTQ 2-of-3 multisig ceremony</title>
+<style>
+  :root{
+    --ink:#0d1117; --ink-2:#161b22; --line:#26303c;
+    --fg:#e8eef6; --fg-dim:#8b9bb0; --fg-mute:#5d6b7e;
+    --ok:#39d98a; --wait:#c9a227; --live:#4aa3ff; --bad:#ff5c5c;
+    --mono:"SFMono-Regular",Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0;background:var(--ink);color:var(--fg);
+    font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;
+    padding:18px 20px;
+  }
+  header{display:flex;align-items:baseline;gap:12px;margin-bottom:4px}
+  h1{font-size:17px;margin:0;letter-spacing:-.01em}
+  .sub{color:var(--fg-dim);font-size:12px}
+  .rule{height:1px;background:var(--line);margin:12px 0 14px}
+
+  .addr{
+    background:var(--ink-2);border:1px solid var(--line);border-radius:8px;
+    padding:9px 12px;margin-bottom:14px;
+  }
+  .addr .lbl{color:var(--fg-mute);font-size:10px;text-transform:uppercase;letter-spacing:.09em}
+  .addr .val{font-family:var(--mono);font-size:12px;word-break:break-all;color:var(--fg)}
+
+  .signers{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:14px}
+  .card{
+    background:var(--ink-2);border:1px solid var(--line);border-radius:8px;padding:10px 12px;
+    transition:border-color .25s,box-shadow .25s;
+  }
+  .card.active{border-color:var(--live);box-shadow:0 0 0 1px rgba(74,163,255,.35)}
+  .card.signed{border-color:var(--ok)}
+  .card .who{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px}
+  .card .name{font-weight:600;font-size:13px}
+  .pill{
+    font-size:10px;padding:2px 7px;border-radius:99px;border:1px solid var(--line);
+    color:var(--fg-mute);white-space:nowrap;
+  }
+  .pill.signed{color:var(--ok);border-color:rgba(57,217,138,.4);background:rgba(57,217,138,.08)}
+  .pill.busy{color:var(--live);border-color:rgba(74,163,255,.4);background:rgba(74,163,255,.08)}
+  .kv{font-family:var(--mono);font-size:10.5px;color:var(--fg-dim);word-break:break-all}
+  .kv b{color:var(--fg);font-weight:500}
+
+  .psbt{
+    background:var(--ink-2);border:1px solid var(--line);border-radius:8px;
+    padding:10px 12px;margin-bottom:14px;
+  }
+  .psbt .top{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px}
+  .psbt .lbl{color:var(--fg-mute);font-size:10px;text-transform:uppercase;letter-spacing:.09em}
+  .psbt .count{font-size:12px;color:var(--fg-dim)}
+  .psbt .count b{color:var(--fg)}
+  .b64{
+    font-family:var(--mono);font-size:10.5px;color:var(--fg-dim);
+    word-break:break-all;max-height:34px;overflow:hidden;
+  }
+
+  .log{
+    background:var(--ink-2);border:1px solid var(--line);border-radius:8px;
+    padding:8px 12px;font-family:var(--mono);font-size:11px;min-height:96px;
+  }
+  .log div{padding:1.5px 0;color:var(--fg-dim)}
+  .log div .t{color:var(--fg-mute);margin-right:8px}
+  .log div.ok .m{color:var(--ok)}
+  .log div.bad .m{color:var(--bad)}
+
+  .verdict{
+    margin-top:14px;border-radius:8px;padding:11px 13px;
+    border:1px solid var(--line);background:var(--ink-2);
+  }
+  .verdict.pass{border-color:rgba(57,217,138,.45);background:rgba(57,217,138,.07)}
+  .verdict.fail{border-color:rgba(255,92,92,.45);background:rgba(255,92,92,.07)}
+  .verdict .head{font-weight:600;font-size:13px;margin-bottom:5px}
+  .verdict.pass .head{color:var(--ok)}
+  .verdict.fail .head{color:var(--bad)}
+  .verdict .detail{font-family:var(--mono);font-size:10.5px;color:var(--fg-dim);word-break:break-all}
+  .hidden{display:none}
+</style>
+</head>
+<body>
+  <header>
+    <h1>2-of-3 Dilithium multisig</h1>
+    <span class="sub">ML-DSA-44 · P2MR witness v2 · in the browser, no node</span>
+  </header>
+  <div class="rule"></div>
+
+  <div class="addr">
+    <div class="lbl">Shared address — derived independently by each cosigner</div>
+    <div class="val" data-testid="ceremony-address">—</div>
+  </div>
+
+  <div class="signers" data-testid="ceremony-signers"></div>
+
+  <div class="psbt">
+    <div class="top">
+      <span class="lbl">Partially signed transaction</span>
+      <span class="count" data-testid="ceremony-sigcount">signatures <b>0</b> of 2 required</span>
+    </div>
+    <div class="b64" data-testid="ceremony-psbt">—</div>
+  </div>
+
+  <div class="log" data-testid="ceremony-log"></div>
+
+  <div class="verdict hidden" data-testid="ceremony-verdict">
+    <div class="head" data-testid="ceremony-verdict-head"></div>
+    <div class="detail" data-testid="ceremony-verdict-detail"></div>
+  </div>
+
+<script src="/core.js"></script>
+<script>
+(function () {
+  var NAMES = ['Alice', 'Bob', 'Carol'];
+  var signersEl = document.querySelector('[data-testid="ceremony-signers"]');
+  var logEl = document.querySelector('[data-testid="ceremony-log"]');
+  var step = 0;
+
+  function log(message, kind) {
+    step += 1;
+    var row = document.createElement('div');
+    if (kind) row.className = kind;
+    row.innerHTML =
+      '<span class="t">' + String(step).padStart(2, '0') + '</span><span class="m"></span>';
+    row.querySelector('.m').textContent = message;
+    logEl.appendChild(row);
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  /** The page holds no logic of its own — every value below comes from src/core. */
+  var state = { psbt: null, pubkeys: [], cards: [] };
+
+  window.__ceremony = {
+    /** Derive the shared address from three public keys, the way each wallet would. */
+    setup: function (seedsHex, m) {
+      var seeds = seedsHex.map(BTQ.hexToBytes);
+      state.pubkeys = seeds.map(BTQ.publicKeyFromSeed);
+      state.seeds = seeds;
+      state.m = m;
+
+      signersEl.innerHTML = '';
+      state.cards = state.pubkeys.map(function (pk, i) {
+        var card = document.createElement('div');
+        card.className = 'card';
+        card.setAttribute('data-testid', 'ceremony-signer-' + i);
+        var fp = BTQ.bytesToHex(pk).slice(0, 16);
+        card.innerHTML =
+          '<div class="who"><span class="name"></span>' +
+          '<span class="pill" data-role="pill">holds 1 key</span></div>' +
+          '<div class="kv">pubkey <b></b>… <span style="color:var(--fg-mute)">1312 B</span></div>';
+        card.querySelector('.name').textContent = NAMES[i] || 'Signer ' + i;
+        card.querySelector('.kv b').textContent = fp;
+        signersEl.appendChild(card);
+        return card;
+      });
+
+      // btq-core takes the key list exactly as handed to createdilithiummultisig,
+      // so the ceremony derives the address in that same caller order. The
+      // canonical (sorted) address is computed too, because for these keys the
+      // two differ — which is the whole point of canonicalising in a wallet.
+      var callerLeaf = BTQ.thresholdLeafScript(m, state.pubkeys);
+      var address = BTQ.encodeAddress(BTQ.tapLeafHash(callerLeaf), 'regtest');
+      var canonical = BTQ.multisigAddress(m, state.pubkeys, 'regtest');
+      state.canonical = canonical;
+      document.querySelector('[data-testid="ceremony-address"]').textContent = address;
+      log('three cosigners, one key each — no shared secret');
+      log('leaf script ' + callerLeaf.length + ' B; the merkle root IS the witness program');
+      if (canonical !== address) {
+        log('same keys sorted give ' + canonical.slice(0, 22) + '… — a different address');
+      }
+      return { address: address, canonical: canonical, leafBytes: callerLeaf.length };
+    },
+
+    /** Load btq-core's unsigned PSBT. Nothing here computed it — the node did. */
+    load: function (base64, message) {
+      state.psbt = BTQ.parsePsbt(base64);
+      showPsbt(base64, 0);
+      log(message || 'unsigned PSBT loaded — built by btq-core, parsed here');
+      return { inputs: state.psbt.inputs.length };
+    },
+
+    /** One cosigner signs, in this browser, with their own seed only. */
+    sign: function (index) {
+      var card = state.cards[index];
+      card.classList.add('active');
+      card.querySelector('[data-role="pill"]').className = 'pill busy';
+      card.querySelector('[data-role="pill"]').textContent = 'signing…';
+
+      var t0 = performance.now();
+      var result = BTQ.signPsbt(state.psbt, [state.seeds[index]]);
+      var ms = Math.round(performance.now() - t0);
+      state.psbt = result.psbt;
+
+      card.classList.remove('active');
+      card.classList.add('signed');
+      card.querySelector('[data-role="pill"]').className = 'pill signed';
+      card.querySelector('[data-role="pill"]').textContent = 'signed';
+
+      var b64 = BTQ.serializePsbtBase64(state.psbt);
+      var n = countSigs(state.psbt);
+      showPsbt(b64, n);
+      log(NAMES[index] + ' signed in ' + ms + ' ms — 2421-byte ML-DSA signature', 'ok');
+      return { base64: b64, signatures: n, ms: ms };
+    },
+
+    /** Merge two independently signed copies of the same PSBT. */
+    combine: function (aB64, bB64) {
+      var merged = BTQ.combinePsbts([BTQ.parsePsbt(aB64), BTQ.parsePsbt(bB64)]);
+      state.psbt = merged;
+      var b64 = BTQ.serializePsbtBase64(merged);
+      var n = countSigs(merged);
+      showPsbt(b64, n);
+      log('combined two independent signatures — neither signer saw the other', 'ok');
+      return { base64: b64, signatures: n };
+    },
+
+    /** Assemble the witness and extract the raw transaction. */
+    finalize: function () {
+      var out = BTQ.finalizePsbt(state.psbt);
+      log('finalized — witness assembled, transaction extracted', 'ok');
+      return { hex: out.hex || '', complete: out.complete };
+    },
+
+    /** The only claim that matters: identical to what btq-core produced. */
+    verdict: function (ours, theirs) {
+      var same = ours === theirs;
+      var el = document.querySelector('[data-testid="ceremony-verdict"]');
+      el.classList.remove('hidden');
+      el.classList.add(same ? 'pass' : 'fail');
+      document.querySelector('[data-testid="ceremony-verdict-head"]').textContent = same
+        ? 'Byte-for-byte identical to btq-core'
+        : 'MISMATCH against btq-core';
+      document.querySelector('[data-testid="ceremony-verdict-detail"]').textContent = same
+        ? ours.length / 2 + ' bytes · txid and witness produced entirely in the browser'
+        : 'ours ' + ours.slice(0, 40) + '… theirs ' + theirs.slice(0, 40) + '…';
+      log(
+        same ? 'verified against btq-core: identical' : 'verified against btq-core: MISMATCH',
+        same ? 'ok' : 'bad',
+      );
+      return same;
+    },
+
+    /** A tampered PSBT must be refused when it is parsed, not at finalize. */
+    reject: function (base64) {
+      try {
+        BTQ.parsePsbt(base64);
+        log('a forged signature was ACCEPTED — this is a bug', 'bad');
+        return false;
+      } catch (err) {
+        log('forged signature refused at parse: ' + String(err.message).slice(0, 52), 'ok');
+        return true;
+      }
+    },
+  };
+
+  function countSigs(psbt) {
+    var input = psbt.inputs[0];
+    var sigs = input && input.dilithiumSigs;
+    return sigs ? sigs.length : 0;
+  }
+
+  function showPsbt(b64, n) {
+    document.querySelector('[data-testid="ceremony-psbt"]').textContent =
+      b64.slice(0, 190) + '…';
+    var el = document.querySelector('[data-testid="ceremony-sigcount"]');
+    el.innerHTML = 'signatures <b></b> of ' + (state.m || 2) + ' required';
+    el.querySelector('b').textContent = String(n);
+  }
+})();
+</script>
+</body>
+</html>

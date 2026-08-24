@@ -130,9 +130,24 @@ describe('the live demo cannot leak, and cannot change the mocked suite', () => 
     expect(captioned).toEqual(['tests/e2e/live.spec.ts']);
   });
 
-  it('the pacing helpers are imported by the live spec and nothing else', () => {
+  it('the pacing helpers reach only the recordings, never a mocked journey', () => {
+    // Two specs are recordings and may pace themselves: the live demo, and the
+    // multisig ceremony. Every other spec is a journey the suite runs on every
+    // `npm run test:e2e`, and a dwell in one of those is a wall-clock sleep in
+    // ordinary CI — which is the thing this file exists to prevent.
+    //
+    // The allowlist grew from one entry to two when the ceremony recording was
+    // added. That is a restatement, not a relaxation: the check below names
+    // every journey spec and asserts *none* of them imports the helpers, which
+    // is the property the single-entry version was standing in for.
+    const RECORDINGS = ['tests/e2e/live.spec.ts', 'tests/e2e/multisig.spec.ts'];
     const importers = specFiles().filter((f) => read(f).includes("from './fixtures/scene.js'"));
-    expect(importers).toEqual(['tests/e2e/live.spec.ts']);
+    expect(importers).toEqual(RECORDINGS);
+
+    const journeys = specFiles().filter((f) => !RECORDINGS.includes(f));
+    expect(journeys.length).toBeGreaterThan(5);
+    expect(journeys.filter((f) => read(f).includes('./fixtures/scene.js'))).toEqual([]);
+    expect(journeys.filter((f) => /\b(dwell|scene|installCaptions)\s*\(/.test(read(f)))).toEqual([]);
     // …and the same for the fixtures, so a mocked journey cannot pick up a
     // dwell through a helper file either.
     const fixtures = readdirSync(join(E2E, 'fixtures'))
