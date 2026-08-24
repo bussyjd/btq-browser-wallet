@@ -6,6 +6,15 @@ export type WalletErrorCode =
   | 'BAD_SEED_HEX'
   /** A required RPC parameter is missing or the wrong shape. Never a password problem. */
   | 'BAD_PARAMS'
+  /**
+   * A PSBT is malformed, exceeds one of btq-core's parser bounds, or carries a
+   * Dilithium partial signature that does not verify. One code for all three
+   * because they land the user in the same place: this PSBT cannot be used, and
+   * no amount of retrying or re-typing a password changes that. btq-core zeroes
+   * the whole PSBT on the same failures (src/psbt_dilithium.h:64-68) rather than
+   * hand back something partly trusted, and neither do we.
+   */
+  | 'BAD_PSBT'
   | 'WRONG_PASSWORD'
   | 'TOO_MANY_ATTEMPTS'
   | 'LOCKED'
