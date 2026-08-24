@@ -581,11 +581,29 @@ Two limits that sound binding and are not:
   500 — a 4.8× margin that grows with every signature — and empty slots add a byte and cost
   nothing (`src/script/interpreter.cpp:126`).
 
-**Inputs per transaction.** Marginal weight per 2-of-3 input is `41 × 16 + 8815 = 9471` WU
-against `MAX_STANDARD_TX_WEIGHT = 400000` (`src/policy/policy.h:30`), so `1538 + 9471n ≤
-400000` gives **42 inputs**. The same formula with the single-key witness gives
-`1538 + 4402n ≤ 400000` → 90, which is exactly `MAX_P2MR_INPUTS`
-(`src/core/tx/fee.ts:24`) — the check that the formula is the right one.
+**Inputs per transaction.** The fixed overhead is charged once per transaction, not once
+per input, which is the easy mistake here. For n inputs and 2 outputs,
+`stripped = 95 + varint(n) + 41n`, so
+
+```
+weight = 16 × (95 + varint(n)) + 2 + n × (41 × 16 + witness)
+       = 1538 + n × (656 + witness)        for n ≤ 252
+```
+
+against `MAX_STANDARD_TX_WEIGHT = 400000` (`src/policy/policy.h:30`):
+
+| input type | marginal WU | max inputs |
+|---|---|---|
+| single-key | 4402 | **90** |
+| 2-of-3 | 9471 | **42** |
+| 3-of-5 | 14534 | **27** |
+
+**The single-key row is the reason to believe the other two.** 4402 is
+`P2MR_INPUT_WEIGHT` (`src/core/tx/fee.ts:20`) and 90 is `MAX_P2MR_INPUTS`
+(`src/core/tx/fee.ts:24`) — both shipping constants, checked against consensus long before
+this document existed. A formula that reproduces them exactly is a formula that can be
+trusted on rows nothing has verified yet. Prefer that check to asserting 42 as a magic
+number.
 
 A sibling spike implements `thresholdWitnessBytes(m, n)` in `src/core/tx/fee.ts` and
 asserts this table, including that the degenerate 1-of-1 case reproduces 3746. That is
