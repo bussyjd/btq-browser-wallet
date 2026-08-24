@@ -321,8 +321,9 @@ describe('k-of-n threshold sizing', () => {
       const label = `${m}-of-${n}`;
       expect(thresholdLeafScriptBytes(m, n), label).toBe(leaf);
       expect(thresholdWitnessBytes(m, n), label).toBe(witness);
-      expect(estimateMultisigTxWeight([{ m, n }], 2), label).toBe(weight);
-      expect(virtualSizeCeil(weight), label).toBe(vsize);
+      const actual = estimateMultisigTxWeight([{ m, n }], 2);
+      expect(actual, label).toBe(weight);
+      expect(virtualSizeCeil(actual), label).toBe(vsize);
     }
   });
 
