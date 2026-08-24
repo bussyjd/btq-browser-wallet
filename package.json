@@ -2,6 +2,7 @@
   "name": "btq-browser-wallet",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "description": "Bitcoin Quantum (BTQ) browser wallet \u2014 post-quantum ML-DSA-44 / P2MR, testnet",
   "scripts": {

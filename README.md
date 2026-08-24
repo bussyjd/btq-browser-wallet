@@ -409,3 +409,9 @@ demo/              btq-wallet-suite.mp4, recorded by npm run demo:video; the liv
                    npm run demo:live writes lands beside it as btq-wallet-demo.mp4
 .claude/           agent instructions: the wallet skill and a security-review reviewer
 ```
+
+## License
+
+[MIT](LICENSE). It is a take-home exercise against a testnet, so clone it, build
+it, and take whatever is useful — but it has never held real money and nothing
+here has been audited.
