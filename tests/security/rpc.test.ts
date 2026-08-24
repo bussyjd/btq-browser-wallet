@@ -33,6 +33,21 @@ function stringValues(value: unknown, into: string[] = []): string[] {
   return into;
 }
 
+/**
+ * The phrase the exhaustive scan runs against, fixed rather than freshly drawn.
+ *
+ * Deterministic on purpose: a test whose wallet is random can pass and fail on
+ * the same code depending on which words it drew, which is how a suite becomes
+ * "flaky" when nothing about it is. And structurally free of false positives —
+ * 'abandon' and 'about' both contain a 'b', which is neither a hex digit nor in
+ * the bech32 charset, so no address, txid, script or seed hex can manufacture
+ * either word. Eleven of the twelve are the same word, so any response leaking
+ * any part of this phrase leaks a word the scan is looking for.
+ */
+const SCAN_MNEMONIC =
+  'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about';
+const SCAN_PASSWORD = 'testnet-ok';
+
 describe('RPC surface — what a page could try', () => {
   it('a tab cannot call any wallet method', async () => {
     // Attacker gain: a webpage talking to the extension would unlock, wipe, or
@@ -174,6 +189,91 @@ describe('RPC surface — what a page could try', () => {
       }
     }
     expect(collectKeys(others.status).includes('words')).toBe(false);
+  });
+
+  it('no method on the whole surface carries the phrase or the seed — all of WALLET_METHODS, not a chosen five', async () => {
+    // The version of this test that shipped scanned five methods named in a
+    // literal: status, receive, activity, history, connectedSites. A new method
+    // returning the seed was caught only if whoever added it remembered to
+    // extend that list — and an allowlist you must maintain for the check to
+    // keep working is not an invariant, it is a habit. This one enumerates
+    // WALLET_METHODS itself, so adding a method to the protocol without
+    // thinking about secrecy fails the build.
+    //
+    // Errors count as output. A refusal that quotes the seed back leaks it just
+    // as well as a result would, so a method that throws is scanned too and no
+    // method is allowed to simply not be called.
+    const CARRIERS = new Set(['wallet.create', 'wallet.revealPhrase', 'wallet.revealSeedHex']);
+
+    const k = keyring();
+    await k.importMnemonic(SCAN_MNEMONIC, SCAN_PASSWORD);
+    const seedHex = bytesToHex(mnemonicToHdSeed(SCAN_MNEMONIC)).toLowerCase();
+    const words = SCAN_MNEMONIC.split(' ');
+    const a0 = (await k.receiveAddress()).address;
+
+    const ctx = {
+      fromTab: false,
+      lookup: async () => ({ used: false as const }),
+      fetchUtxos: async () => [] as never[],
+      fetchHistory: async () => [] as never[],
+      fetchTip: async () => ({ height: 1, hash: 'aa' }),
+      broadcast: async () => ({ txid: 'ff', via: null }),
+      getBackend: async () => ({ explorerBase: 'https://e.example', node: null }),
+      setBackend: async () => ({ explorerBase: 'https://e.example', node: null }),
+      testBackend: async () => ({ ok: true as const, chain: 'test', height: 1 }),
+    } as unknown as Parameters<typeof dispatch>[2];
+
+    // One permissive bag. A method that rejects it produces an error, which is
+    // scanned like any other output — the point here is coverage of the whole
+    // surface, not that every call succeeds.
+    const params: Record<string, unknown> = {
+      password: SCAN_PASSWORD,
+      confirmation: 'DELETE',
+      mnemonic: SCAN_MNEMONIC,
+      seedHex,
+      destination: a0,
+      amountSats: '1000',
+      feeRateSatPerKvB: 1000,
+      origin: 'https://probe.example',
+      name: 'Probe',
+      index: 0,
+      answers: [],
+      planId: 'nope',
+      blob: 'not-a-backup',
+      explorerBase: 'https://e.example',
+    };
+
+    const scanned: string[] = [];
+    for (const method of WALLET_METHODS) {
+      if (CARRIERS.has(method)) continue;
+      let output: unknown;
+      try {
+        output = await dispatch(k, { method, params }, ctx);
+      } catch (e) {
+        // The message and the code, as a page or a log would see them.
+        output = { message: e instanceof Error ? e.message : String(e), code: (e as { code?: string }).code };
+      }
+      scanned.push(method);
+      const tokens = new Set(stringValues(output).join(' ').toLowerCase().split(/[^a-z]+/));
+      for (const word of new Set(words)) {
+        expect(tokens.has(word), `${method} leaked the phrase word "${word}"`).toBe(false);
+      }
+      const blob = JSON.stringify(output).toLowerCase();
+      expect(blob, `${method} leaked the phrase`).not.toContain(SCAN_MNEMONIC);
+      expect(blob, `${method} leaked the HD seed`).not.toContain(seedHex);
+      for (const key of SECRET_RESULT_KEYS) {
+        expect(collectKeys(output).includes(key), `${method} returned a ${key} key`).toBe(false);
+      }
+      // `wallet.lock` and `wallet.wipe` are in the list and really do run, so
+      // put the wallet back before the next method needs it.
+      if (!(await k.status()).hasVault) await k.importMnemonic(SCAN_MNEMONIC, SCAN_PASSWORD);
+      else if ((await k.status()).unlocked === false) await k.unlock(SCAN_PASSWORD);
+    }
+
+    // Nothing was quietly skipped: every method is either a declared carrier or
+    // was called and scanned, and the two sets together are the whole protocol.
+    expect(new Set([...scanned, ...CARRIERS])).toEqual(new Set(WALLET_METHODS));
+    expect(scanned.length + CARRIERS.size).toBe(WALLET_METHODS.length);
   });
 
   it('wallet.exportBackup hands over the whole wallet — sealed, and with none of it readable', async () => {
