@@ -101,6 +101,39 @@ itself, in `src/core`. btq-core's RPCs are how the implementation is *verified*,
 something called at runtime.** A node, where the user has one, is a broadcast endpoint and
 a dry-run oracle (`testmempoolaccept`) and nothing else.
 
+### There is no fallback: a node cannot sign a PSBT it was not enrolled in
+
+The argument above would be weaker if a node could still sign on request — an extension
+could then build the PSBT and hand it to btq-core for signature. It cannot, and this was
+worth testing rather than assuming, because the *signing* layer looks like it should work:
+`SignP2MR` merges PSBT-supplied spend data into the signer's own and explicitly handles a
+leaf that arrived via the PSBT (`src/script/sign.cpp:518-533`).
+
+The wallet layer above it never gets that far. A regtest case run for this design put an
+unregistered wallet and a registered one against the same PSBT: **the unregistered wallet
+produced 0 signatures, the registered one produced 1.**
+
+The mechanism is structural, not a missing feature.
+`DescriptorScriptPubKeyMan::FillPSBT` picks a signing provider from the input's
+scriptPubKey (`src/wallet/scriptpubkeyman.cpp:3339`). With no provider — which is what an
+unregistered address means — it falls back to "maybe there are pubkeys listed that we can
+sign for" (`:3343-3378`). That fallback collects candidates into a `std::vector<CPubKey>`
+from exactly three sources: ECDSA keys in `hd_keypaths`, the Taproot output key, and x-only
+Taproot keys widened to 33 bytes. There is no Dilithium branch and there cannot be one:
+`CPubKey` is the secp256k1 type, capped at `SIZE = 65` bytes (`src/pubkey.h:39`), and a
+1312-byte ML-DSA key does not fit in it. No key reaches `SignP2MR`, so nothing is signed.
+
+`createdilithiummultisig` is what makes the key reachable — which closes the loop, because
+it is a wallet RPC an extension cannot call.
+
+**So client-side signing is not the convenient choice; it is the only one.** There is no
+degraded mode where a user without their own node borrows someone else's, and no
+"just run btq-core" answer for a cosigner who does not want to. The design is unaffected —
+the extension was never going to have a node wallet to register in, and derives the leaf
+itself from the enrolled cosigner set rather than trusting the PSBT to tell it what it is
+signing. Sections 6 through 8 stand unchanged. What changes is that the central claim of
+this document is now a tested result rather than an inference.
+
 PSBT stays the right interchange format anyway — not because we can call btq-core, but
 because it is the format btq-core defines, it is what air-gapped and future hardware
 tooling will speak, and it lets a power user drop into btq-core if they choose.
@@ -531,20 +564,8 @@ Short and concrete, because this is where judgment shows.
   decoder that accepts a forged signature and discovers it at finalize time is strictly
   worse than the reference implementation, and there is no reason to be worse.
 
-### One open question, unresolved
-
-Every btq-core functional test registers the multisig in each wallet via
-`createdilithiummultisig` *before* signing. The **sign-from-the-PSBT-alone** path — which
-is what an extension with no node wallet must do — is supported by the code structure:
-`SignP2MR` merges PSBT-supplied spend data into the signer's own
-(`src/script/sign.cpp:518-533`) and explicitly handles a PSBT-carried leaf that arrives
-without a control block. But **no test exercises it.**
-
-If it turns out not to work, the design survives — the extension derives the leaf itself
-from the enrolled cosigner set and never depends on the PSBT to tell it what it is signing,
-which is the safer posture regardless. But it changes what "PSBT interchange with btq-core"
-means, and it should be proven with a minimal regtest case before anything is built on it.
-It is listed here as unproven rather than assumed.
+Every one of these is the wallet's own work. None of it is inherited — see §2, where the
+same is true of a check btq-core does perform, and of signing itself.
 
 ---
 
@@ -792,6 +813,16 @@ Both fields are pure optimizations — a correct implementation works without ei
 what makes them safe to standardize now: they cannot change what a transaction means, only
 what a wallet can do without guessing. And a reserved byte with a name in a comment is an
 invitation. Two implementations that fill it in differently is the expensive outcome.
+
+A smaller report belongs alongside them, and it is a bug rather than a proposal. Per §2, a
+btq-core wallet cannot sign a Dilithium P2MR input from a PSBT unless the address was
+registered first, because `FillPSBT`'s no-provider fallback can only collect `CPubKey`
+candidates (`src/wallet/scriptpubkeyman.cpp:3343-3378`) and an ML-DSA key does not fit that
+type. A `CDilithiumPubKey` branch in that fallback — reading the keys from the leaf that
+`0x19` already carries — would make PSBT-alone signing work, and it is a far smaller change
+than two new field types. It would not alter this design, which never depended on it. It
+would mean a node could act as a signer for a wallet it has never met, which is a
+reasonable thing for a PSBT to be able to ask.
 
 ---
 
