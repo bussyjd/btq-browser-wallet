@@ -59,10 +59,17 @@ export function virtualSizeCeil(weight: number): number {
 }
 
 /**
- * Bytes a compact-size prefix occupies. The value table is `compactSize()` in
- * `util/bytes.ts` (btq-core `serialize.h` `WriteCompactSize`) counted rather
- * than encoded, so nothing here allocates inside a coin-selection loop;
- * `fee.test.ts` pins the two against each other across every boundary.
+ * Bytes a compact-size prefix occupies, for any length this wallet can build.
+ * The value table is `compactSize()` in `util/bytes.ts` (btq-core
+ * `serialize.h` `WriteCompactSize`) counted rather than encoded, so nothing
+ * here allocates inside a coin-selection loop; `fee.test.ts` pins the two
+ * against each other at all three thresholds.
+ *
+ * It deliberately does not reproduce `compactSize()`'s refusals — that
+ * function throws above 0xffffffff and on a negative or fractional argument,
+ * where this one keeps counting. Nothing reachable gets near it: the largest
+ * count in a standard transaction is a few hundred. Callers that take a length
+ * from outside validate it first.
  */
 export function compactSizeBytes(n: number): number {
   if (n < 0xfd) return 1;
@@ -175,6 +182,23 @@ export const DILITHIUM_SIG_BYTES = 2421;
  *  partial sigs per input (`src/psbt.h:83`). */
 export const MAX_THRESHOLD_KEYS = 20;
 /**
+ * Longest merkle path a P2MR control block may carry —
+ * `P2MR_CONTROL_MAX_NODE_COUNT`, `src/script/interpreter.h:254`. Beyond it the
+ * control block is malformed and the spend is invalid, not merely expensive.
+ */
+export const MAX_MERKLE_PATH_DEPTH = 128;
+
+/**
+ * Tapscript validation-weight budget, `src/script/script.h:64,71`: an input is
+ * allowed `witness_bytes + 50` and each *passing* Dilithium signature spends
+ * 500. `EvalChecksigDilithium` (`src/script/interpreter.cpp:126`) charges only
+ * when the slot is non-empty, so an empty accumulator slot costs nothing here
+ * either — which is why sparse m-of-n is free in both senses.
+ */
+export const VALIDATION_WEIGHT_PER_DILITHIUM_SIG = 500;
+export const VALIDATION_WEIGHT_OFFSET = 50;
+
+/**
  * Largest witness stack item policy will relay (`src/policy/policy.h:48`,
  * = MAX_SCRIPT_ELEMENT_SIZE, raised from Bitcoin's 520 to carry these keys and
  * signatures). It binds the signature slots only — see the note above on which
@@ -221,6 +245,30 @@ function assertDepth(depth: number): void {
   if (!Number.isInteger(depth) || depth < 0) {
     throw new WalletError('BAD_PARAMS', 'Merkle path depth must be a non-negative whole number.');
   }
+  if (depth > MAX_MERKLE_PATH_DEPTH) {
+    throw new WalletError(
+      'BAD_PARAMS',
+      `A P2MR control block carries at most ${MAX_MERKLE_PATH_DEPTH} merkle nodes, not ${depth}.`,
+    );
+  }
+}
+
+/**
+ * How many slots the finalizer will actually fill. Defaults to m because that
+ * is what a wallet should emit, but the accumulator passes on `sum >= m`, and
+ * btq-core's PSBT carries up to 20 partial signatures per input
+ * (`src/psbt.h:83`). A finalizer that emits every signature it happens to hold
+ * builds a witness larger than an m-slot quote — a 2-of-3 finalized with three
+ * signatures is 840 vB, not 689 — and the transaction then falls under the
+ * relay floor. So the count is a parameter, not an assumption.
+ */
+function assertSignatures(signatures: number, m: number, n: number): void {
+  if (!Number.isInteger(signatures) || signatures < m || signatures > n) {
+    throw new WalletError(
+      'BAD_PARAMS',
+      `A ${m}-of-${n} witness fills between ${m} and ${n} slots, not ${signatures}.`,
+    );
+  }
 }
 
 /**
@@ -246,7 +294,15 @@ export function thresholdLeafScriptBytes(m: number, n: number): number {
  */
 export function witnessFieldBytes(itemSizes: readonly number[]): number {
   let bytes = compactSizeBytes(itemSizes.length);
-  for (const size of itemSizes) bytes += compactSizeBytes(size) + size;
+  for (const size of itemSizes) {
+    if (!Number.isInteger(size) || size < 0) {
+      throw new WalletError(
+        'BAD_PARAMS',
+        'A witness item size must be a non-negative whole number.',
+      );
+    }
+    bytes += compactSizeBytes(size) + size;
+  }
   return bytes;
 }
 
@@ -260,6 +316,12 @@ export interface ThresholdInput {
    * (`src/script/interpreter.h:252-255`, control block = 1 + 32*depth).
    */
   depth?: number;
+  /**
+   * Slots the finalizer will fill. Defaults to `m`; anything up to `n` is a
+   * valid spend and costs 2424 bytes more per extra signature. See
+   * `assertSignatures`.
+   */
+  signatures?: number;
 }
 
 /**
@@ -269,14 +331,39 @@ export interface ThresholdInput {
  * Slot order is the finalizer's problem, not the sizer's — an empty slot is
  * 1 byte wherever it sits.
  */
-export function thresholdWitnessBytes(m: number, n: number, depth = 0): number {
+export function thresholdWitnessBytes(m: number, n: number, depth = 0, signatures = m): number {
   assertThreshold(m, n);
   assertDepth(depth);
+  assertSignatures(signatures, m, n);
   const slots: number[] = [];
-  for (let i = 0; i < n; i++) slots.push(i < m ? DILITHIUM_SIG_BYTES : 0);
+  for (let i = 0; i < n; i++) slots.push(i < signatures ? DILITHIUM_SIG_BYTES : 0);
   slots.push(thresholdLeafScriptBytes(m, n));
   slots.push(1 + 32 * depth);
   return witnessFieldBytes(slots);
+}
+
+/** Witness bytes for one input, reading a `ThresholdInput`'s optional fields. */
+function witnessBytesFor(input: ThresholdInput): number {
+  return thresholdWitnessBytes(input.m, input.n, input.depth ?? 0, input.signatures ?? input.m);
+}
+
+/**
+ * Validation-weight headroom for one input: the budget it is granted minus
+ * what its signatures spend. Negative means the interpreter aborts with
+ * SCRIPT_ERR_TAPSCRIPT_VALIDATION_WEIGHT however well the fee was estimated.
+ *
+ * It never binds in practice — each signature carries 2424 bytes of budget to
+ * pay 500 of cost, so even 20-of-20 keeps a ~7.5x margin — but a sizing module
+ * that silently assumed that would be asserting it rather than checking it.
+ */
+export function validationWeightSlack(input: ThresholdInput): number {
+  const signatures = input.signatures ?? input.m;
+  assertSignatures(signatures, input.m, input.n);
+  return (
+    witnessBytesFor(input) +
+    VALIDATION_WEIGHT_OFFSET -
+    signatures * VALIDATION_WEIGHT_PER_DILITHIUM_SIG
+  );
 }
 
 /**
@@ -295,12 +382,33 @@ export function estimateMultisigTxWeight(
   }
   const stripped = strippedTxSize(inputs.length, outputs);
   let witness = 0;
-  for (const input of inputs) witness += thresholdWitnessBytes(input.m, input.n, input.depth ?? 0);
-  // Marker/flag only when there is a witness to introduce; with no inputs
-  // there is none, and the empty-input case exists here purely so a caller can
-  // price the fixed overhead of a shape before choosing coins for it.
-  const total = stripped + (inputs.length > 0 ? 2 : 0) + witness;
+  for (const input of inputs) witness += witnessBytesFor(input);
+  const total = stripped + 2 + witness; // marker/flag + witnesses
   return transactionWeight(stripped, total);
+}
+
+/**
+ * The largest number of identical threshold inputs that still fits under
+ * MAX_STANDARD_TX_WEIGHT — the multisig analogue of `MAX_P2MR_INPUTS`, which
+ * cannot be a constant here because the answer depends on the shape: 42 for a
+ * 2-of-3, 5 for a 20-of-20.
+ *
+ * Without this a coin selector quotes a perfectly correct fee for a
+ * transaction no node will relay, and the send fails at the last step.
+ */
+export function maxStandardThresholdInputs(input: ThresholdInput, outputs = 2): number {
+  const witness = witnessBytesFor(input);
+  const perInput = 41 * WITNESS_SCALE_FACTOR + witness;
+  const uniformWeight = (count: number): number => {
+    const stripped = strippedTxSize(count, outputs);
+    return transactionWeight(stripped, stripped + 2 + count * witness);
+  };
+  // Exact but for the compact-size step at 253 inputs, so the loops below run
+  // at most a couple of times.
+  let count = Math.max(0, Math.floor((MAX_STANDARD_TX_WEIGHT - uniformWeight(0)) / perInput));
+  while (count > 0 && uniformWeight(count) > MAX_STANDARD_TX_WEIGHT) count--;
+  while (uniformWeight(count + 1) <= MAX_STANDARD_TX_WEIGHT) count++;
+  return count;
 }
 
 /** `feeForP2mrTx` for a threshold input set. */

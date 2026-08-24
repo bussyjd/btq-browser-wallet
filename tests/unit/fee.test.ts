@@ -26,7 +26,12 @@ import {
   DILITHIUM_PUBKEY_BYTES,
   DILITHIUM_SIG_BYTES,
   MAX_THRESHOLD_KEYS,
+  MAX_MERKLE_PATH_DEPTH,
   MAX_STANDARD_TAPSCRIPT_STACK_ITEM_SIZE,
+  VALIDATION_WEIGHT_PER_DILITHIUM_SIG,
+  VALIDATION_WEIGHT_OFFSET,
+  validationWeightSlack,
+  maxStandardThresholdInputs,
   THRESHOLD_LEAF_KEY_BYTES,
   P2MR_WITNESS_BYTES,
   type ThresholdInput,
@@ -283,12 +288,19 @@ describe('k-of-n threshold sizing', () => {
     expect(thresholdLeafScriptBytes(1, 1)).not.toBe(singleKeyLeafScript(pubkey).length);
   });
 
-  it('compactSizeBytes counts exactly what compactSize() encodes', () => {
+  it('compactSizeBytes counts exactly what compactSize() encodes, at every threshold', () => {
     // fee.ts counts the prefix instead of building it, so the two must not be
     // allowed to drift: an off-by-one here is an off-by-one in every fee.
-    for (const n of [0, 1, 0xfc, 0xfd, 0xfe, 0xff, 0xffff, 0x10000, 0xffffff]) {
+    // Both sides of each of the three thresholds, plus the largest length a
+    // standard transaction can reach.
+    for (const n of [0, 1, 0xfc, 0xfd, 0xfe, 0xff, 0xffff, 0x10000, 0xffffff, 0xffffffff]) {
       expect(compactSizeBytes(n), `n=${n}`).toBe(compactSize(n).length);
     }
+    // Above 0xffffffff the encoder throws and the counter keeps counting; the
+    // divergence is documented and unreachable, but pin it so a future change
+    // to either one is a deliberate change to both.
+    expect(() => compactSize(0x1_0000_0000)).toThrow();
+    expect(compactSizeBytes(0x1_0000_0000)).toBe(5);
   });
 
   it('a threshold leaf is 1319 bytes per key, plus OP_0, <m> and the comparison', () => {
@@ -328,13 +340,20 @@ describe('k-of-n threshold sizing', () => {
   });
 
   it('the 16x witness discount is what keeps post-quantum multisig affordable', () => {
-    // At Bitcoin's scale factor of 4 the same 2-of-3 witness would cost ~2.2k vB.
-    const weight = estimateMultisigTxWeight([{ m: 2, n: 3 }], 2);
-    expect(virtualSizeCeil(weight)).toBe(689);
-    const atScale4 = Math.ceil((137 * 3 + (137 + 2 + 8815)) / 4);
-    expect(atScale4).toBeGreaterThan(2000);
-    // …and a 2-of-3 spend is under twice the cost of a single-key one.
-    expect(689 / 372).toBeLessThan(2);
+    // Everything here is computed from the estimator, so the comparison fails
+    // if the witness arithmetic is wrong rather than merely restating literals.
+    const multisig = virtualSizeCeil(estimateMultisigTxWeight([{ m: 2, n: 3 }], 2));
+    const singleKey = virtualSizeCeil(estimateP2mrTxWeight(1, 2));
+    expect(multisig).toBe(689);
+    expect(singleKey).toBe(372);
+    // A 2-of-3 post-quantum spend is under twice a single-key one.
+    expect(multisig).toBeLessThan(2 * singleKey);
+    // At Bitcoin's witness scale factor of 4 the same bytes would cost ~2342 vB.
+    const stripped = 4 + 1 + 41 + 1 + 2 * P2MR_OUTPUT_SIZE + 4;
+    const total = stripped + 2 + thresholdWitnessBytes(2, 3);
+    const atScale4 = Math.ceil((stripped * 3 + total) / 4);
+    expect(atScale4).toBe(2342);
+    expect(atScale4).toBeGreaterThan(3 * multisig);
   });
 
   it('every shape up to 20-of-20 is standard and relayable', () => {
@@ -352,19 +371,76 @@ describe('k-of-n threshold sizing', () => {
     // The leaf script itself is not measured against the 15000-byte stack-item
     // limit — IsWitnessStandard (src/policy/policy.cpp:294-311) pops the leaf
     // and the control block off before checking. Only the signature slots are,
-    // and a 2421-byte signature has room to spare.
+    // and a 2421-byte signature has room to spare. Worth pinning because the
+    // 20-of-20 leaf is 26384 bytes: if that limit did apply, the whole top of
+    // the table would be unrelayable.
     expect(DILITHIUM_SIG_BYTES).toBeLessThan(MAX_STANDARD_TAPSCRIPT_STACK_ITEM_SIZE);
     expect(thresholdLeafScriptBytes(20, 20)).toBeGreaterThan(
       MAX_STANDARD_TAPSCRIPT_STACK_ITEM_SIZE,
     );
   });
 
+  it('the tapscript validation-weight budget never binds, even at 20-of-20', () => {
+    // The other limit that sounds like it should bind. An input is granted
+    // witness_bytes + 50 and each passing Dilithium signature spends 500
+    // (src/script/script.h:64,71). Blowing it aborts the script with
+    // SCRIPT_ERR_TAPSCRIPT_VALIDATION_WEIGHT no matter how good the fee was —
+    // so the module checks it rather than assuming it.
+    expect(VALIDATION_WEIGHT_PER_DILITHIUM_SIG).toBe(500);
+    expect(VALIDATION_WEIGHT_OFFSET).toBe(50);
+    for (const [m, n] of [
+      [1, 1],
+      [2, 3],
+      [3, 5],
+      [20, 20],
+    ] as const) {
+      expect(validationWeightSlack({ m, n }), `${m}-of-${n}`).toBeGreaterThan(0);
+    }
+    // Each signature brings 2424 bytes of budget to pay 500 of cost, so the
+    // margin is ~4.8x on the signatures alone and grows with the leaf.
+    expect(validationWeightSlack({ m: 20, n: 20 })).toBe(74_870 + 50 - 20 * 500);
+    // An empty slot costs nothing: EvalChecksigDilithium only charges a
+    // non-empty signature (src/script/interpreter.cpp:126). So widening 2-of-2
+    // to 2-of-20 spends no more budget — it gains some.
+    expect(validationWeightSlack({ m: 2, n: 20 })).toBeGreaterThan(
+      validationWeightSlack({ m: 2, n: 2 }),
+    );
+  });
+
   it('42 2-of-3 inputs fit in one standard transaction, 43 do not', () => {
+    // The multisig analogue of MAX_P2MR_INPUTS. It is not 400000/11009 = 36:
+    // the fixed overhead of a transaction is paid once, not once per input, so
+    // the marginal cost of an input is 41*16 + 8815 = 9471 WU.
     const inputs = (k: number): ThresholdInput[] =>
       Array.from({ length: k }, () => ({ m: 2, n: 3 }));
-    expect(estimateMultisigTxWeight(inputs(42), 2)).toBe(399_320);
-    expect(estimateMultisigTxWeight(inputs(42), 2)).toBeLessThanOrEqual(MAX_STANDARD_TX_WEIGHT);
-    expect(estimateMultisigTxWeight(inputs(43), 2)).toBeGreaterThan(MAX_STANDARD_TX_WEIGHT);
+    const limit = maxStandardThresholdInputs({ m: 2, n: 3 }, 2);
+    expect(limit).toBe(42);
+    expect(estimateMultisigTxWeight(inputs(limit), 2)).toBe(399_320);
+    expect(estimateMultisigTxWeight(inputs(limit), 2)).toBeLessThanOrEqual(MAX_STANDARD_TX_WEIGHT);
+    expect(estimateMultisigTxWeight(inputs(limit + 1), 2)).toBeGreaterThan(MAX_STANDARD_TX_WEIGHT);
+    // The ceiling really does depend on the shape, which is why it is a
+    // function and not a constant.
+    expect(maxStandardThresholdInputs({ m: 20, n: 20 }, 2)).toBe(5);
+    expect(maxStandardThresholdInputs({ m: 1, n: 1 }, 2)).toBe(90);
+    // And it holds at the boundary for every shape in the table.
+    for (const [m, n] of [
+      [1, 1],
+      [2, 2],
+      [2, 3],
+      [3, 5],
+      [20, 20],
+    ] as const) {
+      const k = maxStandardThresholdInputs({ m, n }, 2);
+      expect(estimateMultisigTxWeight(inputs(k).map(() => ({ m, n })), 2), `${m}-of-${n}`)
+        .toBeLessThanOrEqual(MAX_STANDARD_TX_WEIGHT);
+      expect(
+        estimateMultisigTxWeight(
+          Array.from({ length: k + 1 }, () => ({ m, n })),
+          2,
+        ),
+        `${m}-of-${n}`,
+      ).toBeGreaterThan(MAX_STANDARD_TX_WEIGHT);
+    }
   });
 
   it('an unused key slot costs one byte, so sparse m-of-n is nearly free', () => {
@@ -392,6 +468,41 @@ describe('k-of-n threshold sizing', () => {
     expect(
       virtualSizeCeil(estimateMultisigTxWeight([{ m: 2, n: 3, depth: 1 }], 2)) - 689,
     ).toBe(2);
+    // The one step that is not a flat 32: at depth 8 the control block reaches
+    // 257 bytes and its own compact-size prefix grows from 1 byte to 3.
+    expect(thresholdWitnessBytes(2, 3, 8) - thresholdWitnessBytes(2, 3, 7)).toBe(34);
+    expect(thresholdWitnessBytes(2, 3, 7) - thresholdWitnessBytes(2, 3, 6)).toBe(32);
+    expect(thresholdWitnessBytes(2, 3, 9) - thresholdWitnessBytes(2, 3, 8)).toBe(32);
+    // btq-core caps a control block at 128 merkle nodes
+    // (P2MR_CONTROL_MAX_NODE_COUNT, src/script/interpreter.h:254). Past that
+    // the spend is invalid, not merely expensive, so quoting a fee for it
+    // would hide the mistake until the node refused the transaction.
+    expect(MAX_MERKLE_PATH_DEPTH).toBe(128);
+    expect(() => thresholdWitnessBytes(2, 3, MAX_MERKLE_PATH_DEPTH)).not.toThrow();
+    expect(() => thresholdWitnessBytes(2, 3, MAX_MERKLE_PATH_DEPTH + 1)).toThrow(WalletError);
+    expect(() => thresholdWitnessBytes(2, 3, MAX_MERKLE_PATH_DEPTH + 1)).toThrow(/128 merkle/);
+  });
+
+  it('prices the slots the finalizer will really fill, not always exactly m', () => {
+    // The accumulator passes on sum >= m, and a PSBT can carry up to 20 partial
+    // signatures per input (src/psbt.h:83). A finalizer that emits every
+    // signature it holds builds a witness bigger than an m-slot quote — and an
+    // 18% shortfall puts the transaction under the relay floor, where it simply
+    // never goes out. So the count is a parameter with an m default, not an
+    // assumption baked into the arithmetic.
+    expect(thresholdWitnessBytes(2, 3, 0, 3)).toBe(thresholdWitnessBytes(3, 3));
+    const quoted = virtualSizeCeil(estimateMultisigTxWeight([{ m: 2, n: 3 }], 2));
+    const actual = virtualSizeCeil(
+      estimateMultisigTxWeight([{ m: 2, n: 3, signatures: 3 }], 2),
+    );
+    expect(quoted).toBe(689);
+    expect(actual).toBe(840);
+    // Each extra signature replaces a 1-byte empty slot with 3 + 2421 bytes.
+    expect(thresholdWitnessBytes(2, 3, 0, 3) - thresholdWitnessBytes(2, 3, 0, 2)).toBe(2423);
+    // Fewer than m is not a spend at all, and more than n is not a witness.
+    expect(() => thresholdWitnessBytes(2, 3, 0, 1)).toThrow(/fills between 2 and 3/);
+    expect(() => thresholdWitnessBytes(2, 3, 0, 4)).toThrow(WalletError);
+    expect(() => estimateMultisigTxWeight([{ m: 2, n: 3, signatures: 4 }], 2)).toThrow(WalletError);
   });
 
   it('a heterogeneous input set is the sum of its inputs, not a multiple of one', () => {
@@ -399,11 +510,20 @@ describe('k-of-n threshold sizing', () => {
     // a count: a wallet holding a 2-of-3 and a 3-of-5 coin would be badly
     // under- or over-charged by any single per-input figure.
     const mixed = estimateMultisigTxWeight([{ m: 2, n: 3 }, { m: 3, n: 5 }], 2);
-    const perInput = (m: number, n: number) => 41 * WITNESS_SCALE_FACTOR + thresholdWitnessBytes(m, n);
+    const perInput = (m: number, n: number) =>
+      41 * WITNESS_SCALE_FACTOR + thresholdWitnessBytes(m, n);
     const base = estimateMultisigTxWeight([], 2);
-    expect(mixed).toBe(base + 2 + perInput(2, 3) + perInput(3, 5));
-    expect(mixed).not.toBe(2 * estimateMultisigTxWeight([{ m: 2, n: 3 }], 2));
-    expect(mixed).toBeGreaterThan(estimateMultisigTxWeight([{ m: 2, n: 3 }, { m: 2, n: 3 }], 2));
+    // 25543, cross-checked against btq-core's serializer for the same two-input
+    // transaction.
+    expect(mixed).toBe(25_543);
+    expect(mixed).toBe(base + perInput(2, 3) + perInput(3, 5));
+    // Charging either shape's rate for both is wrong by a real amount: pricing
+    // the pair as two 2-of-3s under-collects 5063 WU, i.e. 317 vB of fee.
+    const asTwoCheap = estimateMultisigTxWeight([{ m: 2, n: 3 }, { m: 2, n: 3 }], 2);
+    const asTwoDear = estimateMultisigTxWeight([{ m: 3, n: 5 }, { m: 3, n: 5 }], 2);
+    expect(mixed - asTwoCheap).toBe(5063);
+    expect(asTwoDear - mixed).toBe(5063);
+    expect(virtualSizeCeil(mixed) - virtualSizeCeil(asTwoCheap)).toBe(317);
   });
 
   it('feeForMultisigTx charges ceil(weight/16) and enforces the same relay floor', () => {
@@ -452,6 +572,11 @@ describe('k-of-n threshold sizing', () => {
       expect(code, `${m}-of-${n}`).toBe('BAD_PARAMS');
     }
     expect(() => thresholdWitnessBytes(2, 3, -1)).toThrow(/depth/);
+    // The low-level counter guards too — it is exported, and a negative or
+    // fractional size would otherwise return a silently wrong number.
+    expect(() => witnessFieldBytes([2421, -1, 1])).toThrow(WalletError);
+    expect(() => witnessFieldBytes([2421, 1.5, 1])).toThrow(WalletError);
+    expect(witnessFieldBytes([])).toBe(1);
     expect(() => estimateMultisigTxWeight([{ m: 2, n: 3 }], -1)).toThrow(WalletError);
     expect(() => estimateMultisigTxWeight([{ m: 2, n: 3 }], 1.5)).toThrow(WalletError);
   });
