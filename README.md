@@ -397,6 +397,98 @@ pure, browser-safe and dependency-light (`@noble/*`, `@scure/*`) so it stays rev
 the phrase again is not a weaker boundary than the send screen, and what is deliberately
 out of scope.
 
+## What I'd ship next
+
+None of this is built. It is what a real wallet needs next, in the order I would take it,
+and the last paragraph is why it is two pieces of work rather than five.
+
+**Multisig — and why the Sparrow model cannot be ported.** There is no xpub and there
+cannot be one: `CDilithiumExtPubKey::Derive()` always returns false, because a lattice key
+admits no analogue of `child_pub = parent_pub + hash*G` (`dilithium_key.h:370`). Sparrow,
+Electrum and Caravan all rest on the opposite assumption — exchange xpubs once at setup,
+then derive an unlimited chain of addresses independently and forever. On BTQ **every
+multisig address needs a fresh 1312-byte public key from every cosigner**, delivered out of
+band, and that one fact is the whole design problem.
+
+The protocol already exists; the client does not. btq-core ships the threshold accumulator
+leaf (`GetScriptForDilithiumThreshold`, `dilithium_leaf.cpp:13`) and the three PSBT fields
+that carry a P2MR Dilithium spend — `0x19` leaf script, `0x1A` merkle root, `0x1B` partial
+signature (`psbt.h:52-54`). What it does not ship is anything an extension can call:
+`createdilithiummultisig` (`dilithium.cpp:447`) and `walletprocesspsbt` are **wallet** RPCs
+and need the private keys loaded on a node, which is precisely what this wallet exists to
+avoid. Construction, signing, combining and finalizing therefore all have to be
+reimplemented client-side in `src/core/`, with btq-core as the oracle they are checked
+against rather than a runtime dependency.
+
+It is affordable, which is not obvious for a scheme whose every signature is 2421 bytes.
+One input, two outputs:
+
+| spend | witness | vsize |
+|---|---|---|
+| single-sig | 3746 B | 372 vB |
+| 2-of-3 | 8815 B | 689 vB |
+| 3-of-5 | 13878 B | 1005 vB |
+
+A 2-of-3 costs 1.85× a single-sig spend, and a 3-of-5 2.7×, only because the witness scale
+factor is **16** rather than Bitcoin's 4 — at 4 the same 2-of-3 witness would be ~2200 vB.
+The full design — enrollment, key distribution, spend coordination, and what a cosigning
+wallet must refuse — is [`docs/MULTISIG.md`](docs/MULTISIG.md).
+
+**Air-gapped and hardware signing.** There is no device to talk to: an ML-DSA-44 secret key
+is 2560 bytes and a signature 2421, against secp256k1's 32 and ~71, and no shipping
+hardware wallet speaks ML-DSA. So the work is the *interface* — PSBT in, PSBT out, over
+file, QR or USB-HID — built now so a device can drop into it later, and useful the day it
+ships because the same interface serves an offline second copy of this wallet on a machine
+that never sees a network. Sizing decides the UX: a 1312-byte public key fits in a single
+QR (binary capacity 2953 B) and so does an unsigned PSBT, but a signed one carries 2421
+bytes per signature and needs animated multi-part QR or a file. Signing here is
+deterministic (Protocol notes above), so an air-gapped signer can be attested by replaying
+a known vector and checking byte equality — an assurance a secp256k1 signer cannot give.
+
+**RBF and CPFP fee bumping.** The gap is unusually clean: `src/core/tx/serialize.ts:23`
+sets `DEFAULT_SEQUENCE = 0xfffffffd // opt in to RBF`, so **every transaction this wallet
+has ever sent is replaceable and there is no way to replace one.** At the 1000 sat/kvB
+incremental relay floor (`policy.h:38`) a bump on a 372 vB spend costs on the order of 372
+extra sats. The case does not rest on block times: any wallet that lets the user choose a
+fee rate needs a way to correct that choice, and one that marks every transaction
+replaceable and then offers no way to replace one has the gap whatever the chain is doing.
+On BTQ testnet today it is more than theoretical — blocks can be hours apart, so a
+transaction that has to wait waits visibly. CPFP covers the inbound direction, where the
+user never picked the fee at all. Where it gets interesting is multisig: a replacement is
+a **new transaction needing m fresh signatures**, so the fee is trivial and the
+coordination is not.
+
+**A timelocked recovery leaf.** The most BTQ-specific item here. A P2MR output commits to a
+merkle *tree*, not to one script, and `OP_CHECKLOCKTIMEVERIFY` / `OP_CHECKSEQUENCEVERIFY`
+are gated on script flags rather than on sigversion (`interpreter.cpp:575,614`), so they
+work inside a leaf. A hot leaf (2-of-3) and a recovery leaf
+(`<90 days> OP_CHECKSEQUENCEVERIFY OP_DROP <backup key> OP_CHECKSIGDILITHIUM`) then commit
+to one address, and **only the leaf actually spent is ever revealed** — the recovery branch
+costs zero bytes unless it is used, and is never published if it never is. That is worth
+more here than on Bitcoin, because every P2MR spend already publishes a 1312-byte key and
+on-chain footprint is the scarce resource. The caveat belongs next to the feature: spending
+one leaf needs the merkle branch to the other to build the control block, so the wallet
+must persist the whole tree, and with no xpub it cannot be re-derived from the seed. Lose
+the tree description and the coins are unspendable *even with the keys* — a hard
+requirement on the backup format, settled before a line of it is written.
+
+**Labels, coin control, watch-only.** Coin control is a privacy control on this chain, not
+a power-user nicety: every spend reveals the 1312-byte public key of every input, so
+combining two UTXOs publishes both keys in one transaction and links those addresses
+permanently. On a chain built to resist quantum adversaries, involuntary input linkage is
+the main leak and choosing your own inputs is the only defence against it. Labels are the
+most sensitive non-key data a wallet holds and belong inside the sealed vault, not
+plaintext `storage.local`. Watch-only can only ever mean "watch this explicit list of
+addresses", a list that cannot extend itself, because `Derive()` returns false — there is
+no "watch my cold wallet from my phone" on BTQ, and the one workable form is a batch export
+of K addresses.
+
+These are not five features but **two primitives**. Client-side PSBT — parse, validate,
+sign, combine, finalize, none of which exists in this repo today — is multisig, air-gapped
+signing and multisig fee bumping at once. Batch public-key export is multisig enrollment
+and watch-only, the same mechanism answering both. The recovery leaf is the one item
+neither covers: it needs a third thing, a backup format that carries the tree.
+
 ## Layout
 
 ```
