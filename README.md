@@ -454,9 +454,9 @@ fee rate needs a way to correct that choice, and one that marks every transactio
 replaceable and then offers no way to replace one has the gap whatever the chain is doing.
 On BTQ testnet today it is more than theoretical — blocks can be hours apart, so a
 transaction that has to wait waits visibly. CPFP covers the inbound direction, where the
-user never picked the fee at all. Where it gets
-interesting is multisig: a replacement is a **new transaction needing m fresh signatures**,
-so the fee is trivial and the coordination is not.
+user never picked the fee at all. Where it gets interesting is multisig: a replacement is
+a **new transaction needing m fresh signatures**, so the fee is trivial and the
+coordination is not.
 
 **A timelocked recovery leaf.** The most BTQ-specific item here. A P2MR output commits to a
 merkle *tree*, not to one script, and `OP_CHECKLOCKTIMEVERIFY` / `OP_CHECKSEQUENCEVERIFY`
