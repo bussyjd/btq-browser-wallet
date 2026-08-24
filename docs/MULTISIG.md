@@ -517,6 +517,12 @@ Short and concrete, because this is where judgment shows.
 - **Cap partial signatures at 20 per input**, matching
   `MAX_DILITHIUM_PARTIAL_SIGS_PER_INPUT` (`src/psbt.h:83`, which is
   `MAX_PUBKEYS_PER_MULTISIG` at `src/script/script.h:35`).
+- **Finalize with exactly m signatures, never every signature held.** The accumulator passes
+  on `sum ≥ m`, so a PSBT that collected three signatures for a 2-of-3 will finalize into a
+  valid but oversized witness — 840 vB against the 689 the fee was computed for, which pays
+  820 sat/kvB against a 1000 sat/kvB floor and does not relay. §10 has the arithmetic. Drop
+  the surplus signatures at finalize time rather than at fee-estimation time, so the size
+  quoted and the size broadcast are the same object.
 - **Validate every partial signature at parse time and fail closed.** btq-core does exactly
   this: `ValidateP2MRDilithiumPSBT` runs after deserialization and, on failure, **zeroes the
   entire PSBT** before returning (`src/psbt.cpp:588-594`) so no caller can act on
@@ -566,6 +572,10 @@ range reachable, so a 20-of-20 leaf is 26384 bytes, not 26383. A test suite writ
 `n − m` empty slots at one byte each, plus the leaf script with its 3-byte length prefix,
 plus the 1-byte control block with its own, plus the stack-item count.
 
+Note the `m` in that sentence: it is **the number of slots the finalizer fills**, which is
+not necessarily the threshold. See "the table assumes a minimal witness" below — this is a
+correctness rule, not a rounding detail.
+
 **Transaction.** For 1 input and 2 P2MR outputs — and note that the segwit marker and flag
 belong to `total`, never to `stripped`:
 
@@ -590,6 +600,30 @@ constants exactly — `P2MR_WITNESS_BYTES = 3746` (`src/core/tx/fee.ts:23`) and
 table to something checked against consensus. Two of these rows were wrong in an earlier
 draft, and both were caught by recomputing rather than by reading. That is the argument for
 printing the derivation next to the figures.
+
+**The single-key row is not a 1-of-1 threshold leaf**, and the two must not be conflated.
+`singleKeyLeafScript()` emits `<pubkey> OP_CHECKSIGDILITHIUM` — 1316 bytes
+(`src/core/script/p2mr.ts:29`). `GetScriptForDilithiumThreshold(1, [pubkey])` wraps the same
+key in the accumulator scaffolding and emits **1322** bytes, witness 3752. Both round to
+372 vB, which is exactly why this is a trap worth naming: the sizes agree and the *scripts
+do not*, so the TapLeaf hashes differ, so **the addresses differ**. A wallet that treats a
+1-of-1 multisig as an alias for a single-key address sends coins to a script its single-key
+path cannot spend. This is the same family of hazard as unsorted key order in §4 — two
+plausible constructions, one silent divergence — and it deserves the same treatment: pick
+one representation at enrollment and never derive the other by accident.
+
+**The table assumes a minimal witness: exactly m slots filled.** The accumulator succeeds on
+`sum ≥ m`, not `sum = m`, and a PSBT may legitimately carry up to 20 partial signatures per
+input (`src/psbt.h:83`). So a finalizer holding three signatures for a 2-of-3 that emits all
+three produces a valid spend of **840 vB**, not 689 — witness 11238 instead of 8815.
+
+That is a correctness bug, not an inefficiency. A wallet that quotes the user 689 vB and
+broadcasts 840 has computed a fee at 1000 sat/kvB that pays `689 / 840 = 820` sat/kvB —
+**below the 1000 sat/kvB relay floor**, so the transaction is simply not forwarded, and the
+failure appears as a stuck payment rather than an error at signing time. The over-signed
+witness also publishes an ML-DSA signature from a cosigner who did not need to sign,
+which on this chain is a permanent privacy cost for nothing. **A finalizer must select
+exactly m signatures and drop the rest** — see §9.
 
 **The comparison that matters.** At Bitcoin's scale factor of 4, the same 2-of-3 witness
 alone would contribute ~2204 vB instead of ~551. Post-quantum multisig is economically
@@ -634,8 +668,10 @@ against `MAX_STANDARD_TX_WEIGHT = 400000` (`src/policy/policy.h:30`):
 | input type | marginal WU | max inputs |
 |---|---|---|
 | single-key | 4402 | **90** |
+| 2-of-2 | 8151 | **48** |
 | 2-of-3 | 9471 | **42** |
 | 3-of-5 | 14534 | **27** |
+| 20-of-20 | 75526 | **5** |
 
 **The single-key row is the reason to believe the other two.** 4402 is
 `P2MR_INPUT_WEIGHT` (`src/core/tx/fee.ts:20`) and 90 is `MAX_P2MR_INPUTS`
@@ -644,9 +680,14 @@ this document existed. A formula that reproduces them exactly is a formula that 
 trusted on rows nothing has verified yet. Prefer that check to asserting 42 as a magic
 number.
 
-A sibling spike implements `thresholdWitnessBytes(m, n)` in `src/core/tx/fee.ts` and
-asserts this table, including that the degenerate 1-of-1 case reproduces 3746. That is
-arithmetic proved against a verified constant, not a multisig feature.
+A sibling spike implements `thresholdWitnessBytes(m, n)` and `maxInputsForWitness()` in
+`src/core/tx/fee.ts` and asserts both tables, tying them to the shipping constants by
+feeding the *single-key* witness through the same formula and getting `MAX_P2MR_INPUTS = 90`
+back. That tie is the single-key leaf, not a 1-of-1 accumulator, for the reason above. Every
+row was also cross-checked against btq-core's own serializer — `CTransaction.get_weight()`
+and `get_vsize()` from `test/functional/test_framework/messages.py`, with the leaf assembled
+from btq-core's opcode values rather than from this document. Two independent methods, same
+figures. It is arithmetic proved against consensus, not a multisig feature.
 
 ---
 
