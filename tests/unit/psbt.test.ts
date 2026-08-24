@@ -428,6 +428,28 @@ describe('combine', () => {
       /different transactions/);
   });
 
+  it('refuses a merge that would exceed the 20-signature cap', () => {
+    // Reachable through ordinary parsed PSBTs, despite the cap being enforced
+    // at parse: each side may legitimately carry 20 signatures *on its own
+    // leaf*, and the union is 40 across two leaves. Built directly here rather
+    // than by producing 40 real signatures, which would buy nothing.
+    const v = vectors.cases[0]!;
+    const base = parsePsbt(v.singlySignedPsbts[0]!.psbt);
+    const real = base.inputs[0]!.dilithiumSigs[0]!;
+    const bulk = (leafHashByte: number) => Array.from({ length: 11 }, (_, i) => {
+      const pubkey = Uint8Array.from(real.pubkey);
+      pubkey[100] = i;
+      const leafHash = Uint8Array.from(real.leafHash);
+      leafHash[0] = leafHashByte;
+      return { pubkey, leafHash, signature: real.signature };
+    });
+    const withSigs = (sigs: ReturnType<typeof bulk>): Psbt => ({
+      ...base,
+      inputs: base.inputs.map((input) => ({ ...input, dilithiumSigs: sigs })),
+    });
+    expectPsbtError(() => combinePsbts([withSigs(bulk(1)), withSigs(bulk(2))]), /more than 20/);
+  });
+
   it('unions the control blocks offered for one leaf', () => {
     const v = vectors.cases[0]!;
     const a = parsePsbt(v.unsignedPsbt);
