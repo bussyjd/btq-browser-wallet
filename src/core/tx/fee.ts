@@ -9,6 +9,7 @@
  *   src/policy/policy.h:63            min relay 1000 sat/kvB
  *   src/policy/policy.h:61            DUST_RELAY_TX_FEE = 3000 sat/kvB
  *   src/policy/policy.cpp:26-63       GetDustThreshold
+ *   src/script/dilithium_leaf.cpp:13  GetScriptForDilithiumThreshold (k-of-n leaf)
  *
  * A single-key P2MR input is 41 non-witness bytes + 3746 witness bytes
  * = 41*16 + 3746 = 4402 WU = 275.125 vB.
@@ -57,18 +58,49 @@ export function virtualSizeCeil(weight: number): number {
   return Math.ceil(weight / WITNESS_SCALE_FACTOR);
 }
 
-function varintSize(n: number): number {
+/**
+ * Bytes a compact-size prefix occupies — `compactSize()` in `util/bytes.ts`
+ * (btq-core `serialize.h` `WriteCompactSize`) counted rather than encoded, so
+ * nothing here allocates inside a coin-selection loop.
+ *
+ * It matches that encoder's contract exactly, refusals included: a negative or
+ * fractional length is not a length, and the 9-byte form cannot appear in
+ * anything this wallet builds, so both throw rather than return a number a
+ * caller would spend. `fee.test.ts` pins the two against each other at every
+ * threshold and at both refusals — a doc comment claiming an equivalence no
+ * test covers is how an off-by-one survives.
+ */
+export function compactSizeBytes(n: number): number {
+  if (!Number.isInteger(n) || n < 0) {
+    throw new WalletError('BAD_PARAMS', 'A compact size must be a non-negative whole number.');
+  }
   if (n < 0xfd) return 1;
   if (n <= 0xffff) return 3;
-  return 5;
+  if (n <= 0xffffffff) return 5;
+  throw new WalletError('BAD_PARAMS', 'Compact size too large.');
 }
 
 /** Weight of a signed single-key P2MR tx with `inputs` and `outputs`. */
 export function estimateP2mrTxWeight(inputs: number, outputs: number): number {
-  const stripped =
-    4 + varintSize(inputs) + inputs * 41 + varintSize(outputs) + outputs * P2MR_OUTPUT_SIZE + 4;
+  const stripped = strippedTxSize(inputs, outputs);
   const total = stripped + 2 + inputs * P2MR_WITNESS_BYTES; // marker/flag + witnesses
   return transactionWeight(stripped, total);
+}
+
+/**
+ * Serialized size of a transaction with its witness stripped: version, the
+ * two compact-size counts, 41 bytes per P2MR input (32 txid + 4 vout + 1 empty
+ * scriptSig + 4 sequence), 43 bytes per P2MR output, locktime.
+ */
+function strippedTxSize(inputs: number, outputs: number): number {
+  return (
+    4 +
+    compactSizeBytes(inputs) +
+    inputs * 41 +
+    compactSizeBytes(outputs) +
+    outputs * P2MR_OUTPUT_SIZE +
+    4
+  );
 }
 
 /**
@@ -111,4 +143,339 @@ export function feeForP2mrTx(inputs: number, outputs: number, satPerKvB = MIN_RE
  */
 export function dustThreshold(): bigint {
   return P2MR_DUST_SATS;
+}
+
+/* -------------------------------------------------------------------------
+ * k-of-n threshold spends
+ *
+ * btq-core builds an m-of-n Dilithium leaf as an accumulator
+ * (`src/script/dilithium_leaf.cpp:13` `GetScriptForDilithiumThreshold`):
+ *
+ *   OP_0
+ *   (OP_TOALTSTACK <pubkey> OP_CHECKSIGDILITHIUM OP_FROMALTSTACK OP_ADD) x n
+ *   <m> OP_GREATERTHANOREQUAL
+ *
+ * A key that did not sign contributes an empty witness slot, which
+ * OP_CHECKSIGDILITHIUM scores as 0 without failing, so any m-sized subset
+ * produces a valid witness. That is what lets independent wallets sign in
+ * parallel — and, for sizing, it means an unused slot costs exactly 1 byte.
+ *
+ * The sizes below are witness bytes, and witness bytes are 16x cheaper than
+ * non-witness bytes on BTQ (`src/consensus/consensus.h:21`
+ * WITNESS_SCALE_FACTOR = 16, against Bitcoin's 4). That single constant is why
+ * post-quantum multisig is affordable here at all: a 2-of-3 spend costs
+ * 689 vB — spending one input to two P2MR outputs.
+ *
+ * **Every vB figure in this file names its transaction shape, and they all
+ * mean one input and two P2MR outputs unless they say otherwise.** A vsize is
+ * a property of a whole transaction, not of an input, so a bare one is a right
+ * number waiting to be wrong somewhere else: the same 2-of-3 input paying two
+ * *P2WPKH* outputs is 665 vB, because a 31-byte output is 12 bytes smaller
+ * than P2MR's 43 and two of them take 24 bytes off the stripped size. Both
+ * figures are correct; only the unlabelled one is dangerous. Per-input costs
+ * are quoted in witness bytes or weight, which do not depend on the shape.
+ *
+ * Standardness holds for every shape up to 20-of-20. `IsWitnessStandard`
+ * (`src/policy/policy.cpp:302-308` — the two pops at :302-303, the size loop at
+ * :306-308) takes the control block and the leaf script off the stack *before*
+ * applying MAX_STANDARD_TAPSCRIPT_STACK_ITEM_SIZE
+ * (15000, `src/policy/policy.h:48`), so the 26384-byte 20-of-20 leaf is not
+ * measured against it; only the 2421-byte signature slots are, and they are
+ * well under. The binding limit is MAX_STANDARD_TX_WEIGHT = 400000
+ * (`src/policy/policy.h:30`), which fits 42 2-of-3 inputs at two P2MR outputs.
+ *
+ * This module deliberately duplicates no script construction — it counts bytes
+ * only, so that it stays independent of the leaf builder.
+ * ------------------------------------------------------------------------- */
+
+/** ML-DSA-44 public key, `src/crypto/dilithium_key.h:64`. */
+export const DILITHIUM_PUBKEY_BYTES = 1312;
+/** Signature plus the mandatory sighash byte — `src/psbt.h:82`. */
+export const DILITHIUM_SIG_BYTES = 2421;
+/** MAX_PUBKEYS_PER_MULTISIG, `src/script/script.h:35`. Also the PSBT cap on
+ *  partial sigs per input (`src/psbt.h:83`). */
+export const MAX_THRESHOLD_KEYS = 20;
+/**
+ * Longest merkle path a P2MR control block may carry —
+ * `P2MR_CONTROL_MAX_NODE_COUNT`, `src/script/interpreter.h:254`. Beyond it the
+ * control block is malformed and the spend is invalid, not merely expensive.
+ */
+export const MAX_MERKLE_PATH_DEPTH = 128;
+
+/**
+ * Tapscript validation-weight budget, `src/script/script.h:64,71`: an input is
+ * allowed `witness_bytes + 50` and each *passing* Dilithium signature spends
+ * 500. `EvalChecksigDilithium` (`src/script/interpreter.cpp:126`) charges only
+ * when the slot is non-empty, so an empty accumulator slot costs nothing here
+ * either — which is why sparse m-of-n is free in both senses.
+ */
+export const VALIDATION_WEIGHT_PER_DILITHIUM_SIG = 500;
+export const VALIDATION_WEIGHT_OFFSET = 50;
+
+/**
+ * Largest witness stack item policy will relay (`src/policy/policy.h:48`,
+ * = MAX_SCRIPT_ELEMENT_SIZE, raised from Bitcoin's 520 to carry these keys and
+ * signatures). It binds the signature slots only — see the note above on which
+ * stack items `IsWitnessStandard` measures.
+ */
+export const MAX_STANDARD_TAPSCRIPT_STACK_ITEM_SIZE = 15_000;
+
+/**
+ * Bytes one key contributes to a threshold leaf: OP_TOALTSTACK (1) +
+ * OP_PUSHDATA2 with an LE16 length (3) + the pubkey (1312) +
+ * OP_CHECKSIGDILITHIUM (1) + OP_FROMALTSTACK (1) + OP_ADD (1).
+ */
+export const THRESHOLD_LEAF_KEY_BYTES = 1 + 3 + DILITHIUM_PUBKEY_BYTES + 1 + 1 + 1; // 1319
+
+/**
+ * Bytes `<m>` occupies when `CScript::operator<<(int64_t)` pushes it
+ * (`src/script/script.h:431` `push_int64`): 1..16 are the single-byte OP_N
+ * opcodes, anything larger is a minimally-serialized CScriptNum behind a
+ * length byte. m never exceeds 20, so the data is always one byte.
+ *
+ * This is why a threshold leaf's size depends on m and not only on n: a
+ * 20-of-20 leaf is 26384 bytes, one more than 1319*20 + 3 would suggest.
+ */
+function scriptNumPushBytes(v: number): number {
+  return v >= 1 && v <= 16 ? 1 : 2;
+}
+
+function assertThreshold(m: number, n: number): void {
+  if (!Number.isInteger(m) || !Number.isInteger(n)) {
+    throw new WalletError('BAD_PARAMS', 'Threshold m and n must be whole numbers.');
+  }
+  if (n < 1 || n > MAX_THRESHOLD_KEYS) {
+    throw new WalletError(
+      'BAD_PARAMS',
+      `A Dilithium threshold leaf holds 1 to ${MAX_THRESHOLD_KEYS} keys, not ${n}.`,
+    );
+  }
+  if (m < 1 || m > n) {
+    throw new WalletError('BAD_PARAMS', `Threshold ${m} is not between 1 and ${n}.`);
+  }
+}
+
+function assertDepth(depth: number): void {
+  if (!Number.isInteger(depth) || depth < 0) {
+    throw new WalletError('BAD_PARAMS', 'Merkle path depth must be a non-negative whole number.');
+  }
+  if (depth > MAX_MERKLE_PATH_DEPTH) {
+    throw new WalletError(
+      'BAD_PARAMS',
+      `A P2MR control block carries at most ${MAX_MERKLE_PATH_DEPTH} merkle nodes, not ${depth}.`,
+    );
+  }
+}
+
+/**
+ * How many slots the finalizer will actually fill.
+ *
+ * **m is a floor, not a bound.** The accumulator passes on `sum >= m`, so an
+ * m-of-n input can legitimately carry anything from m to n signatures on
+ * chain — and btq-core's finalizer emits *every* signature the PSBT holds
+ * rather than selecting m of them. `BuildDilithiumLeafWitness`
+ * (`src/script/dilithium_leaf.cpp:163-173`) checks `signed_count >= policy.m`
+ * and then pushes all n slots; contrast the OP_CHECKMULTISIGDILITHIUM branch
+ * just above it (`:152-156`), which does break at exactly m. So a 2-of-3 that
+ * all three cosigners signed finalizes as a three-signature witness, and that
+ * is the reference behaviour a wallet has to match — a finalizer that dropped
+ * the surplus would derive a different txid from the same PSBT than btq-core.
+ *
+ * A quote built on m is therefore a lower bound on the broadcast size: a
+ * 2-of-3 spending to two P2MR outputs is 689 vB with two signatures and
+ * 840 vB with three. Defaulting to m is right for a wallet that signs no more
+ * than it needs, but the count belongs to the finalizer, so it is a parameter
+ * rather than an assumption baked into the arithmetic.
+ */
+function assertSignatures(signatures: number, m: number, n: number): void {
+  if (!Number.isInteger(signatures) || signatures < m || signatures > n) {
+    throw new WalletError(
+      'BAD_PARAMS',
+      `A ${m}-of-${n} witness fills between ${m} and ${n} slots, not ${signatures}.`,
+    );
+  }
+}
+
+/**
+ * Serialized size of an m-of-n accumulator leaf script:
+ * OP_0 (1) + n keys + `<m>` + OP_GREATERTHANOREQUAL (1).
+ *
+ * Takes m as well as n — see `scriptNumPushBytes`.
+ */
+export function thresholdLeafScriptBytes(m: number, n: number): number {
+  assertThreshold(m, n);
+  return 1 + n * THRESHOLD_LEAF_KEY_BYTES + scriptNumPushBytes(m) + 1;
+}
+
+/**
+ * Serialized size of one input's witness field: a compact-size item count
+ * followed by every item behind its own compact-size length.
+ *
+ * Every witness size in this module goes through here — the single-key case
+ * and the threshold case alike — which is what makes the single-key check in
+ * `fee.test.ts` (this formula, fed the single-key leaf's own dimensions,
+ * reproducing P2MR_WITNESS_BYTES = 3746) an actual check on the arithmetic
+ * rather than a restatement of the constant.
+ */
+export function witnessFieldBytes(itemSizes: readonly number[]): number {
+  let bytes = compactSizeBytes(itemSizes.length);
+  for (const size of itemSizes) {
+    if (!Number.isInteger(size) || size < 0) {
+      throw new WalletError(
+        'BAD_PARAMS',
+        'A witness item size must be a non-negative whole number.',
+      );
+    }
+    bytes += compactSizeBytes(size) + size;
+  }
+  return bytes;
+}
+
+/** One input of an m-of-n threshold spend, at `depth` levels of merkle path. */
+export interface ThresholdInput {
+  m: number;
+  n: number;
+  /**
+   * Merkle path length to this leaf. 0 is a single-leaf tree, whose control
+   * block is the lone 1-byte leaf-version-and-parity byte
+   * (`src/script/interpreter.h:252-255`, control block = 1 + 32*depth).
+   *
+   * It defaults to 0 because every coin this wallet spends today lives in a
+   * single-leaf tree. That default is the cheap direction, so a multi-leaf
+   * coin — a hot leaf beside a timelocked recovery leaf, say — must pass its
+   * real depth: omitting it under-quotes by 32 witness bytes, 2 vB, per input,
+   * and under-quoting is the direction that fails to relay.
+   */
+  depth?: number;
+  /**
+   * Slots the finalizer will fill. Defaults to `m`; anything up to `n` is a
+   * valid spend and costs 2424 bytes more per extra signature. See
+   * `assertSignatures`.
+   */
+  signatures?: number;
+}
+
+/**
+ * Witness bytes for one m-of-n input: n signature slots (`signatures` filled,
+ * the rest empty), then the leaf script, then the control block.
+ *
+ * `signatures` defaults to m, which makes the result a *lower bound* rather
+ * than a ceiling — btq-core's finalizer emits every signature the PSBT holds,
+ * up to n. See `assertSignatures`. Pass the real count whenever it is known.
+ *
+ * Slot order is the finalizer's problem, not the sizer's — an empty slot is
+ * 1 byte wherever it sits.
+ */
+export function thresholdWitnessBytes(m: number, n: number, depth = 0, signatures = m): number {
+  assertThreshold(m, n);
+  assertDepth(depth);
+  assertSignatures(signatures, m, n);
+  const slots: number[] = [];
+  for (let i = 0; i < n; i++) slots.push(i < signatures ? DILITHIUM_SIG_BYTES : 0);
+  slots.push(thresholdLeafScriptBytes(m, n));
+  slots.push(1 + 32 * depth);
+  return witnessFieldBytes(slots);
+}
+
+/** Witness bytes for one input, reading a `ThresholdInput`'s optional fields. */
+function witnessBytesFor(input: ThresholdInput): number {
+  return thresholdWitnessBytes(input.m, input.n, input.depth ?? 0, input.signatures ?? input.m);
+}
+
+/**
+ * Validation-weight headroom for one input: the budget it is granted minus
+ * what its signatures spend. Negative means the interpreter aborts with
+ * SCRIPT_ERR_TAPSCRIPT_VALIDATION_WEIGHT however well the fee was estimated.
+ *
+ * It never binds in practice — each signature carries 2424 bytes of budget to
+ * pay 500 of cost, so even 20-of-20 keeps a ~7.5x margin — but a sizing module
+ * that silently assumed that would be asserting it rather than checking it.
+ */
+export function validationWeightSlack(input: ThresholdInput): number {
+  const signatures = input.signatures ?? input.m;
+  assertSignatures(signatures, input.m, input.n);
+  return (
+    witnessBytesFor(input) +
+    VALIDATION_WEIGHT_OFFSET -
+    signatures * VALIDATION_WEIGHT_PER_DILITHIUM_SIG
+  );
+}
+
+/**
+ * Weight of a signed transaction spending a heterogeneous set of threshold
+ * inputs. Unlike `estimateP2mrTxWeight`, which takes a count because every
+ * single-key input is the same size, this takes the inputs themselves: a real
+ * multisig wallet may hold 2-of-3 and 3-of-5 coins at once, and the two do not
+ * cost the same.
+ *
+ * `outputs` is a count of *P2MR* outputs at `P2MR_OUTPUT_SIZE` (43 bytes)
+ * each; a transaction paying some other output type is a different size, so
+ * every vB figure quoted for this function names the shape it assumes.
+ *
+ * An input whose `signatures` is left to default to `m` is priced at its
+ * minimum — see `assertSignatures`. The result is a lower bound on what a
+ * btq-core finalizer will actually broadcast.
+ */
+export function estimateMultisigTxWeight(
+  inputs: readonly ThresholdInput[],
+  outputs: number,
+): number {
+  if (!Number.isInteger(outputs) || outputs < 0) {
+    throw new WalletError('BAD_PARAMS', 'Output count must be a non-negative whole number.');
+  }
+  const stripped = strippedTxSize(inputs.length, outputs);
+  let witness = 0;
+  for (const input of inputs) witness += witnessBytesFor(input);
+  const total = stripped + 2 + witness; // marker/flag + witnesses
+  return transactionWeight(stripped, total);
+}
+
+/**
+ * The largest number of inputs of one witness size that still fits under
+ * MAX_STANDARD_TX_WEIGHT. The fixed overhead of a transaction is paid once,
+ * not once per input, so this is not `MAX_STANDARD_TX_WEIGHT` divided by a
+ * one-input transaction's weight — that mistake charges the ~1538 WU of
+ * overhead (at two P2MR outputs) 42 times over and answers 36 where the truth
+ * is 42.
+ *
+ * The formula validates itself: fed the single-key witness it must reproduce
+ * `MAX_P2MR_INPUTS`, a constant this module has shipped and relied on since
+ * before any of the threshold work. `fee.test.ts` asserts exactly that, which
+ * is worth more than pinning 42 as a magic number.
+ *
+ * No estimator here throws on a set that exceeds the ceiling — `estimateP2mrTxWeight`
+ * does not either. The ceiling is a number the caller enforces (`coinselect.ts`
+ * does, with TOO_MANY_INPUTS); this is where that number comes from.
+ */
+export function maxInputsForWitness(witnessBytes: number, outputs = 2): number {
+  const perInput = 41 * WITNESS_SCALE_FACTOR + witnessBytes;
+  const uniformWeight = (count: number): number => {
+    const stripped = strippedTxSize(count, outputs);
+    return transactionWeight(stripped, stripped + 2 + count * witnessBytes);
+  };
+  // Exact but for the compact-size step at 253 inputs, so the loops run at
+  // most a couple of times.
+  let count = Math.max(0, Math.floor((MAX_STANDARD_TX_WEIGHT - uniformWeight(0)) / perInput));
+  while (count > 0 && uniformWeight(count) > MAX_STANDARD_TX_WEIGHT) count--;
+  while (uniformWeight(count + 1) <= MAX_STANDARD_TX_WEIGHT) count++;
+  return count;
+}
+
+/**
+ * The multisig analogue of `MAX_P2MR_INPUTS`, which cannot be a constant
+ * because the answer depends on the shape twice over — on the input's m-of-n,
+ * and on `outputs`. At two P2MR outputs: 42 for a 2-of-3, 48 for a 2-of-2,
+ * 27 for a 3-of-5, 5 for a 20-of-20.
+ */
+export function maxStandardThresholdInputs(input: ThresholdInput, outputs = 2): number {
+  return maxInputsForWitness(witnessBytesFor(input), outputs);
+}
+
+/** `feeForP2mrTx` for a threshold input set. */
+export function feeForMultisigTx(
+  inputs: readonly ThresholdInput[],
+  outputs: number,
+  satPerKvB = MIN_RELAY_SAT_PER_KVB,
+): bigint {
+  return feeForWeight(estimateMultisigTxWeight(inputs, outputs), satPerKvB);
 }
