@@ -5,6 +5,13 @@ import type { BroadcastVia } from './errors.js';
 /** HD accounts this wallet will derive. Caps a storage-wedge of huge indices. */
 export const MAX_ACCOUNTS = 20;
 export const ACCOUNT_NAME_MAX = 32;
+/**
+ * Rows the activity log keeps. The writer has always trimmed to this; the
+ * *reader* enforces it too, because the writer is not the only thing that can
+ * put rows in extension storage, and a reader that walks every row it is handed
+ * is a wedge anybody can widen (see `parseMeta` on why storage is hostile).
+ */
+export const MAX_ACTIVITY = 50;
 
 /**
  * One HD account: path prefix m/k'/{0,1}'/n'. Index 0 is btq-core's legacy
@@ -95,6 +102,15 @@ export interface ActivityItem {
   at: number;
   /** HD account that produced this send. Missing on pre-account rows = 0. */
   accountIndex?: number;
+  /**
+   * The internal (change) index this send paid change to; absent when it had no
+   * change output. It is what lets a full rescan tell "the chain has not
+   * indexed our change yet" apart from "this cursor is simply wrong", and it is
+   * only ever *believed* when `hex` pays the address the seed derives at that
+   * index — see `Keyring.inFlightChangeNext`. A number on its own proves
+   * nothing: whatever can write this row can write this number.
+   */
+  changeIndex?: number;
 }
 
 export interface WalletStorage {
@@ -394,6 +410,7 @@ export function parseActivity(v: unknown): ActivityItem[] {
   if (!Array.isArray(v)) return [];
   const out: ActivityItem[] = [];
   for (const raw of v) {
+    if (out.length >= MAX_ACTIVITY) break;
     if (!isRecord(raw)) continue;
     if (typeof raw.txid !== 'string' || !/^[0-9a-f]{64}$/i.test(raw.txid)) continue;
     if (typeof raw.status !== 'string' || !ACTIVITY_STATUS.has(raw.status)) continue;
@@ -422,6 +439,11 @@ export function parseActivity(v: unknown): ActivityItem[] {
     } else {
       item.accountIndex = 0;
     }
+    // Bounded like every other counter here — but the bound is not what makes
+    // it safe to act on. `inFlightChangeNext` checks the claim against the
+    // row's own signed bytes before it lets the index hold a cursor up.
+    const changeIndex = counter(raw.changeIndex, -1);
+    if (changeIndex >= 0) item.changeIndex = changeIndex;
     out.push(item);
   }
   return out;

@@ -962,6 +962,11 @@ describe('a scan never hands the same change address out twice', () => {
     expect(changeAddressOf(second.hex)).not.toBe(changeAddressOf(first.hex));
   });
 
+  /** The stored change cursor of account 0 — the number the whole walk is sized by. */
+  async function internalNext(store: MemoryWalletStorage): Promise<number | undefined> {
+    return (await store.loadMeta())?.accounts.find((a) => a.index === 0)?.internalNext;
+  }
+
   it('a full rescan still walks a cursor down when the chain really disagrees', async () => {
     // The other half of the contract, and the reason `full` exists: a receive
     // cursor that ran ahead of the chain — a bad explorer answer, a reorg — has
@@ -977,5 +982,80 @@ describe('a scan never hands the same change address out twice', () => {
 
     await k.scan(blindLookup([]), undefined, null, { full: true });
     expect((await store.loadMeta())?.accounts.find((a) => a.index === 0)?.externalNext).toBe(0);
+  });
+
+  it('a full rescan walks the change cursor down too, not only the receive one', async () => {
+    // The same half of the contract, on the other chain — and the half that
+    // went missing when the concurrent-send race was closed. "Rescan all
+    // addresses" that repairs one cursor and not the other does not mean what
+    // its label says, and the chain it skips is the expensive one: `eachAddress`
+    // walks 0..internalNext *inclusive* on every `gatherUtxos`, so a change
+    // cursor stranded at 300 is 302 explorer lookups and 302 ML-DSA derivations
+    // behind every balance, every history and every send, for good.
+    const store = new MemoryWalletStorage();
+    const k = ring(store);
+    await k.importMnemonic(MNEMONIC, PASSWORD);
+    const used = [0, 1, 2].map((i) => k.addressAt('internal', i).address);
+
+    // An explorer that says our change addresses are used drives the cursor up.
+    await k.scan(blindLookup(used));
+    expect(await internalNext(store)).toBe(3);
+
+    // An honest one, and nothing of ours in flight, has to be able to bring it
+    // back. There is no local knowledge to protect here: no send is pending.
+    await k.scan(blindLookup([]), undefined, null, { full: true });
+    expect(await internalNext(store)).toBe(0);
+  });
+
+  it('a change cursor a hostile storage write left behind is repaired, not permanent', async () => {
+    // `parseMeta` names this threat in its own words: anything that can write
+    // extension storage can set a huge cursor and make the wallet derive
+    // thousands of keys. `counter()` bounds it at 1_000_000 — which is the
+    // number of explorer lookups and ML-DSA derivations that would then sit in
+    // front of every balance read. A wallet the user cannot repair from the
+    // Settings button labelled "Rescan all addresses" is bricked.
+    const store = new MemoryWalletStorage();
+    const k = ring(store);
+    await k.importMnemonic(MNEMONIC, PASSWORD);
+
+    const poisoned = (await store.loadMeta())!;
+    poisoned.accounts.find((a) => a.index === 0)!.internalNext = 1_000_000;
+    poisoned.internalNext = 1_000_000;
+    await store.saveMeta(poisoned);
+
+    await k.scan(blindLookup([]), undefined, null, { full: true });
+    expect(await internalNext(store)).toBe(0);
+  });
+
+  it('a forged activity row cannot pin the change cursor high', async () => {
+    // The floor is what lets a rescan lower this cursor safely, so the floor is
+    // the next thing to attack: write the cursor *and* a row claiming a change
+    // index that would hold it there. The row carries a real transaction of
+    // ours — the attacker can copy one out of storage — but its outputs pay the
+    // index it actually paid, not the one the row now names, and that is the
+    // check. Forging the address instead would take the seed.
+    const store = new MemoryWalletStorage();
+    const k = ring(store);
+    await k.importMnemonic(MNEMONIC, PASSWORD);
+    const a0 = (await k.receiveAddress()).address;
+    const first = await send(k, twoCoins(a0));
+    expect(await internalNext(store)).toBe(1);
+
+    const poisoned = (await store.loadMeta())!;
+    poisoned.accounts.find((a) => a.index === 0)!.internalNext = 500;
+    poisoned.internalNext = 500;
+    await store.saveMeta(poisoned);
+    const rows = await store.loadActivity();
+    expect(rows[0]?.changeIndex).toBe(0);
+    await store.saveActivity([...rows, { ...rows[0]!, txid: 'cd'.repeat(32), changeIndex: 499 }]);
+
+    await k.scan(blindLookup([a0]), undefined, null, { full: true });
+
+    // Back to the floor the real send proved, not to the one the forgery
+    // claimed — and the genuine in-flight change is still protected.
+    expect(await internalNext(store)).toBe(1);
+    const second = await send(k, twoCoins(a0));
+    expect(changeAddressOf(second.hex)).not.toBe(changeAddressOf(first.hex));
+    expect(changeAddressOf(second.hex)).toBe(k.addressAt('internal', 1).address);
   });
 });

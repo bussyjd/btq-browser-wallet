@@ -50,6 +50,7 @@ import { addressFromHdSeed, type DerivedAddress } from './derive.js';
 import { scanChain, type AddressLookup, type ChainScan } from './gap.js';
 import {
   MAX_ACCOUNTS,
+  MAX_ACTIVITY,
   ACCOUNT_NAME_MAX,
   activeRecord,
   emptyAccount,
@@ -68,7 +69,7 @@ import type { HistoryItem } from '../explorer/history.js';
 import { planSend, previewFromSigned, signPlan, type SendPlan, type SendPreview } from '../tx/builder.js';
 import { maxSpendable, outpointKey, type OwnedUtxo } from '../tx/coinselect.js';
 import { assertFeeRate, MIN_RELAY_SAT_PER_KVB } from '../tx/fee.js';
-import { parseTx } from '../tx/parse.js';
+import { addressForOutputScript, parseTx } from '../tx/parse.js';
 import {
   canonicalOrigin,
   grantSite,
@@ -1033,6 +1034,48 @@ export class Keyring {
     return reserved;
   }
 
+  /**
+   * One past the highest change index this wallet has paid that the chain
+   * cannot vouch for yet — the floor a full rescan may not take `internalNext`
+   * below. Zero when nothing of ours is in flight, which is the ordinary case,
+   * and that zero is what makes "Rescan all addresses" mean what it says.
+   *
+   * **A row has to prove its claim.** `changeIndex` is a number in extension
+   * storage, and whatever can write there could write a large one and pin the
+   * cursor high for good — the exact wedge this floor exists to keep
+   * repairable. So an index only counts once the row's own signed bytes are
+   * seen to pay the address *this seed* derives at it, which nobody without the
+   * seed can arrange. A forged row names an address we do not derive, proves
+   * nothing, and holds nothing up.
+   *
+   * Highest claim first, stopping at the first that proves itself: only the
+   * highest proven index can set the floor, so nothing under it is worth a
+   * derivation. The walk is bounded by `MAX_ACTIVITY`, which `parseActivity`
+   * enforces on the way in.
+   */
+  private async inFlightChangeNext(account: number): Promise<number> {
+    const rows = (await this.storage.loadActivity()).filter(
+      (a) =>
+        (a.accountIndex ?? 0) === account &&
+        // Confirmed is the chain's own answer, which the pass being floored has
+        // just read from the explorer itself. Nothing left for us to add.
+        a.status !== 'confirmed' &&
+        a.changeIndex !== undefined &&
+        a.hex !== undefined,
+    );
+    const claims = [...new Set(rows.map((a) => a.changeIndex as number))].sort((x, y) => y - x);
+    for (const index of claims.slice(0, MAX_ACTIVITY)) {
+      const address = this.addressAt('internal', index, account).address;
+      const proved = rows.some(
+        (a) =>
+          a.changeIndex === index &&
+          outputAddressesOfSignedHex(a.hex as string, this.network).includes(address),
+      );
+      if (proved) return index + 1;
+    }
+    return 0;
+  }
+
   /** Balance of one account — the active one unless `account` names another. */
   async balances(fetchUtxos: FetchUtxos, account?: number): Promise<WalletBalances> {
     const coins = await this.gatherUtxos(fetchUtxos, account);
@@ -1248,8 +1291,12 @@ export class Keyring {
       at: opts.now ?? this.now(),
       accountIndex: plan.account,
     };
+    // Only when there is one. A send with no change consumed no internal index,
+    // and a row claiming one would be claiming something its own bytes cannot
+    // back up — see `inFlightChangeNext`, which would refuse it.
+    if (plan.change > 0n) item.changeIndex = plan.changeIndex;
     const prev = await this.storage.loadActivity();
-    await this.storage.saveActivity([item, ...prev].slice(0, 50));
+    await this.storage.saveActivity([item, ...prev].slice(0, MAX_ACTIVITY));
     if (plan.change > 0n) {
       await this.updateMeta((meta) => {
         const rec = meta.accounts.find((a) => a.index === plan.account);
@@ -1595,9 +1642,16 @@ export class Keyring {
 
     this.touch();
     const rec = meta.accounts.find((a) => a.index === activeIndex);
+    // The cursors the wallet is actually deriving from, not this pass's raw
+    // reading of them: `commitScan` floors `internalNext` at our own in-flight
+    // change, so the walk's own number can be lower than the one every other
+    // caller sees. `wallet.scan` reports these to the popup, and a cursor
+    // nothing in the wallet uses is not a number worth reporting.
+    const reported = (chain: Chain, pass: ChainScan | null, next: number): ChainScan =>
+      pass ? { ...pass, nextIndex: next } : emptyChainScan(chain, next);
     return {
-      external: external ?? emptyChainScan('external', rec?.externalNext ?? 0),
-      internal: internal ?? emptyChainScan('internal', rec?.internalNext ?? 0),
+      external: reported('external', external, rec?.externalNext ?? 0),
+      internal: reported('internal', internal, rec?.internalNext ?? 0),
       usedExternal: rec?.usedExternal ?? 0,
       usedInternal: rec?.usedInternal ?? 0,
       totalBalanceSats,
@@ -1626,54 +1680,82 @@ export class Keyring {
     balances: Map<number, ScanBalance>,
     top: { tipHeight?: number | null; lastScanAt?: number },
   ): Promise<WalletMeta> {
-    return this.updateMeta((meta) => {
+    return this.withMetaLock(async () => {
+      // Read on this side of the lock, and only for a pass that can lower a
+      // cursor. `confirmSend` writes its activity row *before* it takes this
+      // lock to move the cursor, so both orders come out right: either it had
+      // the lock first and this read sees its row, or this pass had the lock
+      // first and its bump lands afterwards, on top of whatever this pass
+      // wrote. Reading the rows outside the lock is the one order that loses —
+      // the row written after the read, the bump before the write.
+      const floors = new Map<number, number>();
       for (const [index, c] of cursors) {
-        const rec = meta.accounts.find((a) => a.index === index);
-        if (!rec) continue;
-        // A send that landed while the lookups were in flight has already moved
-        // the change cursor past anything this pass saw; an incremental scan
-        // must never walk a cursor backwards. A full rescan is the one pass
-        // that is authoritative about where the chain really stops.
-        const keep = (stored: number, scanned: number) => (c.full ? scanned : Math.max(stored, scanned));
-        rec.externalNext = keep(rec.externalNext, c.externalNext);
-        rec.usedExternal = keep(rec.usedExternal, c.usedExternal);
-        rec.usedInternal = keep(rec.usedInternal, c.usedInternal);
-        rec.scannedExternal = keep(rec.scannedExternal, c.scannedExternal);
-        rec.scannedInternal = keep(rec.scannedInternal, c.scannedInternal);
-        // …with one exception, and it is the only cursor this wallet advances
-        // by itself. `confirmSend` moves `internalNext` past the change address
-        // it has just paid (`:confirmSend`, under the same meta lock), so that
-        // cursor runs ahead of anything an explorer can confirm: the change
-        // output is unindexed while the transaction sits in a mempool, and if
-        // the broadcast failed it is not on the chain at all. A walk therefore
-        // reads that address as unused and reports a *lower* stop — which is
-        // not "the chain says lower", it is "I did not look recently enough to
-        // know". Taking it verbatim sent the next send's change straight back
-        // to the address the previous one already paid: two change outputs of
-        // two transactions on one address, publicly and permanently linking
-        // them — a worse version of the linkage the scan scoping exists to
-        // prevent. So `internalNext` only ever rises, on a full pass as much as
-        // an incremental one. That costs nothing if it is somehow too high:
-        // `eachAddress` walks 0..internalNext *inclusive*, so no coin is hidden
-        // and the next change simply lands on a fresh index. Being too low has
-        // no such floor.
-        rec.internalNext = Math.max(rec.internalNext, c.internalNext);
-        // The cached address is the address *at* the cursor. If the merge kept
-        // a cursor this pass never reached, the address it derived belongs to a
-        // different index — leave the stored one, which `receiveAddress` will
-        // re-derive under the same lock on its next call.
-        if (rec.externalNext === c.externalNext) rec.address = c.address;
+        if (c.full) floors.set(index, await this.inFlightChangeNext(index));
       }
-      for (const [index, b] of balances) {
-        const rec = meta.accounts.find((a) => a.index === index);
-        if (!rec) continue;
-        rec.lastBalanceSats = b.lastBalanceSats;
-        rec.confirmedBalanceSats = b.confirmedBalanceSats;
-        rec.balanceAt = b.balanceAt;
-      }
-      if (top.tipHeight != null) meta.tipHeight = top.tipHeight;
-      if (top.lastScanAt != null) meta.lastScanAt = top.lastScanAt;
-      return meta;
+      return this.applyMeta((meta) => {
+        for (const [index, c] of cursors) {
+          const rec = meta.accounts.find((a) => a.index === index);
+          if (!rec) continue;
+          // A send that landed while the lookups were in flight has already moved
+          // the change cursor past anything this pass saw; an incremental scan
+          // must never walk a cursor backwards. A full rescan is the one pass
+          // that is authoritative about where the chain really stops.
+          const keep = (stored: number, scanned: number) => (c.full ? scanned : Math.max(stored, scanned));
+          rec.externalNext = keep(rec.externalNext, c.externalNext);
+          rec.usedExternal = keep(rec.usedExternal, c.usedExternal);
+          rec.usedInternal = keep(rec.usedInternal, c.usedInternal);
+          rec.scannedExternal = keep(rec.scannedExternal, c.scannedExternal);
+          rec.scannedInternal = keep(rec.scannedInternal, c.scannedInternal);
+          // …and `internalNext` is the one cursor this wallet advances by itself,
+          // so "the chain says lower" gets a second look here. `confirmSend`
+          // moves it past the change address it has just paid, ahead of anything
+          // an explorer can confirm: that output is unindexed while the
+          // transaction sits in a mempool, and if the broadcast failed it is not
+          // on the chain at all. A walk therefore reads the address as unused and
+          // reports a *lower* stop — which is not "the chain says lower", it is
+          // "I did not look recently enough to know". Taking that verbatim sent
+          // the next send's change straight back to the address the previous one
+          // already paid: two change outputs of two transactions on one address,
+          // publicly and permanently linking them.
+          //
+          // Refusing to lower it at all was the wrong shape of fix, because a
+          // cursor that is too high is not free. `eachAddress` walks
+          // 0..internalNext *inclusive*: at 300 that is 302 explorer lookups and
+          // 302 ML-DSA derivations on every `gatherUtxos` — so on every balance,
+          // every history and every send — and it hands the explorer 302
+          // addresses instead of the handful in use. An explorer that answers
+          // "used" too freely drives it towards GAP_MAX_INDEX, and anything that
+          // can write extension storage sets it outright (see `parseMeta`), so a
+          // cursor that only ever rises is a wedge either of them can leave in
+          // for good. "Rescan all addresses" has to be able to pull it back out.
+          //
+          // So a full pass is authoritative here too, floored by the one thing
+          // the explorer cannot know and we can: the change indices of our own
+          // sends it has not confirmed yet. That floor is *proved* against those
+          // rows' signed bytes rather than believed (`inFlightChangeNext`), so the
+          // storage writer who can set the cursor cannot also forge the thing
+          // that would pin it. With nothing in flight the floor is 0, and the
+          // rescan says exactly what the chain says.
+          rec.internalNext = c.full
+            ? Math.max(c.internalNext, floors.get(index) ?? 0)
+            : Math.max(rec.internalNext, c.internalNext);
+          // The cached address is the address *at* the cursor. If the merge kept
+          // a cursor this pass never reached, the address it derived belongs to a
+          // different index — leave the stored one, which `receiveAddress` will
+          // re-derive under the same lock on its next call.
+          if (rec.externalNext === c.externalNext) rec.address = c.address;
+        }
+        for (const [index, b] of balances) {
+          const rec = meta.accounts.find((a) => a.index === index);
+          if (!rec) continue;
+          rec.lastBalanceSats = b.lastBalanceSats;
+          rec.confirmedBalanceSats = b.confirmedBalanceSats;
+          rec.balanceAt = b.balanceAt;
+        }
+        if (top.tipHeight != null) meta.tipHeight = top.tipHeight;
+        if (top.lastScanAt != null) meta.lastScanAt = top.lastScanAt;
+        return meta;
+      });
     });
   }
 
@@ -1752,14 +1834,23 @@ export class Keyring {
    * impossible to await an explorer inside it.
    */
   private async updateMeta<T>(edit: (meta: WalletMeta) => T): Promise<T> {
-    return this.withMetaLock(async () => {
-      const meta = await this.walletMeta();
-      const value = edit(meta);
-      mirrorActive(meta);
-      this.activeIndex = meta.activeAccount;
-      await this.storage.saveMeta(meta);
-      return value;
-    });
+    return this.withMetaLock(() => this.applyMeta(edit));
+  }
+
+  /**
+   * The read-modify-write itself, **with the meta lock already held**. Split out
+   * for the one caller that has to read something of its own inside the same
+   * critical section — `commitScan`, whose floor has to be read on the same side
+   * of the lock as the cursor it floors. Nothing that has not taken the lock may
+   * call this.
+   */
+  private async applyMeta<T>(edit: (meta: WalletMeta) => T): Promise<T> {
+    const meta = await this.walletMeta();
+    const value = edit(meta);
+    mirrorActive(meta);
+    this.activeIndex = meta.activeAccount;
+    await this.storage.saveMeta(meta);
+    return value;
   }
 
   /**
@@ -1900,6 +1991,22 @@ function emptyChainScan(chain: Chain, nextIndex: number): ChainScan {
 export function outpointsOfSignedHex(hex: string): string[] {
   try {
     return parseTx(hex).inputs.map((i) => outpointKey(i));
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Addresses a signed transaction pays, so a stored row can be checked against
+ * its own bytes instead of taken at its word. Bytes that do not parse, and
+ * outputs that are not a P2MR program, name no address at all — which is a
+ * refusal to vouch for the row, never a match.
+ */
+export function outputAddressesOfSignedHex(hex: string, network: BtqNetwork): string[] {
+  try {
+    return parseTx(hex)
+      .outputs.map((o) => addressForOutputScript(o.script, network))
+      .filter((a): a is string => a !== null);
   } catch {
     return [];
   }
