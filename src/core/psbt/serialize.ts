@@ -96,26 +96,37 @@ function rankOf(orders: Map<number, number>, fallback: number, key: Uint8Array):
 }
 
 /**
- * Two field types whose serialization order btq-core derives from something
- * other than the wire key: `PSBT_IN_PARTIAL_SIG` is keyed by
- * `Hash160(pubkey)`, and `PSBT_IN_TAP_LEAF_SCRIPT` is grouped by leaf script
- * while its wire key holds the control block. We model neither — a Dilithium
- * P2MR input has no ECDSA partial signatures and no taproot leaves — so rather
- * than emit a plausible-looking order that btq-core would not have written, we
- * refuse. One entry of either type is unambiguous and passes.
+ * Field types whose serialization order btq-core derives from something other
+ * than the wire key, and which we carry verbatim instead of modelling:
+ *
+ *   0x02 input   `PSBT_IN_PARTIAL_SIG`, keyed by `Hash160(pubkey)`;
+ *   0x15 input   `PSBT_IN_TAP_LEAF_SCRIPT`, grouped by leaf script while its
+ *                wire key holds the control block;
+ *   0x01 global  `PSBT_GLOBAL_XPUB`, whose `m_xpubs` map is keyed by the
+ *                *derivation path* while the wire key holds the xpub
+ *                (src/psbt.h:1101-1110).
+ *
+ * None can occur in a BTQ Dilithium PSBT — there are no ECDSA partial
+ * signatures, no taproot leaves, and no xpubs at all, because Dilithium admits
+ * no BIP32 public derivation. So rather than emit a plausible-looking order
+ * btq-core would not have written, we refuse. A single entry of any of them is
+ * unambiguous and passes.
  */
-function checkUnorderableGroups(other: PsbtKeyValue[]): void {
-  for (const type of [PSBT_IN_PARTIAL_SIG, PSBT_IN_TAP_LEAF_SCRIPT]) {
-    if (other.filter((e) => keyType(e.key) === type).length > 1) {
+function checkUnorderableGroups(entries: PsbtKeyValue[], types: readonly number[]): void {
+  for (const type of types) {
+    if (entries.filter((e) => keyType(e.key) === type).length > 1) {
       throw psbtError(
-        `cannot re-serialise an input holding several 0x${type.toString(16).padStart(2, '0')} ` +
+        `cannot re-serialise a map holding several 0x${type.toString(16).padStart(2, '0')} ` +
         'fields: btq-core orders them by something other than their wire key');
     }
   }
 }
 
+const UNORDERABLE_INPUT_TYPES = [PSBT_IN_PARTIAL_SIG, PSBT_IN_TAP_LEAF_SCRIPT] as const;
+const UNORDERABLE_GLOBAL_TYPES = [PSBT_GLOBAL_XPUB] as const;
+
 function encodeInput(input: PsbtInput): Uint8Array {
-  checkUnorderableGroups(input.other);
+  checkUnorderableGroups(input.other, UNORDERABLE_INPUT_TYPES);
   const finalized = (input.finalScriptSig?.length ?? 0) > 0 || (input.finalScriptWitness?.length ?? 0) > 0;
   const entries: RankedEntry[] = [];
   const add = (type: number, key: Uint8Array, value: Uint8Array) => {
@@ -196,6 +207,7 @@ function encodeOutput(output: PsbtOutput): Uint8Array {
 
 /** Encode a PSBT to its wire bytes. */
 export function serializePsbt(psbt: Psbt): Uint8Array {
+  checkUnorderableGroups(psbt.globals, UNORDERABLE_GLOBAL_TYPES);
   const globals: RankedEntry[] = [
     { rank: 0, key: new Uint8Array([PSBT_GLOBAL_UNSIGNED_TX]), value: psbt.unsignedTxBytes },
     ...psbt.globals.map((e) => ({ ...e, rank: rankOf(GLOBAL_ORDER, GLOBAL_UNKNOWN_ORDER, e.key) })),

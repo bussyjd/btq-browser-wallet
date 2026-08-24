@@ -26,6 +26,7 @@ import { bytesEqual } from '../util/bytes.js';
 import { bytesToHex } from '../util/hex.js';
 import { compareControlBlocks, compareDilithiumSigs, compareLeaves, hash160 } from './order.js';
 import { psbtError } from './parse.js';
+import { validateP2MRDilithiumPsbt } from './validate.js';
 import { MAX_DILITHIUM_PARTIAL_SIGS_PER_INPUT, type DilithiumPartialSignature, type P2MRLeafScript, type Psbt, type PsbtInput, type PsbtKeyValue, type PsbtOutput } from './types.js';
 
 /** The identity a Dilithium signature is keyed by on the wire and in the map. */
@@ -50,7 +51,33 @@ function unionByKey(into: PsbtKeyValue[], from: PsbtKeyValue[]): PsbtKeyValue[] 
   return out;
 }
 
-function mergeInput(a: PsbtInput, b: PsbtInput): PsbtInput {
+/**
+ * btq-core's single-valued fields fill in when *empty*, not when absent
+ * (src/psbt.cpp:242-251 tests `.empty()` / `.IsNull()`). A zero-length final
+ * scriptSig, a zero-item witness stack or an all-zero merkle root on this side
+ * would otherwise shadow the other copy's real value.
+ */
+function present(value: Uint8Array | Uint8Array[] | undefined): boolean {
+  if (value === undefined) return false;
+  if (Array.isArray(value)) return value.length > 0;
+  return value.some((b) => b !== 0);
+}
+
+function fillIfEmpty<T extends Uint8Array | Uint8Array[]>(a: T | undefined, b: T | undefined): T | undefined {
+  return present(a) ? a : (present(b) ? b : a ?? b);
+}
+
+function mergeInput(a: PsbtInput, b: PsbtInput, index: number): PsbtInput {
+  // The BIP341 sighash commits to every spent output's amount and script, so
+  // two copies that disagree about a witness UTXO were signed over different
+  // messages. Keeping this side's and the other side's signatures would produce
+  // exactly the object our own decoder refuses.
+  if (a.witnessUtxo && b.witnessUtxo &&
+      (a.witnessUtxo.value !== b.witnessUtxo.value || !bytesEqual(a.witnessUtxo.script, b.witnessUtxo.script))) {
+    throw psbtError(`input ${index}: the copies disagree about the output being spent, ` +
+      'so their signatures commit to different transactions');
+  }
+
   const leaves = new Map<string, P2MRLeafScript>();
   for (const leaf of a.p2mrLeaves) {
     leaves.set(leafId(leaf), { ...leaf, controlBlocks: [...leaf.controlBlocks] });
@@ -83,10 +110,10 @@ function mergeInput(a: PsbtInput, b: PsbtInput): PsbtInput {
   return {
     witnessUtxo: a.witnessUtxo ?? b.witnessUtxo,
     sighashType: a.sighashType ?? b.sighashType,
-    finalScriptSig: a.finalScriptSig ?? b.finalScriptSig,
-    finalScriptWitness: a.finalScriptWitness ?? b.finalScriptWitness,
+    finalScriptSig: fillIfEmpty(a.finalScriptSig, b.finalScriptSig),
+    finalScriptWitness: fillIfEmpty(a.finalScriptWitness, b.finalScriptWitness),
     p2mrLeaves: [...leaves.values()].sort(compareLeaves),
-    p2mrMerkleRoot: a.p2mrMerkleRoot ?? b.p2mrMerkleRoot,
+    p2mrMerkleRoot: fillIfEmpty(a.p2mrMerkleRoot, b.p2mrMerkleRoot),
     dilithiumSigs: [...sigs.values()].sort(compareDilithiumSigs),
     other: unionByKey(a.other, b.other),
   };
@@ -116,9 +143,16 @@ export function combinePsbts(psbts: readonly Psbt[]): Psbt {
       tx: merged.tx,
       unsignedTxBytes: merged.unsignedTxBytes,
       globals: unionByKey(merged.globals, next.globals),
-      inputs: merged.inputs.map((input, i) => mergeInput(input, next.inputs[i]!)),
+      inputs: merged.inputs.map((input, i) => mergeInput(input, next.inputs[i]!, i)),
       outputs: merged.outputs.map((output, i) => mergeOutput(output, next.outputs[i]!)),
     };
   }
+  // The merged object has to clear the same bar a decoded one does. Merging is
+  // the one step that mixes material from a party we did not check ourselves —
+  // every signature here came out of somebody else's copy — so leaving the
+  // result unvalidated would be the single seam in the module where a signature
+  // reaches a caller unverified, and `finalizePsbt` would happily report a
+  // "complete" transaction built on it.
+  if (psbts.length > 1) validateP2MRDilithiumPsbt(merged);
   return merged;
 }

@@ -25,7 +25,6 @@
  */
 import { PUBLIC_KEY_BYTES, SEED_BYTES, publicKeyFromSeed, signTransactionHash } from '../crypto/mldsa.js';
 import { bytesToHex } from '../util/hex.js';
-import { commitsToProgram } from '../script/p2mr.js';
 import { p2mrSighash } from '../tx/sighash.js';
 import { findPolicyKeyIndex } from './leaf.js';
 import { compareDilithiumSigs, hash160 } from './order.js';
@@ -53,6 +52,15 @@ export function signPsbt(psbt: Psbt, seeds: readonly Uint8Array[]): SignPsbtResu
   }
   const spent = spentOutputs(psbt);
   if (!spent) throw psbtError('cannot sign without the amount and script of every input');
+  // Run the full decode-time validation again rather than a lighter re-check of
+  // our own. `parsePsbt` already did this for a PSBT that arrived over the wire,
+  // but a caller can hand us a `Psbt` assembled some other way — out of
+  // `combinePsbts`, or built field by field — and the rule that no key is
+  // applied to a leaf which has not proved it commits to its own witness
+  // program has to hold at the moment the key is used, not only at the moment
+  // the bytes were read. It also re-verifies the signatures already present, so
+  // we never add ours to a set we have not checked.
+  validateP2MRDilithiumPsbt(psbt);
 
   let added = 0;
   const inputs = psbt.inputs.map((input, index) => {
@@ -66,13 +74,6 @@ export function signPsbt(psbt: Psbt, seeds: readonly Uint8Array[]): SignPsbtResu
     if (!info.policy || !info.leaf || !info.leafHash) {
       throw psbtError(`input ${index} does not name exactly one leaf script this wallet recognises`);
     }
-    // Re-checked here rather than leaned on from parse time: this is the one
-    // rule that stands between a cosigner and a signature over someone else's
-    // script, so it is checked at the moment the key is about to be used.
-    if (!info.leaf.controlBlocks.some((c) => commitsToProgram(info.leaf!.script, c, program))) {
-      throw psbtError(`input ${index}: the leaf script does not commit to the witness program`);
-    }
-
     const sighash = p2mrSighash(psbt.tx, index, spent, info.leafHash);
     const present = new Set(input.dilithiumSigs.map(
       (s) => `${bytesToHex(hash160(s.pubkey))}:${bytesToHex(s.leafHash)}`));

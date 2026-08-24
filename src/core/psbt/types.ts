@@ -89,6 +89,10 @@ export const P2MR_CONTROL_MAX_SIZE =
 export const TAPROOT_LEAF_MASK = 0xfe;
 /** The witness program of a P2MR output is 32 bytes (WITNESS_V2_P2MR_SIZE). */
 export const WITNESS_V2_P2MR_SIZE = 32;
+/** btq-core src/psbt.h:77 — the only PSBT version this format defines. */
+export const PSBT_HIGHEST_VERSION = 0;
+/** btq-core src/pubkey.h:20 — a global xpub key is this plus its one type byte. */
+export const BIP32_EXTKEY_WITH_VERSION_SIZE = 78;
 
 // -------------------------------------------------------------- value shapes
 
@@ -160,6 +164,14 @@ export interface Psbt {
    */
   unsignedTxBytes: Uint8Array;
   globals: PsbtKeyValue[];
+  /**
+   * The declared PSBT version, when one was present. Only 0 is accepted, and
+   * btq-core writes the field only when the version is above 0
+   * (src/psbt.h:1112), so this is parsed, checked, and then never emitted —
+   * the one documented place a round trip through this module drops a field,
+   * and it drops it exactly where the node does.
+   */
+  version?: number;
   inputs: PsbtInput[];
   outputs: PsbtOutput[];
 }

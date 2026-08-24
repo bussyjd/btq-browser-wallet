@@ -232,6 +232,64 @@ def build(out_path, framework_argv):
                 "finalizedWitness": self.witness_of(extracted["hex"]),
             }
 
+        def two_input_case(self):
+            """One PSBT spending two UTXOs of the same 2-of-3 address.
+
+            Every other case here has a single input, which leaves the input
+            index threaded into the BIP341 sighash, the ordering of the spent
+            outputs it commits to, and "is *every* input finalized?" all
+            exercised only at index 0 against a one-element list. Two inputs
+            costs one more funding transaction and closes all three.
+            """
+            node = self.nodes[0]
+            indices = [0, 1, 2]
+            pubkeys = [self.keys[i].pubkey.hex() for i in indices]
+            reg = self.wallets[0].createdilithiummultisig(2, pubkeys, "two-input")
+            first = self.fund(self.wallets[0], reg["address"], Decimal("11"))
+            second = self.fund(self.wallets[0], reg["address"], Decimal("12"))
+
+            unsigned = self.wallets[0].walletcreatefundedpsbt(
+                [{"txid": u["txid"], "vout": u["vout"]} for u in (first, second)],
+                [{self.destination: Decimal("20")}],
+            )["psbt"]
+            assert_equal(len(node.decodepsbt(unsigned)["inputs"]), 2)
+
+            singly = []
+            for slot, i in enumerate([0, 2]):
+                processed = self.wallets[i].walletprocesspsbt(unsigned)
+                assert_equal(processed["complete"], False)
+                singly.append({"keyIndex": indices.index(i), "psbt": processed["psbt"]})
+
+            combined = node.combinepsbt([s["psbt"] for s in singly])
+            finalized = node.finalizepsbt(combined, False)
+            extracted = node.finalizepsbt(combined, True)
+            assert_equal(extracted["complete"], True)
+            assert_equal(node.testmempoolaccept([extracted["hex"]])[0]["allowed"], True)
+
+            decoded = node.decoderawtransaction(extracted["hex"])
+            case = {
+                "name": "2-of-3-two-inputs",
+                "m": 2,
+                "n": 3,
+                "keyIndexes": indices,
+                "signerKeyIndexes": [0, 2],
+                "address": reg["address"],
+                "leafScript": reg["leaf_script"],
+                "merkleRoot": reg["merkle_root"],
+                "pubkeys": pubkeys,
+                "prevouts": [self.prevout_of(u) for u in (first, second)],
+                "unsignedPsbt": unsigned,
+                "singlySignedPsbts": singly,
+                "combinedPsbt": combined,
+                "finalizedPsbt": finalized["psbt"],
+                "finalizedHex": extracted["hex"],
+                "finalizedWitnesses": [vin["txinwitness"] for vin in decoded["vin"]],
+                "underThresholdComplete": node.finalizepsbt(singly[0]["psbt"], True)["complete"],
+            }
+            node.sendrawtransaction(extracted["hex"])
+            self.generate(node, 1)
+            return case
+
         def sign_from_psbt_alone(self):
             """Can a wallet sign a multisig PSBT it never registered the address for?
 
@@ -343,6 +401,9 @@ def build(out_path, framework_argv):
             cases.append(self.multisig_case(
                 "2-of-2", 2, [3, 4], [3, 4], Decimal("8"), Decimal("2")))
 
+            self.log.info("2-of-3 spending two inputs in one transaction")
+            two_inputs = self.two_input_case()
+
             single = self.singlesig_case()
             probe = self.sign_from_psbt_alone()
 
@@ -355,6 +416,7 @@ def build(out_path, framework_argv):
                 "seeds": [(bytes([i + 1]) * 32).hex() for i in range(6)],
                 "pubkeys": [k.pubkey.hex() for k in self.keys],
                 "signFromPsbtAlone": probe,
+                "twoInputs": two_inputs,
                 "singleKey": single,
                 "cases": cases,
             }

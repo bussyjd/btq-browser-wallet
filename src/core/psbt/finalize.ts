@@ -21,7 +21,7 @@ import { bytesToHex } from '../util/hex.js';
 import { serializeWithWitness, type Tx } from '../tx/serialize.js';
 import { buildLeafWitnessStack, findPolicyKeyIndex } from './leaf.js';
 import { psbtError } from './parse.js';
-import { inspectP2MRInput, isFinalized } from './validate.js';
+import { inspectP2MRInput, isFinalized, validateP2MRDilithiumPsbt } from './validate.js';
 import type { Psbt, PsbtInput } from './types.js';
 
 export interface FinalizeResult {
@@ -71,8 +71,18 @@ function finalizeInput(psbt: Psbt, index: number): PsbtInput {
   };
 }
 
-/** Finalize every input that has reached its threshold. */
+/**
+ * Finalize every input that has reached its threshold.
+ *
+ * Validation runs first for the same reason it does in `signPsbt`:
+ * `inspectP2MRInput` is a structural read that verifies nothing, so a `Psbt`
+ * that did not come out of `parsePsbt` could otherwise be finalized into a
+ * witness for a leaf that is not in the tree, or over signatures that do not
+ * check out — and this function's whole output is a transaction reported as
+ * ready to broadcast.
+ */
 export function finalizePsbt(psbt: Psbt): FinalizeResult {
+  validateP2MRDilithiumPsbt(psbt);
   const inputs = psbt.inputs.map((_, i) => finalizeInput(psbt, i));
   const finalized: Psbt = { ...psbt, inputs };
   const complete = inputs.every(isFinalized);

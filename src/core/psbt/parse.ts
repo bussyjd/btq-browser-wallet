@@ -39,7 +39,11 @@ import {
   P2MR_CONTROL_BASE_SIZE,
   P2MR_CONTROL_MAX_SIZE,
   P2MR_CONTROL_NODE_SIZE,
+  BIP32_EXTKEY_WITH_VERSION_SIZE,
   PSBT_GLOBAL_UNSIGNED_TX,
+  PSBT_GLOBAL_VERSION,
+  PSBT_GLOBAL_XPUB,
+  PSBT_HIGHEST_VERSION,
   PSBT_IN_P2MR_DILITHIUM_SCRIPT_SIG,
   PSBT_IN_P2MR_LEAF_SCRIPT,
   PSBT_IN_P2MR_MERKLE_ROOT,
@@ -266,6 +270,11 @@ function parseInput(entries: PsbtKeyValue[]): PsbtInput {
  * which this wallet never acts on and only has to hand back unaltered.
  */
 function parseOutput(entries: PsbtKeyValue[]): PsbtOutput {
+  // Every key still has to carry a well-formed compact-size type, the way
+  // btq-core's `ReadCompactSize(skey)` does before its switch. Without this a
+  // one-byte 0xfd key parses here and throws much later out of the serializer,
+  // from a call the caller cannot connect to the PSBT that caused it.
+  for (const entry of entries) keyType(entry.key);
   return { other: entries };
 }
 
@@ -280,13 +289,33 @@ export function parsePsbt(raw: Uint8Array | string): Psbt {
 
   const globalEntries = readMap(r, 'global');
   let unsignedTxBytes: Uint8Array | undefined;
+  let version: number | undefined;
   const globals: PsbtKeyValue[] = [];
   for (const entry of globalEntries) {
-    if (keyType(entry.key) === PSBT_GLOBAL_UNSIGNED_TX) {
-      if (entry.key.length !== 1) throw psbtError('global unsigned tx key is more than one byte type');
-      unsignedTxBytes = entry.value;
-    } else {
-      globals.push(entry);
+    switch (keyType(entry.key)) {
+      case PSBT_GLOBAL_UNSIGNED_TX:
+        if (entry.key.length !== 1) throw psbtError('global unsigned tx key is more than one byte type');
+        unsignedTxBytes = entry.value;
+        break;
+      case PSBT_GLOBAL_XPUB:
+        // btq-core src/psbt.h:1200-1203. We do not model xpubs — Dilithium has
+        // no BIP32 public derivation, so a BTQ PSBT has nothing to put here —
+        // but a malformed one still has to be refused rather than carried.
+        if (entry.key.length !== BIP32_EXTKEY_WITH_VERSION_SIZE + 1) {
+          throw psbtError('size of key was not the expected size for the type global xpub');
+        }
+        globals.push(entry);
+        break;
+      case PSBT_GLOBAL_VERSION: {
+        // btq-core src/psbt.h:1228-1242.
+        if (entry.key.length !== 1) throw psbtError('global version key is more than one byte type');
+        const declared = Number(readUintLE(fixedLengthValue(entry.value, 4, 'global version'), 0, 4));
+        if (declared > PSBT_HIGHEST_VERSION) throw psbtError('unsupported PSBT version number');
+        version = declared;
+        break;
+      }
+      default:
+        globals.push(entry);
     }
   }
   // Also how PSBTv2 is refused: it moves the transaction into per-field globals
@@ -318,7 +347,7 @@ export function parsePsbt(raw: Uint8Array | string): Psbt {
   for (let i = 0; i < tx.outputs.length; i++) outputs.push(parseOutput(readMap(r, `output ${i}`)));
   if (!r.done) throw psbtError('trailing bytes after the PSBT');
 
-  const psbt: Psbt = { tx, unsignedTxBytes, globals, inputs, outputs };
+  const psbt: Psbt = { tx, unsignedTxBytes, globals, version, inputs, outputs };
   validateP2MRDilithiumPsbt(psbt);
   return psbt;
 }

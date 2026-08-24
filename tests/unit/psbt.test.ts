@@ -28,6 +28,7 @@ import {
   parseLeafPolicy,
   parsePsbt,
   serializePsbt,
+  spentOutputs,
   serializePsbtBase64,
   signPsbt,
   buildLeafWitnessStack,
@@ -38,21 +39,21 @@ import {
   PSBT_IN_P2MR_MERKLE_ROOT,
   PSBT_MAGIC,
   type Psbt,
+  type PsbtInput,
 } from '../../src/core/psbt/index.js';
 import { thresholdLeafScript } from '../../src/core/script/multisig.js';
 import { tapLeafHash } from '../../src/core/script/p2mr.js';
 import { PUBLIC_KEY_BYTES, publicKeyFromSeed } from '../../src/core/crypto/mldsa.js';
 import { compactSize, concatBytes, readCompactSize } from '../../src/core/util/bytes.js';
+import { compareControlBlocks, lexicographic } from '../../src/core/psbt/order.js';
 import { bytesToHex, hexToBytes } from '../../src/core/util/hex.js';
 import { WalletError } from '../../src/core/wallet/errors.js';
-
-type Case = (typeof vectors.cases)[number];
 
 const seedOf = (keyIndex: number) => hexToBytes(vectors.seeds[keyIndex]!);
 const hex = (b: Uint8Array) => bytesToHex(b);
 
 /** The absolute key index sitting in slot `slot` of a case's leaf. */
-const keyAt = (v: Case, slot: number) => v.keyIndexes[slot]!;
+const keyAt = (v: { keyIndexes: readonly number[] }, slot: number) => v.keyIndexes[slot]!;
 
 // ---------------------------------------------------------------------------
 // A raw PSBT splitter, used only to build malformed inputs. It is deliberately
@@ -450,20 +451,72 @@ describe('combine', () => {
     expectPsbtError(() => combinePsbts([withSigs(bulk(1)), withSigs(bulk(2))]), /more than 20/);
   });
 
-  it('unions the control blocks offered for one leaf', () => {
+  it('keeps one control block per leaf when both copies offer the same one', () => {
+    // btq-core stores a leaf's control blocks in a set and merges by union
+    // (src/psbt.cpp:239-241), which reads as though a leaf could accumulate
+    // several. Under validation it cannot: every advertised control block has to
+    // commit to the *one* witness program being spent, and a leaf has exactly
+    // one path to a given root. So the union is faithful to btq-core and, for
+    // anything our own decoder would accept, always a no-op — which is what this
+    // pins, rather than inventing a second block that could never validate.
     const v = vectors.cases[0]!;
-    const a = parsePsbt(v.unsignedPsbt);
-    const alternative = concatBytes(a.inputs[0]!.p2mrLeaves[0]!.controlBlocks[0]!, new Uint8Array(32));
-    const b: Psbt = {
-      ...a,
-      inputs: a.inputs.map((input) => ({
+    const merged = combinePsbts([parsePsbt(v.unsignedPsbt), parsePsbt(v.unsignedPsbt)]);
+    expect(merged.inputs[0]!.p2mrLeaves.length).toBe(1);
+    expect(merged.inputs[0]!.p2mrLeaves[0]!.controlBlocks.map(hex)).toEqual(['c1']);
+  });
+
+  it('orders control blocks shortest-first, not lexicographically', () => {
+    // btq-core's ShortestVectorFirstComparator (src/script/signingprovider.h:18-26)
+    // sorts by length before content, unlike the std::vector ordering the leaf
+    // map uses. Pinned directly because the two disagree exactly where a
+    // deeper tree would put a longer control block first.
+    const short_ = hexToBytes('c1');
+    const long_ = hexToBytes('c0' + '00'.repeat(32));
+    expect(compareControlBlocks(short_, long_)).toBeLessThan(0);
+    expect(lexicographic(short_, long_)).toBeGreaterThan(0);
+  });
+
+  it('refuses copies that disagree about the output being spent', () => {
+    // The sighash commits to every spent output, so two copies that disagree
+    // were signed over different messages. Merging them would produce a PSBT
+    // our own decoder rejects — and, before this refusal existed, one that
+    // finalize would still call complete.
+    const v = vectors.cases[0]!;
+    const honest = signPsbt(parsePsbt(v.unsignedPsbt), [seedOf(keyAt(v, v.signerKeyIndexes[0]!))]).psbt;
+    const lying = parsePsbt(v.unsignedPsbt);
+    const inflated: Psbt = {
+      ...lying,
+      inputs: lying.inputs.map((input) => ({
         ...input,
-        p2mrLeaves: input.p2mrLeaves.map((leaf) => ({ ...leaf, controlBlocks: [alternative] })),
+        witnessUtxo: { value: input.witnessUtxo!.value + 12345n, script: input.witnessUtxo!.script },
       })),
     };
-    const merged = combinePsbts([a, b]);
-    expect(merged.inputs[0]!.p2mrLeaves[0]!.controlBlocks.map(hex))
-      .toEqual(['c1', hex(alternative)]); // shortest first, btq-core's set order
+    const otherSlot = v.signerKeyIndexes[1]!;
+    const signedOverTheLie = signPsbt(inflated, [seedOf(keyAt(v, otherSlot))]).psbt;
+    expectPsbtError(() => combinePsbts([honest, signedOverTheLie]), /disagree about the output/);
+  });
+
+  it('refuses a merge whose result would not validate', () => {
+    // Belt to the previous braces: whatever route a bad signature takes into a
+    // merged input, the merged object has to clear the same bar a decoded one
+    // does before any caller sees it.
+    const v = vectors.cases[0]!;
+    const honest = parsePsbt(v.singlySignedPsbts[0]!.psbt);
+    const forged: Psbt = {
+      ...honest,
+      inputs: honest.inputs.map((input) => ({
+        ...input,
+        dilithiumSigs: input.dilithiumSigs.map((sig) => {
+          const signature = Uint8Array.from(sig.signature);
+          signature[100] = signature[100]! ^ 0xff;
+          return { ...sig, signature };
+        }),
+      })),
+    };
+    // Merged into the *unsigned* copy, not the honest one: the two forgeries
+    // share a (pubkey, leaf) pair with the honest signature, so a merge that
+    // held both would keep the honest one and hide the forgery.
+    expectPsbtError(() => combinePsbts([parsePsbt(v.unsignedPsbt), forged]), /does not verify/);
   });
 });
 
@@ -567,6 +620,168 @@ describe('finalize', () => {
       expect(again.hex).toBe(v.finalizedHex);
       expect(serializePsbt(again.psbt)).toEqual(decodeBase64(v.finalizedPsbt));
     }
+  });
+});
+
+describe('two inputs in one transaction', () => {
+  const v = vectors.twoInputs;
+
+  it('reads both inputs and both spent outputs', () => {
+    const psbt = parsePsbt(v.unsignedPsbt);
+    expect(psbt.inputs.length).toBe(2);
+    expect(spentOutputs(psbt)!.map((s) => s.value.toString())).toEqual(v.prevouts.map((p) => p.value));
+    expect(spentOutputs(psbt)!.map((s) => hex(s.script))).toEqual(v.prevouts.map((p) => p.script));
+  });
+
+  it('signs both inputs with a sighash that differs per index', () => {
+    // The BIP341 sighash commits to the input index, so the two signatures from
+    // one key over one transaction must differ. A signer that computed the
+    // sighash once and reused it would produce two identical ones here and a
+    // transaction the chain rejects on the second input.
+    const seed = seedOf(keyAt(v, v.signerKeyIndexes[0]!));
+    const { psbt, added } = signPsbt(parsePsbt(v.unsignedPsbt), [seed]);
+    expect(added).toBe(2);
+    const [first, second] = psbt.inputs.map((i) => hex(i.dilithiumSigs[0]!.signature));
+    expect(first).not.toBe(second);
+    expect(serializePsbtBase64(psbt)).toBe(v.singlySignedPsbts[0]!.psbt);
+  });
+
+  it('combines and finalizes both inputs to btq-core bytes', () => {
+    const combined = combinePsbts(v.singlySignedPsbts.map((s) => parsePsbt(s.psbt)));
+    expect(serializePsbtBase64(combined)).toBe(v.combinedPsbt);
+    const final = finalizePsbt(combined);
+    expect(final.complete).toBe(true);
+    expect(final.hex).toBe(v.finalizedHex);
+    expect(serializePsbtBase64(final.psbt)).toBe(v.finalizedPsbt);
+    expect(final.psbt.inputs.map((i) => i.finalScriptWitness!.map(hex))).toEqual(v.finalizedWitnesses);
+  });
+
+  it('is incomplete while only one of the two inputs is finalizable', () => {
+    // `complete` has to mean every input, not the first one. Finalizing a copy
+    // that is one signature short everywhere must yield no transaction at all.
+    expect(v.underThresholdComplete).toBe(false);
+    const half = finalizePsbt(parsePsbt(v.singlySignedPsbts[0]!.psbt));
+    expect(half.complete).toBe(false);
+    expect(half.hex).toBeUndefined();
+    expect(half.psbt.inputs.every((i) => i.finalScriptWitness === undefined)).toBe(true);
+  });
+});
+
+describe('validation branches that no btq-core vector exercises', () => {
+  // Reached by building a Psbt directly rather than through the wire, because
+  // several of them describe states the wire format cannot even express — a
+  // leaf with no control block, two leaves colliding on one hash. They still
+  // have to hold: signPsbt and finalizePsbt accept a Psbt from any caller.
+  const v = vectors.cases[0]!;
+  const edit = (source: string, change: (input: PsbtInput) => PsbtInput): Psbt => {
+    const psbt = parsePsbt(source);
+    return { ...psbt, inputs: psbt.inputs.map(change) };
+  };
+
+  it('refuses a control block with the parity bit clear', () => {
+    const psbt = edit(v.unsignedPsbt, (input) => ({
+      ...input,
+      p2mrLeaves: input.p2mrLeaves.map((leaf) => ({ ...leaf, controlBlocks: [hexToBytes('c0')] })),
+    }));
+    expectPsbtError(() => signPsbt(psbt, [seedOf(0)]), /parity bit/);
+  });
+
+  it('refuses a control block whose leaf version disagrees with the leaf', () => {
+    const psbt = edit(v.unsignedPsbt, (input) => ({
+      ...input,
+      p2mrLeaves: input.p2mrLeaves.map((leaf) => ({ ...leaf, leafVersion: 0xc2 })),
+    }));
+    expectPsbtError(() => signPsbt(psbt, [seedOf(0)]), /leaf version does not match/);
+  });
+
+  it('refuses a leaf advertised with no control block', () => {
+    const psbt = edit(v.unsignedPsbt, (input) => ({
+      ...input,
+      p2mrLeaves: input.p2mrLeaves.map((leaf) => ({ ...leaf, controlBlocks: [] })),
+    }));
+    expectPsbtError(() => finalizePsbt(psbt), /no control block/);
+  });
+
+  it('refuses a sighash type other than SIGHASH_ALL', () => {
+    // BTQ P2MR consensus rejects SIGHASH_DEFAULT outright, so SIGHASH_ALL is
+    // the only type a Dilithium leaf signature can usefully commit to.
+    const psbt = edit(v.unsignedPsbt, (input) => ({ ...input, sighashType: 0x81 }));
+    expectPsbtError(() => signPsbt(psbt, [seedOf(0)]), /only support SIGHASH_ALL/);
+  });
+
+  it('refuses signatures that refer to more than one leaf', () => {
+    const signed = parsePsbt(v.singlySignedPsbts[0]!.psbt);
+    const strayLeafHash = Uint8Array.from(signed.inputs[0]!.dilithiumSigs[0]!.leafHash);
+    strayLeafHash[0] = strayLeafHash[0]! ^ 0xff;
+    const psbt: Psbt = {
+      ...signed,
+      inputs: signed.inputs.map((input) => ({
+        ...input,
+        dilithiumSigs: [...input.dilithiumSigs,
+          { ...input.dilithiumSigs[0]!, leafHash: strayLeafHash }],
+      })),
+    };
+    // The stray leaf hash names a leaf the PSBT does not carry, which is the
+    // first of the two refusals it earns.
+    expectPsbtError(() => finalizePsbt(psbt), /leaf the PSBT does not contain|more than one leaf/);
+  });
+});
+
+describe('malformed containers', () => {
+  const good = decodeBase64(vectors.cases[0]!.unsignedPsbt);
+
+  it('refuses a map with no separator', () => {
+    expectPsbtError(() => parsePsbt(good.slice(0, good.length - 1)), /separator is missing/);
+  });
+
+  it('refuses trailing bytes after the last map', () => {
+    expectPsbtError(() => parsePsbt(concatBytes(good, new Uint8Array([0x00]))), /trailing bytes|separator/);
+  });
+
+  it('refuses a PSBT with no unsigned transaction', () => {
+    const maps = splitPsbt(good);
+    maps[0] = maps[0]!.filter((e) => e.key[0] !== 0x00);
+    expectPsbtError(() => parsePsbt(joinPsbt(maps)), /missing its unsigned transaction/);
+  });
+
+  it('refuses an unsigned transaction that does not re-serialise to its own bytes', () => {
+    // A non-canonical compact size decodes to the same transaction and back to
+    // different bytes. Accepting it would mean computing a sighash over bytes
+    // no other implementation ever saw.
+    const maps = splitPsbt(good);
+    const tx = maps[0]!.find((e) => e.key[0] === 0x00)!;
+    const padded = concatBytes(tx.value.slice(0, 4), hexToBytes('fd0100'), tx.value.slice(5));
+    maps[0] = [{ key: tx.key, value: padded }];
+    expectPsbtError(() => parsePsbt(joinPsbt(maps)), /does not decode|does not re-serialise/);
+  });
+
+  it('refuses an unsupported PSBT version', () => {
+    const maps = splitPsbt(good);
+    maps[0] = [...maps[0]!, { key: new Uint8Array([0xfb]), value: hexToBytes('01000000') }];
+    expectPsbtError(() => parsePsbt(joinPsbt(maps)), /unsupported PSBT version/);
+  });
+
+  it('refuses a global xpub key of the wrong size', () => {
+    const maps = splitPsbt(good);
+    maps[0] = [...maps[0]!, { key: concatBytes(new Uint8Array([0x01]), new Uint8Array(40)), value: new Uint8Array(4) }];
+    expectPsbtError(() => parsePsbt(joinPsbt(maps)), /expected size for the type global xpub/);
+  });
+
+  it('refuses an output key with a malformed type prefix', () => {
+    // Caught at parse rather than surfacing much later as a throw from the
+    // serializer, which is where it used to land.
+    const maps = splitPsbt(good);
+    maps[2] = [...maps[2]!, { key: new Uint8Array([0xfd]), value: new Uint8Array(1) }];
+    expectPsbtError(() => parsePsbt(joinPsbt(maps)), /no valid type prefix/);
+  });
+
+  it('refuses two global xpubs, whose btq-core order it cannot reproduce', () => {
+    const psbt = parsePsbt(vectors.cases[0]!.unsignedPsbt);
+    const xpub = (fill: number) => ({
+      key: concatBytes(new Uint8Array([0x01]), new Uint8Array(78).fill(fill)),
+      value: new Uint8Array(4),
+    });
+    expectPsbtError(() => serializePsbt({ ...psbt, globals: [xpub(2), xpub(1)] }), /orders them by something other/);
   });
 });
 
