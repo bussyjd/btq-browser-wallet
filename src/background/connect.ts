@@ -24,7 +24,10 @@
  * that is not, right now, waiting for an answer. Storage carries a timestamped
  * mirror of `prompts()` so the popup can render them; nothing is ever granted
  * out of that mirror, and `parsePendingPrompts` / `freshPrompts` throw away
- * anything stale or malformed when it is read back.
+ * anything stale or malformed when it is read back. Both orderings — the
+ * broker's and the mirror's — are decided by an arrival counter rather than by
+ * the clock alone, because `Date.now()` cannot separate two prompts that land
+ * in the same millisecond and a name-based tie-break is not recency at all.
  *
  * MV3 lifetime caveat: a parked `sendResponse` lives in the service worker, and
  * Chrome may terminate an idle worker (30 s of no events, 5 min hard cap). If
@@ -57,6 +60,34 @@ export interface PendingPrompt {
   readonly origin: string;
   /** ms epoch when the request was parked, so a stale one can be recognised. */
   readonly at: number;
+  /**
+   * Arrival order within one worker generation, from a counter that only goes
+   * up. `at` alone cannot order these: `Date.now()` is a millisecond integer
+   * and two `page.requestAccounts` calls in the same task share it routinely,
+   * so "newest first" needs a key that a tie cannot erase.
+   *
+   * Deliberately **not** a global identity. The counter is worker memory: it
+   * starts again at 0 every time MV3 respawns the worker, so a number from a
+   * dead generation is not comparable with a number from this one. Nothing has
+   * to compare them, and three separate things keep it that way:
+   *
+   *  - the stored mirror is rewritten *whole* from `broker.prompts()` every
+   *    time the waiting set changes, so one array never mixes two generations;
+   *  - a new worker holds nothing, and `livePrompts()` drops every stored
+   *    prompt the broker is not holding — a prompt from a dead generation is
+   *    never in a list that gets sorted, it is discarded before that;
+   *  - `at` is real epoch time and stays the primary key, so even if a
+   *    cross-generation comparison somehow happened it would order by wall
+   *    clock, and `seq` would only decide a tie inside one millisecond — which
+   *    two generations cannot land in, a restart being orders of magnitude
+   *    slower than that.
+   *
+   * And the consequence if all of that were wrong is display order in the
+   * toolbar popup. It is not an authority: `approveConnect` grants only what
+   * the broker is holding right now, and an approval window answers only for
+   * the origin in its own URL.
+   */
+  readonly seq: number;
 }
 
 /** Sent to the page when the user says no, closes the window, or never answers. */
@@ -94,6 +125,7 @@ export interface ConnectBrokerOptions {
 interface PendingRequest {
   readonly origin: string;
   readonly at: number;
+  readonly seq: number;
   readonly responders: ConnectResponder[];
   timer: TimerHandle;
   windowId: number | null;
@@ -107,6 +139,8 @@ export class ConnectBroker {
   private readonly clearTimer: (handle: TimerHandle) => void;
   private readonly now: () => number;
   private readonly opts: ConnectBrokerOptions;
+  /** Next arrival number. Worker-lifetime state; see `PendingPrompt.seq`. */
+  private nextSeq = 0;
 
   constructor(opts: ConnectBrokerOptions = {}) {
     this.opts = opts;
@@ -135,6 +169,11 @@ export class ConnectBroker {
     const entry: PendingRequest = {
       origin,
       at: this.now(),
+      // Minted only for a request that is actually parked. A 'joined' second
+      // ask keeps the first one's number, so a page cannot walk itself to the
+      // top of the list by calling `requestAccounts` again, and a 'refused'
+      // one takes no number at all.
+      seq: this.nextSeq++,
       responders: [responder],
       timer: null,
       windowId: null,
@@ -165,11 +204,18 @@ export class ConnectBroker {
     return [...this.waiting.keys()];
   }
 
-  /** Everything waiting, newest first — the popup shows the most recent ask. */
+  /**
+   * Everything waiting, newest first — the popup shows the most recent ask.
+   *
+   * Ties on `at` break on arrival order, never on the origin string. Sorting
+   * two same-millisecond prompts by name would not be a weaker rule than
+   * recency, it would be a *different* one, silently: 'dapp.example' would beat
+   * 'evil.example' no matter which of them asked second.
+   */
   prompts(): PendingPrompt[] {
     return [...this.waiting.values()]
-      .map((entry) => ({ origin: entry.origin, at: entry.at }))
-      .sort((a, b) => b.at - a.at || a.origin.localeCompare(b.origin));
+      .map((entry) => ({ origin: entry.origin, at: entry.at, seq: entry.seq }))
+      .sort((a, b) => b.at - a.at || b.seq - a.seq);
   }
 
   /** Answer the parked callers for `origin` with the approved accounts. */
@@ -251,29 +297,47 @@ export class ConnectBroker {
 export function parsePendingPrompts(raw: unknown, legacy?: unknown): PendingPrompt[] {
   const out: PendingPrompt[] = [];
   const seen = new Set<string>();
-  const push = (origin: unknown, at: unknown): void => {
+  /** A count, so anything that is not a whole non-negative number is 0. */
+  const nat = (v: unknown): number =>
+    typeof v === 'number' && Number.isInteger(v) && v >= 0 ? v : 0;
+  const push = (origin: unknown, at: unknown, seq: unknown): void => {
     if (typeof origin !== 'string' || !/^https?:\/\/[^/\s]+$/.test(origin)) return;
     if (seen.has(origin)) return;
     seen.add(origin);
-    out.push({ origin, at: typeof at === 'number' && Number.isFinite(at) && at >= 0 ? at : 0 });
+    out.push({
+      origin,
+      at: typeof at === 'number' && Number.isFinite(at) && at >= 0 ? at : 0,
+      // A record with no `seq` — the shape older builds wrote — reads as 0.
+      // Every such record ties, and a stable sort then leaves them in the
+      // order they were stored, which is the order the broker wrote them in.
+      seq: nat(seq),
+    });
   };
   if (Array.isArray(raw)) {
     for (const item of raw) {
       if (typeof item !== 'object' || item === null) continue;
-      const record = item as { origin?: unknown; at?: unknown };
-      push(record.origin, record.at);
+      const record = item as { origin?: unknown; at?: unknown; seq?: unknown };
+      push(record.origin, record.at, record.seq);
       if (out.length >= MAX_PENDING_PROMPTS) break;
     }
   }
   if (typeof legacy === 'object' && legacy !== null) {
-    push((legacy as { origin?: unknown }).origin, 0);
+    push((legacy as { origin?: unknown }).origin, 0, 0);
   }
   return out.slice(0, MAX_PENDING_PROMPTS);
 }
 
-/** Prompts still inside the timeout window, newest first. */
+/**
+ * Prompts still inside the timeout window, newest first.
+ *
+ * Same ordering rule as `ConnectBroker.prompts()`, and for the same reason: the
+ * popup reads this list, so if the two disagreed a prompt would change position
+ * simply by being written to storage and read back. Ties fall through to the
+ * order the records were stored in — `Array.prototype.sort` is stable — which
+ * is the order the broker wrote them in.
+ */
 export function freshPrompts(prompts: readonly PendingPrompt[], now: number, maxAgeMs = CONNECT_TIMEOUT_MS): PendingPrompt[] {
   return prompts
     .filter((p) => p.at > 0 && now - p.at < maxAgeMs)
-    .sort((a, b) => b.at - a.at || a.origin.localeCompare(b.origin));
+    .sort((a, b) => b.at - a.at || b.seq - a.seq);
 }

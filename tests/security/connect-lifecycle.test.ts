@@ -71,8 +71,10 @@ async function connectSite(origin: string, tabId = 1): Promise<void> {
 }
 
 /** The prompt mirror the popup reads, as stored. */
-function storedPrompts(): { origin: string; at: number }[] | undefined {
-  return chromeFake.store.get('pendingConnects') as { origin: string; at: number }[] | undefined;
+function storedPrompts(): { origin: string; at: number; seq: number }[] | undefined {
+  return chromeFake.store.get('pendingConnects') as
+    | { origin: string; at: number; seq: number }[]
+    | undefined;
 }
 
 beforeEach(async () => {
@@ -93,7 +95,7 @@ describe('page.requestAccounts lifecycle', () => {
     await flush();
 
     expect(request.settled, 'the page must not be answered before the user decides').toBe(false);
-    expect(storedPrompts()).toEqual([{ origin: DAPP, at: expect.any(Number) }]);
+    expect(storedPrompts()).toEqual([{ origin: DAPP, at: expect.any(Number), seq: expect.any(Number) }]);
     expect(chromeFake.windows).toHaveLength(1);
     // The window carries the origin it was opened for, so it can only ever
     // render and approve that site.
@@ -134,7 +136,7 @@ describe('page.requestAccounts lifecycle', () => {
     expect(chromeFake.windows).toHaveLength(0);
     expect(chromeFake.openPopupCalls).toBe(1);
     // The prompt is still mirrored, so the request is answerable either way.
-    expect(storedPrompts()).toEqual([{ origin: DAPP, at: expect.any(Number) }]);
+    expect(storedPrompts()).toEqual([{ origin: DAPP, at: expect.any(Number), seq: expect.any(Number) }]);
     await ok(chromeFake.call({ method: 'wallet.approveConnect', params: { origin: DAPP } }));
     await expect(request.promise).resolves.toEqual({ result: { accounts: [address] } });
   });
@@ -205,7 +207,7 @@ describe('page.requestAccounts lifecycle', () => {
     const request = chromeFake.callFromPage({ method: 'page.requestAccounts' }, DAPP);
     await vi.advanceTimersByTimeAsync(1);
     expect(request.settled).toBe(false);
-    expect(storedPrompts()).toEqual([{ origin: DAPP, at: expect.any(Number) }]);
+    expect(storedPrompts()).toEqual([{ origin: DAPP, at: expect.any(Number), seq: expect.any(Number) }]);
 
     await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
     vi.useRealTimers();
@@ -249,7 +251,7 @@ describe('what a page can reach through the worker', () => {
     const request = chromeFake.callFromPage({ method: 'page.requestAccounts', params: { origin: DAPP } }, EVIL);
     await flush();
     expect(request.settled).toBe(false);
-    expect(storedPrompts()).toEqual([{ origin: EVIL, at: expect.any(Number) }]);
+    expect(storedPrompts()).toEqual([{ origin: EVIL, at: expect.any(Number), seq: expect.any(Number) }]);
 
     // Approving the origin the page claimed must not answer the evil origin's
     // request — and with nobody waiting on that origin, it is refused outright.
@@ -406,7 +408,7 @@ describe('an approval window that outlives the worker holding its request', () =
     await flush();
     expect(request.settled).toBe(false);
     expect(chromeFake.badgeText).toBe('1');
-    expect(storedPrompts()).toEqual([{ origin: DAPP, at: expect.any(Number) }]);
+    expect(storedPrompts()).toEqual([{ origin: DAPP, at: expect.any(Number), seq: expect.any(Number) }]);
 
     await restartWorker();
 
@@ -451,6 +453,17 @@ describe('an approval window that outlives the worker holding its request', () =
     // request is the one outstanding — never render the newest prompt under the
     // origin printed in its own URL, which is how one site gets approved on
     // another's screen.
+    //
+    // The clock is frozen for the whole test — `Date` only, so `flush()` still
+    // runs on real timers — which pins the case this test used to decide by
+    // race. Both prompts are stamped with the same millisecond every run, so
+    // "newest first" is settled entirely by the broker's arrival counter. Left
+    // on the real clock, the two `Date.now()` readings landed on the same
+    // integer perhaps half the time and on different ones the rest, and the
+    // final assertion below flipped with them: this file failed roughly one run
+    // in two, which is what a delivered `npm test` did to whoever ran it first.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(1_770_000_000_000);
     chromeFake.callFromPage({ method: 'page.requestAccounts' }, DAPP, 1);
     await flush();
     chromeFake.callFromPage({ method: 'page.requestAccounts' }, EVIL, 2);
@@ -466,6 +479,10 @@ describe('an approval window that outlives the worker holding its request', () =
     // The toolbar popup was opened for nobody and still sees whatever is
     // outstanding — that is the surface a user reaches for when a window was
     // closed by accident.
+    expect(storedPrompts()?.map((p) => p.at), 'both prompts share a millisecond').toEqual([
+      1_770_000_000_000,
+      1_770_000_000_000,
+    ]);
     expect(await ok(chromeFake.call({ method: 'wallet.pendingConnect' }))).toEqual({ origin: EVIL });
 
     // And after the restart neither window is offered the other one's site.
