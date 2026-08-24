@@ -50,6 +50,16 @@ export const REVEAL_TESTID = 'reveal-phrase';
 const PRIORITY_SAT_PER_KVB = 5000;
 /** How far the node may trail the explorer before it cannot confirm our send. */
 const NODE_LAG_LIMIT = 3;
+/**
+ * How old the chain tip may be before a take is refused.
+ *
+ * Blocks here average a bit over a minute, and the confirmation scene waits up
+ * to 15. Twenty minutes of nothing is therefore not slow luck, it is a stopped
+ * network — and this chain does stop. Refusing costs three seconds; not
+ * refusing costs a signed payment, sixteen minutes, and a take that ends five
+ * scenes short.
+ */
+const STALE_TIP_MINUTES = 20;
 
 export interface LiveNode {
   url: string;
@@ -439,7 +449,7 @@ export async function preflight(
   }
 
   // -------------------------------------------------------------------- node
-  let chainInfo: { chain?: string; blocks?: number; initialblockdownload?: boolean } | null = null;
+  let chainInfo: { chain?: string; blocks?: number; initialblockdownload?: boolean; time?: number } | null = null;
   try {
     chainInfo = await nodeRpc(cfg, 'getblockchaininfo');
   } catch (e) {
@@ -465,6 +475,24 @@ export async function preflight(
       !ibd,
       ibd ? 'still in initial block download' : 'out of initial block download',
       `demo:live — the node at ${cfg.node.url} is still in initial block download, so it cannot confirm anything you send. Wait for it to finish, then run npm run demo:live again.`,
+    );
+
+    // A synced node on the right chain still cannot confirm anything if nobody
+    // is mining, and the take contains a scene that waits for a block. This is
+    // the check whose absence cost a take: everything else was green, the
+    // payment was signed and broadcast for real, and then the confirmation wait
+    // timed out against a tip that had already been an hour old when the run
+    // started. Cheap to ask, and it is the difference between refusing in three
+    // seconds and failing sixteen minutes in with coins committed.
+    const tipTime = typeof chainInfo.time === 'number' ? chainInfo.time : null;
+    const tipAgeMin = tipTime === null ? null : Math.round((Date.now() / 1000 - tipTime) / 60);
+    add(
+      'chain is moving',
+      tipAgeMin !== null && tipAgeMin <= STALE_TIP_MINUTES,
+      tipAgeMin === null
+        ? 'the node did not report a tip timestamp'
+        : `last block ${tipAgeMin} min ago (refuse above ${STALE_TIP_MINUTES})`,
+      `demo:live — the chain tip is ${tipAgeMin ?? '?'} minutes old, so this take would sign a real payment and then wait for a block that is not coming. BTQ testnet stops producing blocks from time to time; check ${cfg.explorer} and run npm run demo:live again once the height is advancing.`,
     );
 
     try {
@@ -563,6 +591,40 @@ export async function preflight(
       `${formatSats(confirmed)} tBTQ confirmed across m/0'/{0,1}'/0..${GAP_LIMIT - 1} (${utxoCount} utxo${utxoCount === 1 ? '' : 's'}, ${confirmedUtxos} confirmed${mempool > 0n ? `, ${formatSats(mempool)} tBTQ still in the mempool` : ''}) · needs ${formatSats(needed)}`,
       `demo:live — Alice has ${formatSats(confirmed)} tBTQ confirmed across m/0'/{0,1}'/0..${GAP_LIMIT - 1} (${utxoCount} utxo${utxoCount === 1 ? '' : 's'}${mempool > 0n ? `, ${formatSats(mempool)} tBTQ still in the mempool` : ''}), and this take needs ${formatSats(needed)}. Fund ${fundTarget} with at least ${formatSats(needed)} tBTQ and wait for one block, then run npm run demo:live again.`,
     );
+
+    // Confirmed is not the same as spendable. The explorer lists a coin as
+    // confirmed until the transaction spending it is *mined*, so a take that
+    // signed a payment and never got a block leaves Alice looking exactly as
+    // fundable as before while her only coin is already committed to a
+    // transaction sitting in the mempool. The next take then selects the same
+    // outpoint, builds a conflict, and is rejected at the node — after the
+    // recording has started. So ask the node, which knows: `gettxout` with
+    // mempool included answers null for a coin something unconfirmed has
+    // already spent.
+    try {
+      const spent: string[] = [];
+      for (const f of funding) {
+        for (const u of f.utxos) {
+          if (u.blockHeight === null) continue;
+          const out = await nodeRpc<unknown>(cfg, 'gettxout', [u.txid, u.vout, true]);
+          if (out === null) spent.push(`${u.txid.slice(0, 12)}…:${u.vout}`);
+        }
+      }
+      const usable = confirmed - funding.reduce(
+        (sum, f) => sum + f.utxos.filter((u) => u.blockHeight !== null && spent.includes(`${u.txid.slice(0, 12)}…:${u.vout}`)).reduce((a, u) => a + u.value, 0n),
+        0n,
+      );
+      add(
+        'coins not already spent',
+        usable >= needed,
+        spent.length === 0
+          ? 'every confirmed coin is still unspent'
+          : `${spent.length} confirmed coin${spent.length === 1 ? '' : 's'} already spent by an unconfirmed tx (${spent.join(', ')}) · ${formatSats(usable)} tBTQ actually spendable`,
+        `demo:live — Alice's confirmed coins include ${spent.length} already spent by a transaction still in the mempool (${spent.join(', ')}), leaving ${formatSats(usable)} tBTQ actually spendable against the ${formatSats(needed)} this take needs. That is almost always a previous take whose payment never confirmed: wait for it to be mined, or replace it, then run npm run demo:live again.`,
+      );
+    } catch (e) {
+      skip('coins not already spent', `not checked — ${e instanceof Error ? e.message : String(e)}`);
+    }
   } catch (e) {
     add(
       'Alice funded',
