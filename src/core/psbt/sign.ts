@@ -49,7 +49,15 @@ export interface SignPsbtOptions {
    * src/script/dilithium_leaf.cpp:163-173; measured through `finalizepsbt` in
    * tests/vectors/psbt.json under `overSigned`). So a third signature on a
    * 2-of-3 is not discarded later: it rides onto the chain, costing 2424 bytes
-   * of witness and moving a measured spend from 665 vsize to 816.
+   * of witness and **+151 vB**.
+   *
+   * The surplus is what is worth quoting, because it is the part that does not
+   * depend on the transaction's shape. The absolute figures do: the measured
+   * spend goes 665 → 816 vB with one input and two *P2WPKH* outputs, which is
+   * what `walletcreatefundedpsbt` builds on regtest, and 689 → 840 vB for the
+   * one input and two *P2MR* outputs `fee.ts` models — 24 bytes more of
+   * stripped size on each row. A vsize quoted without its output composition
+   * is a number waiting to be wrong somewhere else.
    *
    * Two things follow. The fee was quoted before that signature existed, so a
    * quote made at the relay floor for the smaller size no longer clears it —

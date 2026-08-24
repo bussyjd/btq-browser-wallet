@@ -661,14 +661,26 @@ describe('more signatures than the threshold needs', () => {
     // could legitimately select m and drop the rest. btq-core does not:
     // BuildDilithiumLeafWitness fills every slot it has a signature for
     // (src/script/dilithium_leaf.cpp:163-173), and `finalizepsbt` emits all
-    // three. The cost is real — 816 vsize against 665 — but the transaction
-    // still relayed at the fee walletcreatefundedpsbt chose.
+    // three. The cost is real — +151 vB — but the transaction still relayed at
+    // the fee walletcreatefundedpsbt chose.
     expect(v.signaturesInCombinedPsbt).toBe(3);
     expect(v.signaturesEmittedByFinalize).toBe(3);
     expect(v.finalizedWitness.map((w) => w.length / 2))
       .toEqual([2421, 2421, 2421, 3960, 1]);
-    expect(v.vsize).toBeGreaterThan(v.vsizeWithTwoSignatures);
     expect(v.relays).toBe(true);
+
+    // The surplus is shape-independent; the absolute vsizes are not, so pin the
+    // output composition they were measured on rather than leaving two bare
+    // numbers to be copied somewhere they stop being true. These are the two
+    // P2WPKH outputs walletcreatefundedpsbt builds on regtest — a spend paying
+    // a P2MR address with P2MR change carries 24 more bytes of stripped size
+    // and sits 24 vB higher on both rows (689 → 840, which is what fee.ts
+    // models). If the generator ever changes shape, this fails instead of the
+    // comment quietly going stale.
+    expect(v.outputTypes).toEqual(['witness_v0_keyhash', 'witness_v0_keyhash']);
+    expect(v.vsizeWithTwoSignatures).toBe(665);
+    expect(v.vsize).toBe(816);
+    expect(v.vsize - v.vsizeWithTwoSignatures).toBe(151);
   });
 
   it('matches btq-core byte-for-byte rather than selecting m itself', () => {
@@ -710,7 +722,7 @@ describe('more signatures than the threshold needs', () => {
   it('signs m of the keys and stops, even holding more than m', () => {
     // The guard has to hold inside one call too: a wallet handed all three
     // seeds at once would otherwise walk straight past the threshold and
-    // produce the 816-vsize spend rather than the 665-vsize one.
+    // spend the extra 151 vB.
     const allThree = v.keyIndexes.map((i) => hexToBytes(vectors.seeds[i]!));
     const { psbt, added } = signPsbt(parsePsbt(v.unsignedPsbt), allThree);
     expect(added).toBe(2);

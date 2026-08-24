@@ -295,8 +295,10 @@ def build(out_path, framework_argv):
 
             The accumulator succeeds on `sum >= m`, not `sum == m`, so a third
             signature is consensus-valid but not required — and it costs 2424
-            bytes of witness, which moves the vsize the sender already quoted a
-            fee for. A finalizer could legitimately drop the surplus. btq-core's
+            bytes of witness, moving the vsize the sender already quoted a fee
+            for by +151 vB. That surplus is the shape-independent part; the
+            absolute vsizes recorded below are not, so `outputTypes` travels
+            with them. A finalizer could legitimately drop the surplus. btq-core's
             BuildDilithiumLeafWitness (src/script/dilithium_leaf.cpp:163-173)
             fills every slot it has a signature for and selects nothing, but
             that is one layer down from `finalizepsbt`, so this measures the RPC
@@ -336,9 +338,11 @@ def build(out_path, framework_argv):
             two_extracted = node.finalizepsbt(two_only, True)
             two_decoded = node.decoderawtransaction(two_extracted["hex"])
 
+            shape = "+".join(o["scriptPubKey"]["type"] for o in decoded["vout"])
             self.log.info(f"over-signed 2-of-3: combine kept {len(present)} signatures, "
                           f"finalizepsbt emitted {emitted}; vsize {decoded['vsize']} vs "
-                          f"{two_decoded['vsize']} for two; relays={accept['allowed']}")
+                          f"{two_decoded['vsize']} for two (+{decoded['vsize'] - two_decoded['vsize']} vB, "
+                          f"1 input and outputs {shape}); relays={accept['allowed']}")
             if not accept["allowed"]:
                 self.log.info(f"  rejected: {accept.get('reject-reason')}")
 
@@ -363,6 +367,15 @@ def build(out_path, framework_argv):
                 "finalizedWitness": witness,
                 "signaturesInCombinedPsbt": len(present),
                 "signaturesEmittedByFinalize": emitted,
+                # A vsize means nothing without the transaction shape it was
+                # measured on, and these two are easy to copy somewhere they
+                # stop being true: walletcreatefundedpsbt pays a bech32
+                # destination and takes bech32 change, so both outputs are
+                # P2WPKH at 31 bytes. A wallet paying a P2MR address with P2MR
+                # change carries two 43-byte outputs instead, 24 bytes more of
+                # stripped size, and lands 24 vB higher on both rows. Recorded
+                # so the test can assert the shape rather than trust a comment.
+                "outputTypes": [o["scriptPubKey"]["type"] for o in decoded["vout"]],
                 "vsize": decoded["vsize"],
                 "vsizeWithTwoSignatures": two_decoded["vsize"],
                 "relays": accept["allowed"],
