@@ -290,6 +290,85 @@ def build(out_path, framework_argv):
             self.generate(node, 1)
             return case
 
+        def over_signed_case(self):
+            """A 2-of-3 that all three co-signers signed. What does btq-core emit?
+
+            The accumulator succeeds on `sum >= m`, not `sum == m`, so a third
+            signature is consensus-valid but not required — and it costs 2424
+            bytes of witness, which moves the vsize the sender already quoted a
+            fee for. A finalizer could legitimately drop the surplus. btq-core's
+            BuildDilithiumLeafWitness (src/script/dilithium_leaf.cpp:163-173)
+            fills every slot it has a signature for and selects nothing, but
+            that is one layer down from `finalizepsbt`, so this measures the RPC
+            rather than trusting the read — and it records whether the resulting
+            transaction still relays at the fee the PSBT was funded with.
+            """
+            node = self.nodes[0]
+            indices = [0, 1, 2]
+            pubkeys = [self.keys[i].pubkey.hex() for i in indices]
+            reg = self.wallets[0].createdilithiummultisig(2, pubkeys, "over-signed")
+            utxo = self.fund(self.wallets[0], reg["address"], Decimal("6"))
+            unsigned = self.wallets[0].walletcreatefundedpsbt(
+                [{"txid": utxo["txid"], "vout": utxo["vout"]}],
+                [{self.destination: Decimal("2")}],
+            )["psbt"]
+
+            singly = [{"keyIndex": indices.index(i),
+                       "psbt": self.wallets[i].walletprocesspsbt(unsigned)["psbt"]}
+                      for i in indices]
+            combined = node.combinepsbt([s["psbt"] for s in singly])
+            present = node.decodepsbt(combined)["inputs"][0]["p2mr_dilithium_script_path_sigs"]
+            assert_equal(len(present), 3)
+
+            finalized = node.finalizepsbt(combined, False)
+            extracted = node.finalizepsbt(combined, True)
+            assert_equal(extracted["complete"], True)
+            witness = self.witness_of(extracted["hex"])
+            emitted = sum(1 for item in witness if len(item) // 2 == 2421)
+
+            # Does the over-signed transaction still relay at the fee the PSBT
+            # was funded with? This is the practical half of the question.
+            accept = node.testmempoolaccept([extracted["hex"]])[0]
+            decoded = node.decoderawtransaction(extracted["hex"])
+
+            # The same spend with only two signatures, for the size comparison.
+            two_only = node.combinepsbt([singly[0]["psbt"], singly[2]["psbt"]])
+            two_extracted = node.finalizepsbt(two_only, True)
+            two_decoded = node.decoderawtransaction(two_extracted["hex"])
+
+            self.log.info(f"over-signed 2-of-3: combine kept {len(present)} signatures, "
+                          f"finalizepsbt emitted {emitted}; vsize {decoded['vsize']} vs "
+                          f"{two_decoded['vsize']} for two; relays={accept['allowed']}")
+            if not accept["allowed"]:
+                self.log.info(f"  rejected: {accept.get('reject-reason')}")
+
+            if accept["allowed"]:
+                node.sendrawtransaction(extracted["hex"])
+                self.generate(node, 1)
+
+            return {
+                "name": "2-of-3-over-signed",
+                "m": 2,
+                "n": 3,
+                "keyIndexes": indices,
+                "signerKeyIndexes": [0, 1, 2],
+                "leafScript": reg["leaf_script"],
+                "pubkeys": pubkeys,
+                "prevout": self.prevout_of(utxo),
+                "unsignedPsbt": unsigned,
+                "singlySignedPsbts": singly,
+                "combinedPsbt": combined,
+                "finalizedPsbt": finalized["psbt"],
+                "finalizedHex": extracted["hex"],
+                "finalizedWitness": witness,
+                "signaturesInCombinedPsbt": len(present),
+                "signaturesEmittedByFinalize": emitted,
+                "vsize": decoded["vsize"],
+                "vsizeWithTwoSignatures": two_decoded["vsize"],
+                "relays": accept["allowed"],
+                "rejectReason": accept.get("reject-reason"),
+            }
+
         def sign_from_psbt_alone(self):
             """Can a wallet sign a multisig PSBT it never registered the address for?
 
@@ -401,6 +480,9 @@ def build(out_path, framework_argv):
             cases.append(self.multisig_case(
                 "2-of-2", 2, [3, 4], [3, 4], Decimal("8"), Decimal("2")))
 
+            self.log.info("2-of-3 signed by all three, to see what finalizepsbt emits")
+            over_signed = self.over_signed_case()
+
             self.log.info("2-of-3 spending two inputs in one transaction")
             two_inputs = self.two_input_case()
 
@@ -416,6 +498,7 @@ def build(out_path, framework_argv):
                 "seeds": [(bytes([i + 1]) * 32).hex() for i in range(6)],
                 "pubkeys": [k.pubkey.hex() for k in self.keys],
                 "signFromPsbtAlone": probe,
+                "overSigned": over_signed,
                 "twoInputs": two_inputs,
                 "singleKey": single,
                 "cases": cases,

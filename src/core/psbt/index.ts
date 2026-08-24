@@ -19,7 +19,7 @@ export { parsePsbt, decodeBase64, keyType, psbtError } from './parse.js';
 export { serializePsbt, serializePsbtBase64 } from './serialize.js';
 export { combinePsbts } from './combine.js';
 export { finalizePsbt, extractTransaction, type FinalizeResult } from './finalize.js';
-export { signPsbt, type SignPsbtResult } from './sign.js';
+export { signPsbt, type SignPsbtOptions, type SignPsbtResult } from './sign.js';
 export {
   inspectP2MRInput,
   validateP2MRDilithiumInput,

@@ -38,6 +38,35 @@ export interface SignPsbtResult {
   added: number;
 }
 
+export interface SignPsbtOptions {
+  /**
+   * Sign an input that already holds enough signatures to finalize. Off by
+   * default, and the default is the interesting half.
+   *
+   * The accumulator succeeds on `sum >= m`, not `sum == m`, so a surplus
+   * signature is perfectly valid — and btq-core's finalizer emits every
+   * signature it holds rather than selecting m (`BuildDilithiumLeafWitness`,
+   * src/script/dilithium_leaf.cpp:163-173; measured through `finalizepsbt` in
+   * tests/vectors/psbt.json under `overSigned`). So a third signature on a
+   * 2-of-3 is not discarded later: it rides onto the chain, costing 2424 bytes
+   * of witness and moving a measured spend from 665 vsize to 816.
+   *
+   * Two things follow. The fee was quoted before that signature existed, so a
+   * quote made at the relay floor for the smaller size no longer clears it —
+   * and the surplus permanently publishes the ML-DSA signature of a cosigner
+   * who was not needed, which on a chain where every spend already reveals
+   * 1312-byte keys is gratuitous linkage.
+   *
+   * The finalizer is the wrong place to fix this: dropping a signature there
+   * would make our transaction differ from the one btq-core builds out of the
+   * same PSBT, so the two would disagree on the txid. The right place is here,
+   * where the signature has not been created yet and a cosigner can see from
+   * the PSBT that it is not needed. Set this when you deliberately want the
+   * redundancy — a cosigner who suspects another's signature will be dropped.
+   */
+  signWhenAlreadyFinalizable?: boolean;
+}
+
 /**
  * Sign every input this wallet holds a key for.
  *
@@ -46,7 +75,11 @@ export interface SignPsbtResult {
  * this wallet cannot recognise as a Dilithium P2MR spend with a leaf that
  * commits to its own witness program is refused outright.
  */
-export function signPsbt(psbt: Psbt, seeds: readonly Uint8Array[]): SignPsbtResult {
+export function signPsbt(
+  psbt: Psbt,
+  seeds: readonly Uint8Array[],
+  options: SignPsbtOptions = {},
+): SignPsbtResult {
   for (const seed of seeds) {
     if (seed.length !== SEED_BYTES) throw psbtError(`an ML-DSA seed must be ${SEED_BYTES} bytes`);
   }
@@ -74,6 +107,11 @@ export function signPsbt(psbt: Psbt, seeds: readonly Uint8Array[]): SignPsbtResu
     if (!info.policy || !info.leaf || !info.leafHash) {
       throw psbtError(`input ${index} does not name exactly one leaf script this wallet recognises`);
     }
+    // Adding to an input that can already be finalized only makes the spend
+    // bigger and reveals a key nobody needed — see SignPsbtOptions.
+    if (info.status === 'finalizable' && !options.signWhenAlreadyFinalizable) return input;
+    let towardThreshold = info.signaturesPresent;
+
     const sighash = p2mrSighash(psbt.tx, index, spent, info.leafHash);
     const present = new Set(input.dilithiumSigs.map(
       (s) => `${bytesToHex(hash160(s.pubkey))}:${bytesToHex(s.leafHash)}`));
@@ -83,6 +121,10 @@ export function signPsbt(psbt: Psbt, seeds: readonly Uint8Array[]): SignPsbtResu
       const pubkey = publicKeyFromSeed(seed);
       if (pubkey.length !== PUBLIC_KEY_BYTES) throw psbtError('unexpected ML-DSA public key size');
       if (findPolicyKeyIndex(info.policy, pubkey) < 0) continue;
+      // The same rule one level down: a wallet holding more than m of the keys
+      // signs m of them and stops, rather than spending 2424 witness bytes per
+      // surplus signature on a threshold that is already met.
+      if (towardThreshold >= info.policy.m && !options.signWhenAlreadyFinalizable) break;
       const id = `${bytesToHex(hash160(pubkey))}:${bytesToHex(info.leafHash)}`;
       if (present.has(id)) continue;
       if (sigs.length >= MAX_DILITHIUM_PARTIAL_SIGS_PER_INPUT) {
@@ -90,6 +132,7 @@ export function signPsbt(psbt: Psbt, seeds: readonly Uint8Array[]): SignPsbtResu
       }
       present.add(id);
       sigs.push({ pubkey, leafHash: info.leafHash, signature: signTransactionHash(seed, sighash) });
+      towardThreshold++;
       added++;
     }
 

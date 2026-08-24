@@ -45,7 +45,7 @@ import { thresholdLeafScript } from '../../src/core/script/multisig.js';
 import { tapLeafHash } from '../../src/core/script/p2mr.js';
 import { PUBLIC_KEY_BYTES, publicKeyFromSeed } from '../../src/core/crypto/mldsa.js';
 import { compactSize, concatBytes, readCompactSize } from '../../src/core/util/bytes.js';
-import { compareControlBlocks, lexicographic } from '../../src/core/psbt/order.js';
+import { compareControlBlocks, compareDilithiumSigs, hash160, lexicographic } from '../../src/core/psbt/order.js';
 import { bytesToHex, hexToBytes } from '../../src/core/util/hex.js';
 import { WalletError } from '../../src/core/wallet/errors.js';
 
@@ -465,6 +465,35 @@ describe('combine', () => {
     expect(merged.inputs[0]!.p2mrLeaves[0]!.controlBlocks.map(hex)).toEqual(['c1']);
   });
 
+  it('orders signatures by Hash160 of the key, and by leaf hash only on a tie', () => {
+    // The pair is (Hash160(pubkey), leaf_hash), so the second component decides
+    // nothing until the first ties — and a tie is exactly what one key signing
+    // two leaves of one tree produces. The fixture set never ties, so it could
+    // not have caught the components being weighted the other way round.
+    const pubkeyA = publicKeyFromSeed(seedOf(0));
+    const pubkeyB = publicKeyFromSeed(seedOf(1));
+    const leafLow = new Uint8Array(32);
+    const leafHigh = new Uint8Array(32).fill(0xff);
+    const sig = new Uint8Array(DILITHIUM_PARTIAL_SIG_SIZE);
+
+    // Same key, different leaves: the leaf hash breaks the tie.
+    expect(compareDilithiumSigs(
+      { pubkey: pubkeyA, leafHash: leafLow, signature: sig },
+      { pubkey: pubkeyA, leafHash: leafHigh, signature: sig })).toBeLessThan(0);
+    // Identical pairs compare equal, so the ordering is a total order.
+    expect(compareDilithiumSigs(
+      { pubkey: pubkeyA, leafHash: leafLow, signature: sig },
+      { pubkey: pubkeyA, leafHash: leafLow, signature: sig })).toBe(0);
+    // Different keys: the key hash decides regardless of the leaf hash, and it
+    // is the *hash* that decides — for this pair, the opposite of what ordering
+    // by the public keys themselves would give.
+    const byHash = compareDilithiumSigs(
+      { pubkey: pubkeyA, leafHash: leafHigh, signature: sig },
+      { pubkey: pubkeyB, leafHash: leafLow, signature: sig });
+    expect(Math.sign(byHash)).toBe(Math.sign(lexicographic(hash160(pubkeyA), hash160(pubkeyB))));
+    expect(Math.sign(byHash)).not.toBe(Math.sign(lexicographic(pubkeyA, pubkeyB)));
+  });
+
   it('orders control blocks shortest-first, not lexicographically', () => {
     // btq-core's ShortestVectorFirstComparator (src/script/signingprovider.h:18-26)
     // sorts by length before content, unlike the std::vector ordering the leaf
@@ -620,6 +649,84 @@ describe('finalize', () => {
       expect(again.hex).toBe(v.finalizedHex);
       expect(serializePsbt(again.psbt)).toEqual(decodeBase64(v.finalizedPsbt));
     }
+  });
+});
+
+describe('more signatures than the threshold needs', () => {
+  const v = vectors.overSigned;
+
+  it('records what btq-core does, which is emit all of them', () => {
+    // Measured, not reasoned about. The accumulator succeeds on sum >= m, so a
+    // third signature on a 2-of-3 is valid but unnecessary, and a finalizer
+    // could legitimately select m and drop the rest. btq-core does not:
+    // BuildDilithiumLeafWitness fills every slot it has a signature for
+    // (src/script/dilithium_leaf.cpp:163-173), and `finalizepsbt` emits all
+    // three. The cost is real — 816 vsize against 665 — but the transaction
+    // still relayed at the fee walletcreatefundedpsbt chose.
+    expect(v.signaturesInCombinedPsbt).toBe(3);
+    expect(v.signaturesEmittedByFinalize).toBe(3);
+    expect(v.finalizedWitness.map((w) => w.length / 2))
+      .toEqual([2421, 2421, 2421, 3960, 1]);
+    expect(v.vsize).toBeGreaterThan(v.vsizeWithTwoSignatures);
+    expect(v.relays).toBe(true);
+  });
+
+  it('matches btq-core byte-for-byte rather than selecting m itself', () => {
+    // Selecting exactly m would be defensible on size and on privacy, and it is
+    // the wrong call *here*: our transaction would differ from the one btq-core
+    // builds out of the same PSBT, so the two would disagree on the txid, and
+    // every byte-for-byte check in this file would be measuring our preference
+    // instead of the protocol. The place to avoid a surplus signature is before
+    // it exists — see the next test.
+    const combined = combinePsbts(v.singlySignedPsbts.map((s) => parsePsbt(s.psbt)));
+    expect(combined.inputs[0]!.dilithiumSigs.length).toBe(3);
+    const final = finalizePsbt(combined);
+    expect(final.hex).toBe(v.finalizedHex);
+    expect(final.psbt.inputs[0]!.finalScriptWitness!.map(hex)).toEqual(v.finalizedWitness);
+    expect(serializePsbtBase64(final.psbt)).toBe(v.finalizedPsbt);
+  });
+
+  it('does not create a surplus signature in the first place', () => {
+    // A third cosigner can see from the PSBT that the input is already
+    // finalizable, so the default is to add nothing: no extra 2424 witness
+    // bytes against a fee quoted before they existed, and no ML-DSA signature
+    // published for a cosigner who was not needed.
+    const twoOfThree = combinePsbts([
+      parsePsbt(v.singlySignedPsbts[0]!.psbt),
+      parsePsbt(v.singlySignedPsbts[1]!.psbt),
+    ]);
+    expect(inspectP2MRInput(twoOfThree, 0).status).toBe('finalizable');
+
+    const thirdSeed = seedOf(keyAt(v, 2));
+    expect(signPsbt(twoOfThree, [thirdSeed]).added).toBe(0);
+
+    // ...but the caller can ask for it, and then we are back to btq-core's bytes.
+    const forced = signPsbt(twoOfThree, [thirdSeed], { signWhenAlreadyFinalizable: true });
+    expect(forced.added).toBe(1);
+    expect(serializePsbtBase64(forced.psbt)).toBe(v.combinedPsbt);
+    expect(finalizePsbt(forced.psbt).hex).toBe(v.finalizedHex);
+  });
+
+  it('signs m of the keys and stops, even holding more than m', () => {
+    // The guard has to hold inside one call too: a wallet handed all three
+    // seeds at once would otherwise walk straight past the threshold and
+    // produce the 816-vsize spend rather than the 665-vsize one.
+    const allThree = v.keyIndexes.map((i) => hexToBytes(vectors.seeds[i]!));
+    const { psbt, added } = signPsbt(parsePsbt(v.unsignedPsbt), allThree);
+    expect(added).toBe(2);
+    expect(psbt.inputs[0]!.dilithiumSigs.length).toBe(2);
+    expect(finalizePsbt(psbt).complete).toBe(true);
+
+    const forced = signPsbt(parsePsbt(v.unsignedPsbt), allThree, { signWhenAlreadyFinalizable: true });
+    expect(forced.added).toBe(3);
+    expect(serializePsbtBase64(forced.psbt)).toBe(v.combinedPsbt);
+  });
+
+  it('still signs an input that is one signature short', () => {
+    // The guard must key on "already finalizable", not on "already signed".
+    const oneOfTwoNeeded = parsePsbt(v.singlySignedPsbts[0]!.psbt);
+    expect(inspectP2MRInput(oneOfTwoNeeded, 0).status).toBe('partially_signed');
+    expect(signPsbt(oneOfTwoNeeded, [seedOf(keyAt(v, 1))]).added).toBe(1);
   });
 });
 
