@@ -372,7 +372,7 @@ describe('k-of-n threshold sizing', () => {
       );
     }
     // The leaf script itself is not measured against the 15000-byte stack-item
-    // limit — IsWitnessStandard (src/policy/policy.cpp:294-311) pops the leaf
+    // limit — IsWitnessStandard (src/policy/policy.cpp:302-308) pops the leaf
     // and the control block off before checking. Only the signature slots are,
     // and a 2421-byte signature has room to spare. Worth pinning because the
     // 20-of-20 leaf is 26384 bytes: if that limit did apply, the whole top of
@@ -508,10 +508,9 @@ describe('k-of-n threshold sizing', () => {
   it('prices the slots the finalizer will really fill, not always exactly m', () => {
     // The accumulator passes on sum >= m, and a PSBT can carry up to 20 partial
     // signatures per input (src/psbt.h:83). A finalizer that emits every
-    // signature it holds builds a witness bigger than an m-slot quote — and an
-    // 18% shortfall puts the transaction under the relay floor, where it simply
-    // never goes out. So the count is a parameter with an m default, not an
-    // assumption baked into the arithmetic.
+    // signature it holds builds a witness bigger than the m-slot quote. So the
+    // count is a parameter with an m default, not an assumption baked into the
+    // arithmetic.
     expect(thresholdWitnessBytes(2, 3, 0, 3)).toBe(thresholdWitnessBytes(3, 3));
     const quoted = virtualSizeCeil(estimateMultisigTxWeight([{ m: 2, n: 3 }], 2));
     const actual = virtualSizeCeil(
@@ -519,6 +518,21 @@ describe('k-of-n threshold sizing', () => {
     );
     expect(quoted).toBe(689);
     expect(actual).toBe(840);
+    // And here is why it is a correctness bug rather than a sizing footnote:
+    // a fee computed for 689 vB at the relay floor pays 820 sat/kvB once the
+    // transaction is really 840 vB. Below the floor nothing forwards it, so the
+    // failure surfaces as a payment that silently never arrives — not as an
+    // error at signing time, where it could still be fixed.
+    const fee = feeForMultisigTx([{ m: 2, n: 3 }], 2, MIN_RELAY_SAT_PER_KVB);
+    expect(fee).toBe(689n);
+    const effectiveRate = Number((fee * 1000n) / BigInt(actual));
+    expect(effectiveRate).toBe(820);
+    expect(effectiveRate).toBeLessThan(MIN_RELAY_SAT_PER_KVB);
+    // Quoting the real slot count pays the floor, which is the whole point.
+    expect(
+      Number((feeForMultisigTx([{ m: 2, n: 3, signatures: 3 }], 2, MIN_RELAY_SAT_PER_KVB) * 1000n) /
+        BigInt(actual)),
+    ).toBeGreaterThanOrEqual(MIN_RELAY_SAT_PER_KVB);
     // Each extra signature replaces a 1-byte empty slot with 3 + 2421 bytes.
     expect(thresholdWitnessBytes(2, 3, 0, 3) - thresholdWitnessBytes(2, 3, 0, 2)).toBe(2423);
     // Fewer than m is not a spend at all, and more than n is not a witness.

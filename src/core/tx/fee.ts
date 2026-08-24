@@ -166,8 +166,9 @@ export function dustThreshold(): bigint {
  * post-quantum multisig is affordable here at all: a 2-of-3 spend costs 689 vB.
  *
  * Standardness holds for every shape up to 20-of-20. `IsWitnessStandard`
- * (`src/policy/policy.cpp:294-311`) pops the control block and the leaf script
- * off the stack *before* applying MAX_STANDARD_TAPSCRIPT_STACK_ITEM_SIZE
+ * (`src/policy/policy.cpp:302-308` — the two pops at :302-303, the size loop at
+ * :306-308) takes the control block and the leaf script off the stack *before*
+ * applying MAX_STANDARD_TAPSCRIPT_STACK_ITEM_SIZE
  * (15000, `src/policy/policy.h:48`), so the 26384-byte 20-of-20 leaf is not
  * measured against it; only the 2421-byte signature slots are, and they are
  * well under. The binding limit is MAX_STANDARD_TX_WEIGHT = 400000
