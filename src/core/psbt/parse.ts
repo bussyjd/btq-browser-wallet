@@ -256,6 +256,15 @@ function parseInput(entries: PsbtKeyValue[]): PsbtInput {
   return input;
 }
 
+/**
+ * Output maps are carried opaquely. btq-core validates some of their contents —
+ * it rebuilds and re-checks a `PSBT_OUT_TAP_TREE`, for instance — so our
+ * decoder is the more permissive of the two here. That is deliberate and it is
+ * not the outputs going unchecked: the transaction's actual outputs live in the
+ * global unsigned transaction, which is fully decoded and re-serialised above.
+ * What an output map holds is signing metadata for whoever owns that output,
+ * which this wallet never acts on and only has to hand back unaltered.
+ */
 function parseOutput(entries: PsbtKeyValue[]): PsbtOutput {
   return { other: entries };
 }
@@ -280,6 +289,8 @@ export function parsePsbt(raw: Uint8Array | string): Psbt {
       globals.push(entry);
     }
   }
+  // Also how PSBTv2 is refused: it moves the transaction into per-field globals
+  // and carries no 0x00 at all, so it lands here rather than being half-read.
   if (!unsignedTxBytes) throw psbtError('PSBT is missing its unsigned transaction');
 
   let tx;

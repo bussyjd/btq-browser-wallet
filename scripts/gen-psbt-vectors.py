@@ -15,6 +15,13 @@ feature_p2mr_dilithium_multisig.py uses, imported into the node with
 builds with randomized signing disabled (src/crypto/dilithium/ref/config.h:5)
 the 2421-byte signature values are reproducible byte-for-byte too.
 
+What is and is not reproducible: the co-signer keys, the leaf scripts, the
+merkle roots and the addresses are deterministic and come out identical on every
+run. The *transactions* do not — each run mines a fresh regtest chain and the
+funding and change addresses are random — so a regenerated file differs from the
+committed one byte for byte while asserting exactly the same things. Regenerating
+and re-running tests/unit/psbt.test.ts is therefore a real check, not a tautology.
+
 The node is btq-core's own functional-test harness: its own datadir under
 --tmpdir, its own regtest chain, its own ports. It never touches a wallet or a
 node of yours.
