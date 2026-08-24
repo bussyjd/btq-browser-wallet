@@ -105,6 +105,31 @@ PSBT stays the right interchange format anyway — not because we can call btq-c
 because it is the format btq-core defines, it is what air-gapped and future hardware
 tooling will speak, and it lets a power user drop into btq-core if they choose.
 
+### The rails are in the RPC layer, and the rails do not come with you
+
+There is a second, sharper consequence of reimplementing rather than calling, and it is
+easy to miss because it looks like a validation detail.
+
+btq-core **does** reject a cosigner set containing the same key twice, with exactly the
+right reasoning (`src/wallet/rpc/dilithium.cpp:511-515`):
+
+> Duplicates would silently lower the effective threshold, since one private key could then
+> fill several accumulator slots.
+
+But that check lives **only** inside `createdilithiummultisig` — one of the two wallet RPCs
+an extension can never call. It is not in the script layer. `GetScriptForDilithiumThreshold`
+builds whatever list it is handed (`src/script/dilithium_leaf.cpp:13-25`), and
+`ParseThresholdAccumulator` validates key encoding and the key count but never compares
+keys to each other (`src/script/dilithium_leaf.cpp:40-77`) — the only `std::find` in that
+file is `FindPolicyKeyIndex` at `:130`, an unrelated lookup.
+
+So a client that builds or parses its own leaf inherits none of it, and a 2-of-3 whose key
+list contains one key twice is really a 1-of-2 that presents itself as a 2-of-3. **Every
+safety property btq-core enforces at the RPC boundary must be re-implemented at the point
+where this wallet builds and where it verifies** — see §9. That is the concrete cost of
+btq-core being an oracle rather than a dependency, and it is a cost paid in code we have to
+write, not in features we lose.
+
 Two pieces of the existing crypto layer already generalize and are the reason this is
 tractable: `tapLeafHash()` takes an arbitrary script
 (`src/core/script/p2mr.ts:55`), and `commitsToProgram()` already walks a multi-level merkle
@@ -155,7 +180,7 @@ Two mechanical details a finalizer must get right:
 ## 4. Two footguns btq-core does not close
 
 **Key order is caller-supplied and unsorted.** `createdilithiummultisig` parses the pubkey
-array in the order given, rejects duplicates (`src/wallet/rpc/dilithium.cpp:512-515`), and
+array in the order given, rejects duplicates (`src/wallet/rpc/dilithium.cpp:511-515`), and
 hands the list straight to `GetScriptForDilithiumThreshold` in that order
 (`:519`). Its own help text says the quiet part out loud
 (`src/wallet/rpc/dilithium.cpp:450-453`):
@@ -447,15 +472,20 @@ paths.** Cosigner independence rests entirely on the seeds being independent —
 because both would sign with the same key and a 2-of-3 would be a 2-of-3 in name and a
 1-of-1 in fact.
 
-An enrollment UI must actively check for this rather than assume it. It is cheap: reject
-duplicate public keys in the key list (btq-core already does this much,
-`src/wallet/rpc/dilithium.cpp:512-515`, with the right reasoning — a duplicate "would
-silently lower the effective threshold, since one private key could then fill several
-accumulator slots"), and additionally reject the case where two cosigners' *entire pools*
-coincide, which is the signature of a copied seed and which duplicate-checking one address
-would miss. Say it in words on the enrollment screen too. "Add a cosigner from a backup of
-this wallet" is a thing users will try, because on Bitcoin the account level would have
-saved them.
+An enrollment UI must actively check for this rather than assume it, and the check does not
+arrive for free — btq-core has it, but in `createdilithiummultisig`, which per §2 is a
+layer this wallet never reaches. Two things to enforce, both ours to write:
+
+- **Reject duplicate public keys in the key list.** btq-core's reasoning is the right one
+  (`src/wallet/rpc/dilithium.cpp:511-515`): a duplicate "would silently lower the effective
+  threshold, since one private key could then fill several accumulator slots."
+- **Reject the case where two cosigners' *entire pools* coincide.** This is the actual
+  signature of a copied seed, and per-address duplicate checking misses it — two wallets
+  from one seed disagree on nothing, so every address they enroll is a duplicate and the
+  first check fires on all of them without ever naming the cause.
+
+Say it in words on the enrollment screen too. "Add a cosigner from a backup of this wallet"
+is a thing users will try, because on Bitcoin the account level would have saved them.
 
 ---
 
@@ -473,6 +503,15 @@ Short and concrete, because this is where judgment shows.
   approves a payment they read as a refund.
 - **Refuse inputs the wallet does not recognise.** Foreign inputs are how a coordinator
   inflates the fee without touching a single output the user is looking at.
+- **Refuse a leaf whose key list contains a duplicate**, at build time *and* at verify
+  time. A leaf repeating one key is a lower threshold wearing a higher one's label: a
+  "2-of-3" with two identical slots is satisfied by one private key. btq-core rejects this
+  (`src/wallet/rpc/dilithium.cpp:511-515`) but only inside `createdilithiummultisig`, so as
+  §2 sets out, none of it reaches a client that builds its own leaf —
+  `ParseThresholdAccumulator` will parse such a leaf into a perfectly well-formed policy
+  claiming `m = 2, n = 3` (`src/script/dilithium_leaf.cpp:40-77`). This is the one item on
+  this list that a *correct-looking* PSBT can carry, which is what makes it worth stating
+  separately from key-order canonicalization.
 - **Show absolute fee *and* sat/vB.** A 2-of-3 witness is 8815 bytes; large witnesses make
   fee abuse easy to hide behind a plausible-looking rate. Both numbers, always.
 - **Cap partial signatures at 20 per input**, matching
