@@ -163,7 +163,17 @@ export function dustThreshold(): bigint {
  * The sizes below are witness bytes, and witness bytes are 16x cheaper than
  * non-witness bytes on BTQ (`src/consensus/consensus.h:21`
  * WITNESS_SCALE_FACTOR = 16, against Bitcoin's 4). That single constant is why
- * post-quantum multisig is affordable here at all: a 2-of-3 spend costs 689 vB.
+ * post-quantum multisig is affordable here at all: a 2-of-3 spend costs
+ * 689 vB — spending one input to two P2MR outputs.
+ *
+ * **Every vB figure in this file names its transaction shape, and they all
+ * mean one input and two P2MR outputs unless they say otherwise.** A vsize is
+ * a property of a whole transaction, not of an input, so a bare one is a right
+ * number waiting to be wrong somewhere else: the same 2-of-3 input paying two
+ * *P2WPKH* outputs is 665 vB, because a 31-byte output is 12 bytes smaller
+ * than P2MR's 43 and two of them take 24 bytes off the stripped size. Both
+ * figures are correct; only the unlabelled one is dangerous. Per-input costs
+ * are quoted in witness bytes or weight, which do not depend on the shape.
  *
  * Standardness holds for every shape up to 20-of-20. `IsWitnessStandard`
  * (`src/policy/policy.cpp:302-308` — the two pops at :302-303, the size loop at
@@ -172,7 +182,7 @@ export function dustThreshold(): bigint {
  * (15000, `src/policy/policy.h:48`), so the 26384-byte 20-of-20 leaf is not
  * measured against it; only the 2421-byte signature slots are, and they are
  * well under. The binding limit is MAX_STANDARD_TX_WEIGHT = 400000
- * (`src/policy/policy.h:30`), which fits 42 2-of-3 inputs.
+ * (`src/policy/policy.h:30`), which fits 42 2-of-3 inputs at two P2MR outputs.
  *
  * This module deliberately duplicates no script construction — it counts bytes
  * only, so that it stays independent of the leaf builder.
@@ -258,13 +268,24 @@ function assertDepth(depth: number): void {
 }
 
 /**
- * How many slots the finalizer will actually fill. Defaults to m because that
- * is what a wallet should emit, but the accumulator passes on `sum >= m`, and
- * btq-core's PSBT carries up to 20 partial signatures per input
- * (`src/psbt.h:83`). A finalizer that emits every signature it happens to hold
- * builds a witness larger than an m-slot quote — a 2-of-3 finalized with three
- * signatures is 840 vB, not 689 — and the transaction then falls under the
- * relay floor. So the count is a parameter, not an assumption.
+ * How many slots the finalizer will actually fill.
+ *
+ * **m is a floor, not a bound.** The accumulator passes on `sum >= m`, so an
+ * m-of-n input can legitimately carry anything from m to n signatures on
+ * chain — and btq-core's finalizer emits *every* signature the PSBT holds
+ * rather than selecting m of them. `BuildDilithiumLeafWitness`
+ * (`src/script/dilithium_leaf.cpp:163-173`) checks `signed_count >= policy.m`
+ * and then pushes all n slots; contrast the OP_CHECKMULTISIGDILITHIUM branch
+ * just above it (`:152-156`), which does break at exactly m. So a 2-of-3 that
+ * all three cosigners signed finalizes as a three-signature witness, and that
+ * is the reference behaviour a wallet has to match — a finalizer that dropped
+ * the surplus would derive a different txid from the same PSBT than btq-core.
+ *
+ * A quote built on m is therefore a lower bound on the broadcast size: a
+ * 2-of-3 spending to two P2MR outputs is 689 vB with two signatures and
+ * 840 vB with three. Defaulting to m is right for a wallet that signs no more
+ * than it needs, but the count belongs to the finalizer, so it is a parameter
+ * rather than an assumption baked into the arithmetic.
  */
 function assertSignatures(signatures: number, m: number, n: number): void {
   if (!Number.isInteger(signatures) || signatures < m || signatures > n) {
@@ -335,8 +356,12 @@ export interface ThresholdInput {
 }
 
 /**
- * Witness bytes for one m-of-n input: n signature slots (m filled, n - m
- * empty), then the leaf script, then the control block.
+ * Witness bytes for one m-of-n input: n signature slots (`signatures` filled,
+ * the rest empty), then the leaf script, then the control block.
+ *
+ * `signatures` defaults to m, which makes the result a *lower bound* rather
+ * than a ceiling — btq-core's finalizer emits every signature the PSBT holds,
+ * up to n. See `assertSignatures`. Pass the real count whenever it is known.
  *
  * Slot order is the finalizer's problem, not the sizer's — an empty slot is
  * 1 byte wherever it sits.
@@ -382,6 +407,14 @@ export function validationWeightSlack(input: ThresholdInput): number {
  * single-key input is the same size, this takes the inputs themselves: a real
  * multisig wallet may hold 2-of-3 and 3-of-5 coins at once, and the two do not
  * cost the same.
+ *
+ * `outputs` is a count of *P2MR* outputs at `P2MR_OUTPUT_SIZE` (43 bytes)
+ * each; a transaction paying some other output type is a different size, so
+ * every vB figure quoted for this function names the shape it assumes.
+ *
+ * An input whose `signatures` is left to default to `m` is priced at its
+ * minimum — see `assertSignatures`. The result is a lower bound on what a
+ * btq-core finalizer will actually broadcast.
  */
 export function estimateMultisigTxWeight(
   inputs: readonly ThresholdInput[],
@@ -401,8 +434,9 @@ export function estimateMultisigTxWeight(
  * The largest number of inputs of one witness size that still fits under
  * MAX_STANDARD_TX_WEIGHT. The fixed overhead of a transaction is paid once,
  * not once per input, so this is not `MAX_STANDARD_TX_WEIGHT` divided by a
- * one-input transaction's weight — that mistake charges ~1538 WU of overhead
- * 42 times over and answers 36 where the truth is 42.
+ * one-input transaction's weight — that mistake charges the ~1538 WU of
+ * overhead (at two P2MR outputs) 42 times over and answers 36 where the truth
+ * is 42.
  *
  * The formula validates itself: fed the single-key witness it must reproduce
  * `MAX_P2MR_INPUTS`, a constant this module has shipped and relied on since
@@ -429,8 +463,9 @@ export function maxInputsForWitness(witnessBytes: number, outputs = 2): number {
 
 /**
  * The multisig analogue of `MAX_P2MR_INPUTS`, which cannot be a constant
- * because the answer depends on the shape: 42 for a 2-of-3, 27 for a 3-of-5,
- * 5 for a 20-of-20.
+ * because the answer depends on the shape twice over — on the input's m-of-n,
+ * and on `outputs`. At two P2MR outputs: 42 for a 2-of-3, 48 for a 2-of-2,
+ * 27 for a 3-of-5, 5 for a 20-of-20.
  */
 export function maxStandardThresholdInputs(input: ThresholdInput, outputs = 2): number {
   return maxInputsForWitness(witnessBytesFor(input), outputs);

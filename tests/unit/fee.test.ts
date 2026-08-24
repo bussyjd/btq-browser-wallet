@@ -345,6 +345,7 @@ describe('k-of-n threshold sizing', () => {
   it('the 16x witness discount is what keeps post-quantum multisig affordable', () => {
     // Everything here is computed from the estimator, so the comparison fails
     // if the witness arithmetic is wrong rather than merely restating literals.
+    // One input, two P2MR outputs — a vsize means nothing without its shape.
     const multisig = virtualSizeCeil(estimateMultisigTxWeight([{ m: 2, n: 3 }], 2));
     const singleKey = virtualSizeCeil(estimateP2mrTxWeight(1, 2));
     expect(multisig).toBe(689);
@@ -411,9 +412,10 @@ describe('k-of-n threshold sizing', () => {
   });
 
   it('42 2-of-3 inputs fit in one standard transaction, 43 do not', () => {
-    // The multisig analogue of MAX_P2MR_INPUTS. It is not 400000/11009 = 36:
-    // the fixed overhead of a transaction is paid once, not once per input, so
-    // the marginal cost of an input is 41*16 + 8815 = 9471 WU.
+    // The multisig analogue of MAX_P2MR_INPUTS, at two P2MR outputs. It is not
+    // 400000/11009 = 36: the fixed overhead of a transaction is paid once, not
+    // once per input, so the marginal cost of an input is 41*16 + 8815 = 9471
+    // WU — a weight, which unlike a vsize does not depend on the shape.
     const inputs = (k: number): ThresholdInput[] =>
       Array.from({ length: k }, () => ({ m: 2, n: 3 }));
     const limit = maxStandardThresholdInputs({ m: 2, n: 3 }, 2);
@@ -479,8 +481,9 @@ describe('k-of-n threshold sizing', () => {
     const flat = thresholdWitnessBytes(2, 3, 0);
     expect(thresholdWitnessBytes(2, 3, 1) - flat).toBe(32);
     expect(thresholdWitnessBytes(2, 3, 2) - flat).toBe(64);
-    // Cheap in vsize terms: a second leaf costs 2 vB to spend and nothing at all
-    // if never used, because the address is 32 bytes of merkle root either way.
+    // Cheap in vsize terms: a second leaf costs 2 vB to spend (32 witness bytes,
+    // so 2 vB whatever the outputs are) and nothing at all if never used,
+    // because the address is 32 bytes of merkle root either way.
     expect(
       virtualSizeCeil(estimateMultisigTxWeight([{ m: 2, n: 3, depth: 1 }], 2)) - 689,
     ).toBe(2);
@@ -506,11 +509,19 @@ describe('k-of-n threshold sizing', () => {
   });
 
   it('prices the slots the finalizer will really fill, not always exactly m', () => {
-    // The accumulator passes on sum >= m, and a PSBT can carry up to 20 partial
-    // signatures per input (src/psbt.h:83). A finalizer that emits every
-    // signature it holds builds a witness bigger than the m-slot quote. So the
-    // count is a parameter with an m default, not an assumption baked into the
-    // arithmetic.
+    // All vB figures here are for one input paying two P2MR outputs.
+    //
+    // m is a floor, not a bound. btq-core's finalizer emits every signature the
+    // PSBT holds rather than selecting m of them: BuildDilithiumLeafWitness
+    // (src/script/dilithium_leaf.cpp:163-173) checks signed_count >= policy.m
+    // and then pushes all n slots — unlike the OP_CHECKMULTISIGDILITHIUM branch
+    // at :152-156, which does break at m. So a surplus signature is not a
+    // wallet bug to be swept up at finalize time; it is the reference
+    // behaviour, and a finalizer that dropped it would derive a different txid
+    // from the same PSBT than btq-core does. The defence is therefore either to
+    // quote for the real signature count (this parameter) or to refuse the
+    // surplus at *signing* time — never to silently discard it while
+    // finalizing.
     expect(thresholdWitnessBytes(2, 3, 0, 3)).toBe(thresholdWitnessBytes(3, 3));
     const quoted = virtualSizeCeil(estimateMultisigTxWeight([{ m: 2, n: 3 }], 2));
     const actual = virtualSizeCeil(
@@ -544,7 +555,8 @@ describe('k-of-n threshold sizing', () => {
   it('a heterogeneous input set is the sum of its inputs, not a multiple of one', () => {
     // This is the reason estimateMultisigTxWeight takes the inputs rather than
     // a count: a wallet holding a 2-of-3 and a 3-of-5 coin would be badly
-    // under- or over-charged by any single per-input figure.
+    // under- or over-charged by any single per-input figure. Two inputs, two
+    // P2MR outputs throughout.
     const mixed = estimateMultisigTxWeight([{ m: 2, n: 3 }, { m: 3, n: 5 }], 2);
     const perInput = (m: number, n: number) =>
       41 * WITNESS_SCALE_FACTOR + thresholdWitnessBytes(m, n);
@@ -563,6 +575,9 @@ describe('k-of-n threshold sizing', () => {
   });
 
   it('feeForMultisigTx charges ceil(weight/16) and enforces the same relay floor', () => {
+    // 689 vB is one 2-of-3 input paying two P2MR outputs; the same input paying
+    // two P2WPKH outputs is 665 vB, and a fee quoted for one shape does not
+    // transfer to the other.
     const weight = estimateMultisigTxWeight([{ m: 2, n: 3 }], 2);
     expect(feeForMultisigTx([{ m: 2, n: 3 }], 2, 1000)).toBe(689n);
     expect(feeForMultisigTx([{ m: 2, n: 3 }], 2)).toBe(689n);
@@ -615,6 +630,31 @@ describe('k-of-n threshold sizing', () => {
     expect(witnessFieldBytes([])).toBe(1);
     expect(() => estimateMultisigTxWeight([{ m: 2, n: 3 }], -1)).toThrow(WalletError);
     expect(() => estimateMultisigTxWeight([{ m: 2, n: 3 }], 1.5)).toThrow(WalletError);
+  });
+
+  it('a vsize belongs to a transaction shape, not to an input', () => {
+    // The same 2-of-3 input costs 689 vB paying two P2MR outputs and 665 vB
+    // paying two P2WPKH ones, because a 31-byte output is 12 bytes smaller than
+    // P2MR's 43 and the difference is charged at full weight. Both are right;
+    // an unlabelled figure is what turns one into the other's bug. This module
+    // models P2MR outputs, so it is the 689 that its callers should see.
+    const p2wpkhOutputSize = 8 + 1 + 22; // value + compact script + OP_0 <20>
+    expect(P2MR_OUTPUT_SIZE - p2wpkhOutputSize).toBe(12);
+    const witness = thresholdWitnessBytes(2, 3);
+    const vsizeWith = (outputSize: number, slots = 2): number => {
+      const stripped = 4 + 1 + 41 + 1 + 2 * outputSize + 4;
+      const w = thresholdWitnessBytes(2, 3, 0, slots);
+      return virtualSizeCeil(transactionWeight(stripped, stripped + 2 + w));
+    };
+    expect(vsizeWith(P2MR_OUTPUT_SIZE)).toBe(689);
+    expect(vsizeWith(p2wpkhOutputSize)).toBe(665);
+    // The over-signed delta is the same 151 vB under either shape, because it
+    // is a witness-only difference.
+    expect(vsizeWith(P2MR_OUTPUT_SIZE, 3) - vsizeWith(P2MR_OUTPUT_SIZE)).toBe(151);
+    expect(vsizeWith(p2wpkhOutputSize, 3) - vsizeWith(p2wpkhOutputSize)).toBe(151);
+    // And the estimator agrees with the P2MR row, which is the shape it models.
+    expect(virtualSizeCeil(estimateMultisigTxWeight([{ m: 2, n: 3 }], 2))).toBe(689);
+    expect(witness).toBe(8815);
   });
 
   it('leaves the single-key estimator exactly as it was', () => {
